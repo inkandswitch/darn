@@ -1,0 +1,21 @@
+# Build artifacts
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Claude session artifacts
+.ignore/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+*.profraw

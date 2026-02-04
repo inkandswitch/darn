@@ -1,0 +1,39 @@
+[package]
+name = "darn_cli"
+description = "CLI for darn - CRDT-backed filesystem management"
+authors.workspace = true
+categories.workspace = true
+edition.workspace = true
+keywords.workspace = true
+license.workspace = true
+readme = "README.md"
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "darn"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bs58.workspace = true
+clap.workspace = true
+cliclack.workspace = true
+console.workspace = true
+darn_core.workspace = true
+future_form.workspace = true
+getrandom.workspace = true
+sedimentree_core.workspace = true
+sedimentree_fs_storage.workspace = true
+subduction_core.workspace = true
+subduction_websocket.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]

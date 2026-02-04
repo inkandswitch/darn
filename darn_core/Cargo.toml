@@ -1,0 +1,44 @@
+[package]
+name = "darn_core"
+description = "Core library for darn - CRDT-backed filesystem management"
+
+authors.workspace = true
+categories.workspace = true
+edition.workspace = true
+keywords.workspace = true
+license.workspace = true
+readme = "README.md"
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+automerge.workspace = true
+automerge_sedimentree.workspace = true
+blake3.workspace = true
+bs58.workspace = true
+dirs.workspace = true
+future_form.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+ignore.workspace = true
+minicbor.workspace = true
+notify-debouncer-mini.workspace = true
+sedimentree_core.workspace = true
+sedimentree_fs_storage.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+subduction_core.workspace = true
+subduction_websocket.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tungstenite.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+bolero.workspace = true
+tempfile.workspace = true
