@@ -17,7 +17,7 @@ rust-version = "1.90"
 
 [workspace.dependencies]
 # Local crates
-darn_core = { path = "darn_core" }
+darn_core = { version = "0.2.0", path = "darn_core" }
 
 anyhow = "1.0"
 automerge = "0.7.3"
