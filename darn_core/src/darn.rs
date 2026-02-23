@@ -897,24 +897,40 @@ impl Darn {
 
     /// Discover and track new (untracked, non-ignored) files.
     ///
-    /// Walks the workspace and finds files that are not in the manifest
-    /// and not ignored by `.darnignore`. For each new file, it creates
-    /// a sedimentree document and adds it to the manifest.
+    /// Scan for new untracked files without ingesting them.
+    ///
+    /// Returns paths of files that could be tracked. This is fast and has no
+    /// side effects—use `ingest_files()` to actually process and store them.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if ignore rules cannot be loaded.
+    pub fn scan_new_files(&self, manifest: &Manifest) -> Result<Vec<PathBuf>, DiscoverError> {
+        Ok(discover::scan_new_files(&self.root, manifest)?)
+    }
+
+    /// Ingest files into storage and add to manifest.
+    ///
+    /// Takes a list of paths (from `scan_new_files()`) and processes them:
+    /// reads content, converts to Automerge, stores in sedimentree, updates
+    /// directory tree, and adds to manifest.
     ///
     /// Files are processed in parallel for performance.
     ///
     /// # Arguments
     ///
+    /// * `paths` - Paths to ingest (from `scan_new_files()`)
     /// * `manifest` - The manifest to update with new files
     /// * `on_progress` - Callback for progress updates
     /// * `cancel` - Cancellation token; if cancelled, returns immediately with partial results
     ///
     /// # Errors
     ///
-    /// Returns an error if file discovery fails fatally (e.g., can't read ignore rules).
+    /// Returns an error if ingestion fails fatally.
     /// Individual file errors are collected in the result.
-    pub async fn discover_new_files<F>(
+    pub async fn ingest_files<F>(
         &self,
+        paths: Vec<PathBuf>,
         manifest: &mut Manifest,
         on_progress: F,
         cancel: &CancellationToken,
@@ -922,14 +938,15 @@ impl Darn {
     where
         F: Fn(DiscoverProgress<'_>) + Send + Sync,
     {
-        let (discovered, errors, cancelled) = discover::discover_files_parallel(
+        let (discovered, errors, cancelled) = discover::ingest_files_parallel(
+            paths,
             &self.root,
             &self.subduction,
             manifest,
             on_progress,
             cancel,
         )
-        .await?;
+        .await;
 
         // Add discovered files to manifest
         let new_files: Vec<PathBuf> = discovered

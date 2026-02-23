@@ -5,8 +5,9 @@
 #![allow(clippy::large_futures)]
 
 use std::{
+    collections::BTreeMap,
     fmt::Write as _,
-    path::Path, collections::BTreeMap,
+    path::{Path, PathBuf},
     sync::{Arc, atomic::{AtomicUsize, Ordering}},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -105,7 +106,7 @@ fn format_paths_as_tree(paths: &[std::path::PathBuf]) -> String {
 }
 
 /// Initialize a new `darn` workspace.
-pub(crate) async fn init(path: &Path) -> anyhow::Result<()> {
+pub(crate) async fn init(path: &Path) -> eyre::Result<()> {
     cliclack::intro("darn init")?;
 
     // Initialize workspace structure
@@ -181,35 +182,24 @@ pub(crate) async fn init(path: &Path) -> anyhow::Result<()> {
 /// 3. Connect to all global peers
 /// 4. Sync root directory sedimentree, then recursively sync and write files
 #[allow(clippy::too_many_lines)]
-pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path) -> anyhow::Result<()> {
+pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path) -> eyre::Result<()> {
     cliclack::intro("darn clone")?;
 
-    // Step 1: Parse root directory ID
-    let root_id_bytes = bs58::decode(root_id_str)
-        .into_vec()
-        .map_err(|e| anyhow::anyhow!("invalid root directory ID (expected base58): {e}"))?;
-
-    if root_id_bytes.len() != 32 {
-        anyhow::bail!(
-            "root directory ID must be 32 bytes (got {})",
-            root_id_bytes.len()
-        );
-    }
-
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&root_id_bytes);
-    let root_dir_id = SedimentreeId::new(arr);
+    // Step 1: Parse root directory ID (accepts automerge URL or plain base58)
+    let root_id_bytes = parse_automerge_url(root_id_str)?;
+    let root_dir_id = SedimentreeId::new(root_id_bytes);
 
     let dim = Style::new().dim();
-    cliclack::log::info(format!(
-        "Root directory ID: {}",
-        dim.apply_to(root_id_str)
-    ))?;
+    let display_url = format!(
+        "automerge:{}",
+        bs58::encode(&root_id_bytes).with_check().into_string()
+    );
+    cliclack::log::info(format!("Root directory: {}", dim.apply_to(&display_url)))?;
 
     // Step 2: Check we have peers configured
     let peers = darn_core::peer::list_peers()?;
     if peers.is_empty() {
-        anyhow::bail!("No peers configured. Use `darn peer add` first.");
+        eyre::bail!("No peers configured. Use `darn peer add` first.");
     }
     let peer_names: Vec<_> = peers.iter().map(|p| p.name.as_str()).collect();
     cliclack::log::info(format!(
@@ -250,7 +240,7 @@ pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path) -> anyhow::Result<
 
     if connected_peers == 0 {
         spinner.stop("Failed to connect to any peers");
-        anyhow::bail!("Could not connect to any peers");
+        eyre::bail!("Could not connect to any peers");
     }
 
     spinner.stop(format!("Connected to {connected_peers} peer(s)"));
@@ -306,7 +296,7 @@ async fn clone_directory_recursive_with_sync(
     total_received: &mut usize,
     total_sent: &mut usize,
     progress: &cliclack::ProgressBar,
-) -> anyhow::Result<usize> {
+) -> eyre::Result<usize> {
     // First, sync this directory's sedimentree from peers
     let sync_result = subduction.sync_all(dir_id, true, timeout).await?;
     for (_peer_id, (success, stats, _errors)) in &sync_result {
@@ -423,7 +413,7 @@ async fn clone_directory_recursive_with_sync(
 }
 
 /// Add patterns to .darnignore.
-pub(crate) fn ignore(patterns: &[String]) -> anyhow::Result<()> {
+pub(crate) fn ignore(patterns: &[String]) -> eyre::Result<()> {
     let darn = Darn::open_without_subduction(Path::new("."))?;
     let root = darn.root();
 
@@ -454,7 +444,7 @@ pub(crate) fn ignore(patterns: &[String]) -> anyhow::Result<()> {
 }
 
 /// Remove patterns from .darnignore.
-pub(crate) fn unignore(patterns: &[String]) -> anyhow::Result<()> {
+pub(crate) fn unignore(patterns: &[String]) -> eyre::Result<()> {
     let darn = Darn::open_without_subduction(Path::new("."))?;
     let root = darn.root();
 
@@ -485,7 +475,7 @@ pub(crate) fn unignore(patterns: &[String]) -> anyhow::Result<()> {
 }
 
 /// Show tracked files as a tree with state indicators.
-pub(crate) fn tree() -> anyhow::Result<()> {
+pub(crate) fn tree() -> eyre::Result<()> {
     let darn = Darn::open_without_subduction(Path::new("."))?;
     let manifest = darn.load_manifest()?;
     let root = darn.root();
@@ -561,7 +551,7 @@ pub(crate) fn tree() -> anyhow::Result<()> {
 }
 
 /// Show stats for a tracked file.
-pub(crate) async fn stat(target: &str) -> anyhow::Result<()> {
+pub(crate) async fn stat(target: &str) -> eyre::Result<()> {
     let darn = Darn::open(Path::new(".")).await?;
     let manifest = darn.load_manifest()?;
     let root = darn.root();
@@ -643,14 +633,41 @@ pub(crate) async fn stat(target: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn try_parse_sedimentree_id(s: &str) -> Option<SedimentreeId> {
-    let bytes = bs58::decode(s).into_vec().ok()?;
+/// Parse an automerge URL or plain base58 into a 32-byte ID.
+///
+/// Accepts:
+/// - `automerge:<base58check>` (with checksum validation)
+/// - Plain base58 (no checksum, for backward compatibility)
+///
+/// # Errors
+///
+/// Returns an error if the input is invalid or not 32 bytes.
+fn parse_automerge_url(s: &str) -> eyre::Result<[u8; 32]> {
+    let bytes = if let Some(encoded) = s.strip_prefix("automerge:") {
+        // Automerge URL format with base58check
+        bs58::decode(encoded)
+            .with_check(None)
+            .into_vec()
+            .map_err(|e| eyre::eyre!("invalid automerge URL: {e}"))?
+    } else {
+        // Plain base58 (no checksum)
+        bs58::decode(s)
+            .into_vec()
+            .map_err(|e| eyre::eyre!("invalid base58: {e}"))?
+    };
+
     if bytes.len() != 32 {
-        return None;
+        eyre::bail!("ID must be 32 bytes (got {})", bytes.len());
     }
+
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&bytes);
-    Some(SedimentreeId::new(arr))
+    Ok(arr)
+}
+
+/// Try to parse a sedimentree ID from an automerge URL or plain base58.
+fn try_parse_sedimentree_id(s: &str) -> Option<SedimentreeId> {
+    parse_automerge_url(s).ok().map(SedimentreeId::new)
 }
 
 /// Sync with peers.
@@ -664,7 +681,7 @@ pub(crate) async fn sync_cmd(
     peer_name: Option<&str>,
     dry_run: bool,
     force: bool,
-) -> anyhow::Result<()> {
+) -> eyre::Result<()> {
     info!(?peer_name, dry_run, force, "Syncing");
 
     if dry_run {
@@ -676,99 +693,121 @@ pub(crate) async fn sync_cmd(
     let darn = Darn::open(Path::new(".")).await?;
     let mut manifest = darn.load_manifest()?;
 
-    // Step 1: Discover new files (auto-track non-ignored files)
+    // Phase 1: Scan for new files (fast, no side effects)
     let spinner = cliclack::spinner();
     spinner.start("Scanning for new files...");
 
-    // Set up cancellation token for Ctrl+C
-    let cancel_token = CancellationToken::new();
-    let cancel_token_clone = cancel_token.clone();
-
-    // Handle Ctrl+C to cancel discovery
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            cancel_token_clone.cancel();
+    let candidates = match darn.scan_new_files(&manifest) {
+        Ok(c) => c,
+        Err(e) => {
+            spinner.stop("Scan failed");
+            cliclack::log::warning(format!("File scan error: {e}"))?;
+            return continue_sync(darn, manifest, peer_name).await;
         }
-    });
-
-    // Progress callback updates spinner with last completed file and in-flight count
-    let progress_callback = |progress: DiscoverProgress<'_>| {
-        let msg = match (progress.last_completed, progress.in_flight) {
-            (Some(file), 0) => format!(
-                "Scanning ({}/{})... {}",
-                progress.completed,
-                progress.total,
-                file.display()
-            ),
-            (Some(file), n) => format!(
-                "Scanning ({}/{})... {} (+{n} in progress)",
-                progress.completed,
-                progress.total,
-                file.display()
-            ),
-            (None, n) if n > 0 => format!(
-                "Scanning ({}/{})... {n} in progress",
-                progress.completed,
-                progress.total
-            ),
-            (None, _) => format!("Scanning ({}/{})...", progress.completed, progress.total),
-        };
-        spinner.set_message(msg);
     };
 
-    let result = darn
-        .discover_new_files(&mut manifest, progress_callback, &cancel_token)
-        .await;
+    spinner.stop(format!("Found {} new file(s)", candidates.len()));
 
-    match result {
-        Ok(DiscoverResult { new_files, errors, cancelled }) => {
-            spinner.clear();
+    // Show candidates and ask for confirmation before ingesting
+    if !candidates.is_empty() {
+        // Convert absolute paths to relative for display
+        let relative_paths: Vec<PathBuf> = candidates
+            .iter()
+            .filter_map(|p| p.strip_prefix(darn.root()).ok().map(Path::to_path_buf))
+            .collect();
 
-            // Handle cancellation
-            if cancelled {
-                cliclack::log::warning("Discovery cancelled")?;
-                return Ok(());
-            }
+        let tree = format_paths_as_tree(&relative_paths);
+        cliclack::note(format!("Found {} new file(s)", candidates.len()), &tree)?;
 
-            // Report any errors that occurred during discovery
-            if !errors.is_empty() {
-                for (path, err) in &errors {
-                    cliclack::log::warning(format!("{}: {}", path.display(), err))?;
+        // Confirm unless --force
+        let should_track = force
+            || cliclack::confirm("Track these files?")
+                .initial_value(true)
+                .interact()?;
+
+        if should_track {
+            // Phase 2: Ingest files (only after confirmation)
+            let spinner = cliclack::spinner();
+            spinner.start("Processing files...");
+
+            // Set up cancellation token for Ctrl+C
+            let cancel_token = CancellationToken::new();
+            let cancel_token_clone = cancel_token.clone();
+
+            tokio::spawn(async move {
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    cancel_token_clone.cancel();
                 }
-            }
+            });
 
-            if !new_files.is_empty() {
-                // Show what was found as a tree
-                let tree = format_paths_as_tree(&new_files);
-                cliclack::note(format!("Found {} new file(s)", new_files.len()), &tree)?;
-
-                // Confirm unless --force
-                let should_track = if force {
-                    true
-                } else {
-                    cliclack::confirm("Track these files?")
-                        .initial_value(true)
-                        .interact()?
-                };
-
-                if should_track {
-                    darn.save_manifest(&manifest)?;
-                    cliclack::log::success(format!("Tracking {} new file(s)", new_files.len()))?;
-                    for path in &new_files {
-                        info!(path = %path.display(), "Discovered file");
+            // Progress callback updates spinner
+            let progress_callback = |progress: DiscoverProgress<'_>| {
+                let msg = match (progress.last_completed, progress.in_flight) {
+                    (Some(file), 0) => format!(
+                        "Processing ({}/{})... {}",
+                        progress.completed,
+                        progress.total,
+                        file.display()
+                    ),
+                    (Some(file), n) => format!(
+                        "Processing ({}/{})... {} (+{n} in progress)",
+                        progress.completed,
+                        progress.total,
+                        file.display()
+                    ),
+                    (None, n) if n > 0 => format!(
+                        "Processing ({}/{})... {n} in progress",
+                        progress.completed,
+                        progress.total
+                    ),
+                    (None, _) => {
+                        format!("Processing ({}/{})...", progress.completed, progress.total)
                     }
-                } else {
-                    // Reload manifest to discard changes
-                    let manifest_reloaded = darn.load_manifest()?;
-                    cliclack::log::remark("Skipped new files. Use 'darn ignore <pattern>' to ignore them.")?;
-                    // Use the reloaded manifest for the rest of the sync
-                    return continue_sync(darn, manifest_reloaded, peer_name).await;
+                };
+                spinner.set_message(msg);
+            };
+
+            let result = darn
+                .ingest_files(candidates, &mut manifest, progress_callback, &cancel_token)
+                .await;
+
+            match result {
+                Ok(DiscoverResult {
+                    new_files,
+                    errors,
+                    cancelled,
+                }) => {
+                    spinner.clear();
+
+                    if cancelled {
+                        cliclack::log::warning("Processing cancelled")?;
+                        return Ok(());
+                    }
+
+                    // Report any errors
+                    for (path, err) in &errors {
+                        cliclack::log::warning(format!("{}: {}", path.display(), err))?;
+                    }
+
+                    if !new_files.is_empty() {
+                        darn.save_manifest(&manifest)?;
+                        cliclack::log::success(format!(
+                            "Tracking {} new file(s)",
+                            new_files.len()
+                        ))?;
+                        for path in &new_files {
+                            info!(path = %path.display(), "Tracked file");
+                        }
+                    }
+                }
+                Err(e) => {
+                    spinner.clear();
+                    cliclack::log::warning(format!("Processing error: {e}"))?;
                 }
             }
-        }
-        Err(e) => {
-            spinner.clear();
-            cliclack::log::warning(format!("File discovery error: {e}"))?;
+        } else {
+            cliclack::log::remark("Skipped. Use 'darn ignore <pattern>' to ignore them.")?;
+            // No cleanup needed - nothing was stored!
         }
     }
 
@@ -781,7 +820,7 @@ async fn continue_sync(
     darn: Darn,
     mut manifest: Manifest,
     peer_name: Option<&str>,
-) -> anyhow::Result<()> {
+) -> eyre::Result<()> {
 
     // Refresh all modified files (commit local changes)
     let spinner = cliclack::spinner();
@@ -814,7 +853,7 @@ async fn continue_sync(
             let peer_name = PeerName::new(name)?;
             let p = unopened
                 .get_peer(&peer_name)?
-                .ok_or_else(|| anyhow::anyhow!("peer not found: {name}"))?;
+                .ok_or_else(|| eyre::eyre!("peer not found: {name}"))?;
             vec![p]
         }
         None => unopened.list_peers()?,
@@ -953,7 +992,7 @@ async fn sync_peer_with_progress(
     darn: &Darn,
     peer: &Peer,
     manifest: &Manifest,
-) -> anyhow::Result<darn_core::sync_progress::SyncSummary> {
+) -> eyre::Result<darn_core::sync_progress::SyncSummary> {
     let progress_bar = cliclack::progress_bar(1);
     let current = Arc::new(AtomicUsize::new(0));
     let total = Arc::new(AtomicUsize::new(1));
@@ -1008,7 +1047,7 @@ async fn sync_peer_with_progress(
 }
 
 /// Dry-run mode: show what would be synced without actually doing it.
-fn sync_dry_run(peer_name: Option<&str>) -> anyhow::Result<()> {
+fn sync_dry_run(peer_name: Option<&str>) -> eyre::Result<()> {
     let darn = Darn::open_without_subduction(Path::new("."))?;
     let manifest = darn.load_manifest()?;
     let root = darn.root();
@@ -1164,7 +1203,7 @@ fn format_timestamp(ts: darn_core::unix_timestamp::UnixTimestamp) -> String {
 /// - Modified tracked files: Auto-refreshed to CRDT storage
 /// - Optionally syncs with peers at the specified interval
 #[allow(clippy::too_many_lines)]
-pub(crate) async fn watch(sync_interval: &std::time::Duration, no_track: bool) -> anyhow::Result<()> {
+pub(crate) async fn watch(sync_interval: &std::time::Duration, no_track: bool) -> eyre::Result<()> {
     let darn = Darn::open(Path::new(".")).await?;
     let root = darn.root().to_path_buf();
     let mut manifest = darn.load_manifest()?;
@@ -1551,7 +1590,7 @@ async fn track_single_file(
     darn: &Darn,
     manifest: &mut Manifest,
     relative_path: &Path,
-) -> anyhow::Result<()> {
+) -> eyre::Result<()> {
     let full_path = darn.root().join(relative_path);
 
     // Create File from path
@@ -1584,7 +1623,7 @@ async fn track_single_file(
 
     let file_name = relative_path
         .file_name()
-        .ok_or_else(|| anyhow::anyhow!("path has no filename"))?
+        .ok_or_else(|| eyre::eyre!("path has no filename"))?
         .to_string_lossy();
 
     sedimentree::add_file_to_directory(
@@ -1614,7 +1653,7 @@ async fn track_single_file(
 }
 
 /// Add a peer.
-pub(crate) fn peer_add(name: &str, url: &str, peer_id: Option<&str>) -> anyhow::Result<()> {
+pub(crate) fn peer_add(name: &str, url: &str, peer_id: Option<&str>) -> eyre::Result<()> {
     let darn = Darn::open_without_subduction(Path::new("."))?;
 
     // Validate peer name
@@ -1630,10 +1669,10 @@ pub(crate) fn peer_add(name: &str, url: &str, peer_id: Option<&str>) -> anyhow::
         // Parse peer ID from base58
         let id_bytes = bs58::decode(id_str)
             .into_vec()
-            .map_err(|e| anyhow::anyhow!("invalid peer ID (expected base58): {e}"))?;
+            .map_err(|e| eyre::eyre!("invalid peer ID (expected base58): {e}"))?;
 
         if id_bytes.len() != 32 {
-            anyhow::bail!("peer ID must be 32 bytes (got {})", id_bytes.len());
+            eyre::bail!("peer ID must be 32 bytes (got {})", id_bytes.len());
         }
 
         let mut arr = [0u8; 32];
@@ -1662,7 +1701,7 @@ pub(crate) fn peer_add(name: &str, url: &str, peer_id: Option<&str>) -> anyhow::
 }
 
 /// List known peers.
-pub(crate) fn peer_list() -> anyhow::Result<()> {
+pub(crate) fn peer_list() -> eyre::Result<()> {
     let darn = Darn::open_without_subduction(Path::new("."))?;
     let peers = darn.list_peers()?;
 
@@ -1703,7 +1742,7 @@ pub(crate) fn peer_list() -> anyhow::Result<()> {
 }
 
 /// Remove a peer.
-pub(crate) fn peer_remove(name: &str) -> anyhow::Result<()> {
+pub(crate) fn peer_remove(name: &str) -> eyre::Result<()> {
     let darn = Darn::open_without_subduction(Path::new("."))?;
     let peer_name = PeerName::new(name)?;
 
@@ -1718,81 +1757,75 @@ pub(crate) fn peer_remove(name: &str) -> anyhow::Result<()> {
 }
 
 /// Show info about global config and current workspace.
-pub(crate) fn info() -> anyhow::Result<()> {
+pub(crate) fn info() -> eyre::Result<()> {
     let dim = Style::new().dim();
-    let bold = Style::new().bold();
 
     cliclack::intro("darn info")?;
 
-    // ═══════════════════════════════════════════════════════════════════════
     // Global Configuration
-    // ═══════════════════════════════════════════════════════════════════════
-
     let config_dir = darn_core::config::global_config_dir()?;
     let signer_dir = darn_core::config::global_signer_dir()?;
 
-    // Get peer ID
     let peer_id_str = match darn_core::signer::peer_id(&signer_dir) {
         Ok(peer_id) => bs58::encode(peer_id.as_bytes()).into_string(),
         Err(e) => format!("(error: {e})"),
     };
 
-    // Build global config table
-    println!();
-    println!("  {}", bold.apply_to("Global Configuration"));
-    println!("  ┌─────────────┬────────────────────────────────────────────────┐");
-    println!("  │ {:^11} │ {:^46} │", "Field", "Value");
-    println!("  ├─────────────┼────────────────────────────────────────────────┤");
-    println!(
-        "  │ {:<11} │ {:<46} │",
+    let global_table = format!(
+        "\
+┌─────────────┬──────────────────────────────────────────────────────────────┐
+│ {:^11} │ {:^60} │
+├─────────────┼──────────────────────────────────────────────────────────────┤
+│ {:<11} │ {:<60} │
+│ {:<11} │ {:<60} │
+└─────────────┴──────────────────────────────────────────────────────────────┘",
+        "Field",
+        "Value",
         "Config",
-        truncate_path(&config_dir.display().to_string(), 46)
-    );
-    println!(
-        "  │ {:<11} │ {:<46} │",
+        truncate_path(&config_dir.display().to_string(), 60),
         "Peer ID",
-        dim.apply_to(&peer_id_str)
+        &peer_id_str
     );
-    println!("  └─────────────┴────────────────────────────────────────────────┘");
+    cliclack::note("Global Configuration", global_table)?;
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // Peers
-    // ═══════════════════════════════════════════════════════════════════════
-
-    println!();
-    println!("  {}", bold.apply_to("Configured Peers"));
-
-    match darn_core::peer::list_peers() {
+    // Configured Peers
+    let peers_content = match darn_core::peer::list_peers() {
         Ok(peers) if peers.is_empty() => {
-            println!("  {}", dim.apply_to("(no peers configured)"));
+            dim.apply_to("(no peers configured)").to_string()
         }
         Ok(peers) => {
-            println!("  ┌────────────────┬────────────────────────────────────────┬──────────┐");
-            println!("  │ {:^14} │ {:^38} │ {:^8} │", "Name", "URL", "Mode");
-            println!("  ├────────────────┼────────────────────────────────────────┼──────────┤");
+            let mut table = String::new();
+            table.push_str(&format!(
+                "┌────────────────┬────────────────────────────────────────┬──────────┐\n"
+            ));
+            table.push_str(&format!(
+                "│ {:^14} │ {:^38} │ {:^8} │\n",
+                "Name", "URL", "Mode"
+            ));
+            table.push_str(&format!(
+                "├────────────────┼────────────────────────────────────────┼──────────┤\n"
+            ));
             for peer in &peers {
                 let mode = if peer.is_known() { "known" } else { "discover" };
-                println!(
-                    "  │ {:<14} │ {:<38} │ {:^8} │",
+                table.push_str(&format!(
+                    "│ {:<14} │ {:<38} │ {:^8} │\n",
                     truncate_str(&peer.name.to_string(), 14),
                     truncate_str(&peer.url, 38),
                     mode
-                );
+                ));
             }
-            println!("  └────────────────┴────────────────────────────────────────┴──────────┘");
+            table.push_str(&format!(
+                "└────────────────┴────────────────────────────────────────┴──────────┘"
+            ));
+            table
         }
         Err(e) => {
-            println!("  {}", dim.apply_to(format!("(error listing peers: {e})")));
+            dim.apply_to(format!("(error listing peers: {e})")).to_string()
         }
-    }
+    };
+    cliclack::note("Configured Peers", peers_content)?;
 
-    // ═══════════════════════════════════════════════════════════════════════
     // Workspace
-    // ═══════════════════════════════════════════════════════════════════════
-
-    println!();
-    println!("  {}", bold.apply_to("Workspace"));
-
     match Darn::open_without_subduction(Path::new(".")) {
         Ok(darn) => {
             let manifest = darn.load_manifest();
@@ -1809,34 +1842,40 @@ pub(crate) fn info() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| "(error)".to_string());
             let file_count = manifest.as_ref().map(|m| m.len()).unwrap_or(0);
 
-            println!("  ┌─────────────┬────────────────────────────────────────────────┐");
-            println!("  │ {:^11} │ {:^46} │", "Field", "Value");
-            println!("  ├─────────────┼────────────────────────────────────────────────┤");
-            println!(
-                "  │ {:<11} │ {:<46} │",
+            let workspace_table = format!(
+                "\
+┌─────────────┬──────────────────────────────────────────────────────────────┐
+│ {:^11} │ {:^60} │
+├─────────────┼──────────────────────────────────────────────────────────────┤
+│ {:<11} │ {:<60} │
+│ {:<11} │ {:<60} │
+│ {:<11} │ {:<60} │
+└─────────────┴──────────────────────────────────────────────────────────────┘",
+                "Field",
+                "Value",
                 "Root",
-                truncate_path(&darn.root().display().to_string(), 46)
-            );
-            println!(
-                "  │ {:<11} │ {:<46} │",
+                truncate_path(&darn.root().display().to_string(), 60),
                 "Root Dir ID",
-                dim.apply_to(&root_id_str)
-            );
-            println!(
-                "  │ {:<11} │ {:<46} │",
+                &root_id_str,
                 "Files",
                 format!("{file_count} tracked")
             );
-            println!("  └─────────────┴────────────────────────────────────────────────┘");
+            cliclack::note("Workspace", workspace_table)?;
 
             // Show tracked files if any
             if let Ok(manifest) = manifest {
                 if !manifest.is_empty() {
-                    println!();
-                    println!("  {}", bold.apply_to("Tracked Files"));
-                    println!("  ┌──────────────────────────────────────────┬────────┬─────────────────────┐");
-                    println!("  │ {:^40} │ {:^6} │ {:^19} │", "Path", "Type", "State");
-                    println!("  ├──────────────────────────────────────────┼────────┼─────────────────────┤");
+                    let mut files_table = String::new();
+                    files_table.push_str(
+                        "┌──────────────────────────────────────────┬────────┬─────────────────────┐\n",
+                    );
+                    files_table.push_str(&format!(
+                        "│ {:^40} │ {:^6} │ {:^19} │\n",
+                        "Path", "Type", "State"
+                    ));
+                    files_table.push_str(
+                        "├──────────────────────────────────────────┼────────┼─────────────────────┤\n",
+                    );
 
                     for entry in manifest.iter() {
                         let state = entry.state(darn.root());
@@ -1850,23 +1889,25 @@ pub(crate) fn info() -> anyhow::Result<()> {
                         } else {
                             "binary"
                         };
-                        println!(
-                            "  │ {:<40} │ {:^6} │ {:^19} │",
+                        files_table.push_str(&format!(
+                            "│ {:<40} │ {:^6} │ {:^19} │\n",
                             truncate_str(&entry.relative_path.display().to_string(), 40),
                             type_str,
                             state_str
-                        );
+                        ));
                     }
-                    println!("  └──────────────────────────────────────────┴────────┴─────────────────────┘");
+                    files_table.push_str(
+                        "└──────────────────────────────────────────┴────────┴─────────────────────┘",
+                    );
+                    cliclack::note("Tracked Files", files_table)?;
                 }
             }
         }
         Err(_) => {
-            println!("  {}", dim.apply_to("(not in a darn workspace)"));
+            cliclack::note("Workspace", dim.apply_to("(not in a darn workspace)"))?;
         }
     }
 
-    println!();
     cliclack::outro("")?;
 
     Ok(())

@@ -23,9 +23,7 @@ A CLI for managing CRDT-backed files with automatic conflict resolution and peer
 - **Local-first**: Works offline, syncs when connected
 - **Conflict-free**: CRDTs automatically merge concurrent edits
 - **P2P sync**: No central server required (though you can run one)
-- **Content-addressed**: Efficient deduplication and integrity verification
 - **Text collaboration**: Character-level merging for text files
-- **Encrypted sync**: Data encrypted in transit
 
 ## Quick Start
 

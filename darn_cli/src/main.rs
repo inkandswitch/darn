@@ -9,6 +9,7 @@
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use eyre::Result;
 use tracing_subscriber::{EnvFilter, fmt};
 
 mod commands;
@@ -16,7 +17,9 @@ mod setup;
 mod theme;
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<()> {
+    color_eyre::install()?;
+
     let cli = Cli::parse();
 
     // Silent by default, respects RUST_LOG, -v forces debug
@@ -82,7 +85,7 @@ enum Commands {
 
     /// Clone a workspace by root directory ID (syncs from global peers)
     Clone {
-        /// Root directory ID (base58) - get this from `darn info` on the source workspace
+        /// Automerge URL or base58 ID - get this from `darn info` on the source workspace
         root_id: String,
 
         /// Directory to clone into (defaults to current directory)
@@ -109,7 +112,7 @@ enum Commands {
 
     /// Show stats for a tracked file
     Stat {
-        /// File path or Sedimentree ID (base58)
+        /// File path or automerge URL
         target: String,
     },
 

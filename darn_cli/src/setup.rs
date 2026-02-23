@@ -15,7 +15,7 @@ use subduction_core::peer::id::PeerId;
 /// # Errors
 ///
 /// Returns an error if signer generation fails.
-pub(crate) fn ensure_signer() -> anyhow::Result<bool> {
+pub(crate) fn ensure_signer() -> eyre::Result<bool> {
     if config::global_signer_exists() {
         return Ok(true);
     }

@@ -1,7 +1,7 @@
 [package]
 name = "darn_cli"
 description = "CLI for darn - CRDT-backed filesystem management"
-version = "0.2.0"
+version = "0.2.1"
 
 authors.workspace = true
 categories.workspace = true
@@ -20,12 +20,13 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
-anyhow.workspace = true
 bs58.workspace = true
 clap.workspace = true
 cliclack.workspace = true
+color-eyre.workspace = true
 console.workspace = true
 darn_core.workspace = true
+eyre.workspace = true
 future_form.workspace = true
 getrandom.workspace = true
 sedimentree_core.workspace = true

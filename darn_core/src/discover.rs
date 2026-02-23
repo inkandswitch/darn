@@ -127,11 +127,27 @@ impl DiscoveredFile {
     }
 }
 
+/// Scan for new untracked files (fast, no side effects).
+///
+/// Returns paths of files that could be tracked. Does NOT read file contents
+/// or store anything. Call `ingest_files_parallel()` to actually process them.
+///
+/// # Errors
+///
+/// Returns an error if ignore patterns cannot be loaded.
+pub(crate) fn scan_new_files(
+    root: &Path,
+    manifest: &Manifest,
+) -> Result<Vec<PathBuf>, crate::ignore::IgnorePatternError> {
+    let ignore_rules = IgnoreRules::from_workspace_root(root)?;
+    Ok(collect_discovery_candidates(root, manifest, &ignore_rules))
+}
+
 /// Collect candidate files for discovery (fast, synchronous).
 ///
 /// Walks the directory tree, filters out ignored and already-tracked files,
 /// and returns a list of paths to process.
-pub(crate) fn collect_discovery_candidates(
+fn collect_discovery_candidates(
     root: &Path,
     manifest: &Manifest,
     ignore_rules: &IgnoreRules,
@@ -314,41 +330,43 @@ pub enum FileProcessError {
     Random(String),
 }
 
-/// Discover new files in parallel.
+/// Ingest files into storage in parallel.
+///
+/// Takes a list of paths (from `scan_new_files()`) and processes them:
+/// reads content, converts to Automerge, stores in sedimentree, and updates
+/// directory tree.
 ///
 /// # Arguments
 ///
+/// * `paths` - Paths to ingest (from `scan_new_files()`)
 /// * `root` - Workspace root directory
 /// * `subduction` - Subduction instance for storage
-/// * `manifest` - Current manifest (to check what's already tracked)
+/// * `manifest` - Current manifest (for root directory ID)
 /// * `on_progress` - Callback for progress updates
 /// * `cancel` - Cancellation token
 ///
 /// # Returns
 ///
-/// Returns discovered files, errors, and cancellation status.
-pub(crate) async fn discover_files_parallel<F>(
+/// Returns ingested files, errors, and cancellation status.
+pub(crate) async fn ingest_files_parallel<F>(
+    paths: Vec<PathBuf>,
     root: &Path,
     subduction: &DarnSubduction,
     manifest: &Manifest,
     on_progress: F,
     cancel: &CancellationToken,
-) -> Result<(Vec<DiscoveredFile>, Vec<(PathBuf, String)>, bool), crate::ignore::IgnorePatternError>
+) -> (Vec<DiscoveredFile>, Vec<(PathBuf, String)>, bool)
 where
     F: Fn(DiscoverProgress<'_>) + Send + Sync,
 {
-    let ignore_rules = IgnoreRules::from_workspace_root(root)?;
     let root_dir_id = manifest.root_directory_id();
-
-    // Phase 1: Collect candidates (fast, synchronous)
-    let candidates = collect_discovery_candidates(root, manifest, &ignore_rules);
-    let total = candidates.len();
+    let total = paths.len();
 
     if total == 0 {
-        return Ok((Vec::new(), Vec::new(), false));
+        return (Vec::new(), Vec::new(), false);
     }
 
-    // Phase 2: Process in parallel
+    // Process in parallel
     let concurrency = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
@@ -361,7 +379,7 @@ where
     let last_completed: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
 
     // Process files concurrently
-    stream::iter(candidates)
+    stream::iter(paths)
         .for_each_concurrent(concurrency, |path| {
             let dir_cache = &dir_cache;
             let results = Arc::clone(&results);
@@ -444,7 +462,7 @@ where
         Err(arc) => arc.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default(),
     };
 
-    Ok((final_results, final_errors, cancel.is_cancelled()))
+    (final_results, final_errors, cancel.is_cancelled())
 }
 
 #[cfg(test)]
