@@ -1,6 +1,8 @@
 [package]
 name = "darn_cli"
 description = "CLI for darn - CRDT-backed filesystem management"
+version = "0.2.0"
+
 authors.workspace = true
 categories.workspace = true
 edition.workspace = true
@@ -9,7 +11,6 @@ license.workspace = true
 readme = "README.md"
 repository.workspace = true
 rust-version.workspace = true
-version.workspace = true
 
 [[bin]]
 name = "darn"
