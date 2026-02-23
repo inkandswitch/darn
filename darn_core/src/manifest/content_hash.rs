@@ -8,7 +8,7 @@ use std::{
     path::Path,
 };
 
-use sedimentree_core::digest::Digest;
+use sedimentree_core::crypto::digest::Digest;
 
 /// Raw file content from the file system (before Automerge serialization).
 ///
@@ -40,7 +40,7 @@ impl FileSystemContent {
     #[must_use]
     pub fn digest(&self) -> Digest<Self> {
         let hash = blake3::hash(&self.0);
-        Digest::from_bytes(*hash.as_bytes())
+        Digest::force_from_bytes(*hash.as_bytes())
     }
 
     /// Reads file content from the given path.
@@ -60,7 +60,7 @@ impl FileSystemContent {
 #[must_use]
 pub fn hash_bytes(data: &[u8]) -> Digest<FileSystemContent> {
     let hash = blake3::hash(data);
-    Digest::from_bytes(*hash.as_bytes())
+    Digest::force_from_bytes(*hash.as_bytes())
 }
 
 /// Computes a digest of a file at the given path using streaming I/O.
@@ -76,5 +76,5 @@ pub fn hash_file(path: &Path) -> io::Result<Digest<FileSystemContent>> {
     let mut reader = BufReader::new(file);
     let mut hasher = blake3::Hasher::new();
     io::copy(&mut reader, &mut hasher)?;
-    Ok(Digest::from_bytes(*hasher.finalize().as_bytes()))
+    Ok(Digest::force_from_bytes(*hasher.finalize().as_bytes()))
 }

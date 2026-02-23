@@ -5,8 +5,8 @@
 
 use std::path::Path;
 
-use subduction_core::crypto::signer::MemorySigner;
 use subduction_core::peer::id::PeerId;
+use subduction_crypto::signer::memory::MemorySigner;
 use thiserror::Error;
 
 /// File name for the signing key.
@@ -35,8 +35,9 @@ pub fn generate_and_save(signer_dir: &Path) -> Result<MemorySigner, GenerateSign
     // Clear the key bytes from memory
     key_bytes.fill(0);
 
+    let peer_id: PeerId = signer.verifying_key().into();
     tracing::info!(
-        peer_id = %hex::encode(signer.peer_id().as_bytes()),
+        peer_id = %hex::encode(peer_id.as_bytes()),
         "Generated new signer"
     );
 
@@ -68,8 +69,9 @@ pub fn load(signer_dir: &Path) -> Result<MemorySigner, LoadSignerError> {
     // Clear the temporary array
     arr.fill(0);
 
+    let peer_id: PeerId = signer.verifying_key().into();
     tracing::debug!(
-        peer_id = %hex::encode(signer.peer_id().as_bytes()),
+        peer_id = %hex::encode(peer_id.as_bytes()),
         "Loaded signer"
     );
 
@@ -98,7 +100,7 @@ pub fn load_or_generate(signer_dir: &Path) -> Result<MemorySigner, SignerError> 
 /// Returns an error if the signer cannot be loaded.
 pub fn peer_id(signer_dir: &Path) -> Result<PeerId, LoadSignerError> {
     let signer = load(signer_dir)?;
-    Ok(signer.peer_id())
+    Ok(signer.verifying_key().into())
 }
 
 /// Error generating and saving a new signer.
@@ -146,6 +148,12 @@ pub enum SignerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use subduction_core::peer::id::PeerId;
+
+    /// Helper to get peer ID from a signer.
+    fn signer_peer_id(signer: &MemorySigner) -> PeerId {
+        signer.verifying_key().into()
+    }
 
     #[test]
     fn generate_and_save_creates_key_file() {
@@ -171,8 +179,8 @@ mod tests {
         let signer2 = generate_and_save(&dir2).expect("generate_and_save 2");
 
         assert_ne!(
-            signer1.peer_id(),
-            signer2.peer_id(),
+            signer_peer_id(&signer1),
+            signer_peer_id(&signer2),
             "each generation should produce a unique peer ID"
         );
     }
@@ -186,8 +194,8 @@ mod tests {
         let loaded = load(&signer_dir).expect("load");
 
         assert_eq!(
-            original.peer_id(),
-            loaded.peer_id(),
+            signer_peer_id(&original),
+            signer_peer_id(&loaded),
             "loaded signer should match original"
         );
     }
@@ -231,7 +239,7 @@ mod tests {
 
         let key_path = signer_dir.join(SIGNING_KEY_FILENAME);
         assert!(key_path.exists(), "key file should be created");
-        assert!(!signer.peer_id().as_bytes().is_empty());
+        assert!(!signer_peer_id(&signer).as_bytes().is_empty());
     }
 
     #[test]
@@ -243,8 +251,8 @@ mod tests {
         let loaded = load_or_generate(&signer_dir).expect("load_or_generate");
 
         assert_eq!(
-            original.peer_id(),
-            loaded.peer_id(),
+            signer_peer_id(&original),
+            signer_peer_id(&loaded),
             "should load existing signer"
         );
     }
@@ -257,6 +265,6 @@ mod tests {
         let signer = generate_and_save(&signer_dir).expect("generate_and_save");
         let extracted = peer_id(&signer_dir).expect("peer_id");
 
-        assert_eq!(signer.peer_id(), extracted);
+        assert_eq!(signer_peer_id(&signer), extracted);
     }
 }

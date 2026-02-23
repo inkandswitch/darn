@@ -500,7 +500,7 @@ mod tests {
             PathBuf::from("existing.txt"),
             crate::file::file_type::FileType::Text,
             crate::manifest::content_hash::hash_bytes(&[0u8; 32]),
-            sedimentree_core::digest::Digest::from_bytes([0u8; 32]),
+            sedimentree_core::crypto::digest::Digest::force_from_bytes([0u8; 32]),
         );
         manifest.track(tracked);
 
@@ -530,7 +530,7 @@ mod tests {
             PathBuf::from("file.txt"),
             crate::file::file_type::FileType::Text,
             crate::manifest::content_hash::hash_bytes(&[0u8; 32]),
-            sedimentree_core::digest::Digest::from_bytes([0u8; 32]),
+            sedimentree_core::crypto::digest::Digest::force_from_bytes([0u8; 32]),
         );
         manifest.track(tracked);
 

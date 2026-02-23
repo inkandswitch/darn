@@ -13,6 +13,7 @@
 pub mod config;
 pub mod darn;
 pub mod directory;
+pub mod discover;
 pub mod file;
 pub mod ignore;
 pub mod manifest;
@@ -26,3 +27,4 @@ pub mod subduction;
 pub mod sync_progress;
 pub mod unix_timestamp;
 pub mod watcher;
+pub mod workspace;

@@ -12,27 +12,26 @@ use std::{
 };
 
 use sedimentree_fs_storage::FsStorage;
-use subduction_core::{
-    connection::Connection,
-    crypto::signer::MemorySigner,
-    peer::id::PeerId
-};
+use subduction_core::{connection::Connection, peer::id::PeerId};
+use subduction_crypto::signer::memory::MemorySigner;
 use subduction_websocket::tokio::{TimeoutTokio, client::TokioWebSocketClient};
 use thiserror::Error;
 use tungstenite::http::Uri;
 
+use tokio_util::sync::CancellationToken;
+
 use crate::{
     config::{self, NoConfigDir},
     directory::{Directory, entry::EntryType},
+    discover::{self, DiscoverProgress, DiscoverResult},
     file::{File, file_type::FileType, state::FileState},
-    ignore::IgnoreRules,
     manifest::{Manifest, ManifestError, content_hash, tracked::Tracked},
     peer::Peer,
     refresh::{self, RefreshError},
     sedimentree::{self, SedimentreeError},
     signer::{self, LoadSignerError, SignerError},
     subduction::{
-        self, DarnAttachError, DarnConnection, DarnIoError, DarnRegistrationError,
+        self, AuthenticatedDarnConnection, DarnAttachError, DarnIoError, DarnRegistrationError,
         DarnSubduction, SubductionInitError,
     },
     sync_progress::{ApplyResult, SyncProgressEvent, SyncSummary},
@@ -98,9 +97,10 @@ impl Darn {
         let signer_dir = config::global_signer_dir()?;
         let signer = signer::load_or_generate(&signer_dir)?;
 
+        let peer_id: PeerId = signer.verifying_key().into();
         tracing::info!(
             path = %root.display(),
-            peer_id = %hex::encode(signer.peer_id().as_bytes()),
+            peer_id = %hex::encode(peer_id.as_bytes()),
             "Initialized workspace"
         );
 
@@ -141,10 +141,11 @@ impl Darn {
         let signer_dir = config::global_signer_dir()?;
         let signer = signer::load_or_generate(&signer_dir)?;
 
+        let peer_id: PeerId = signer.verifying_key().into();
         tracing::info!(
             path = %root.display(),
             root_directory_id = %bs58::encode(root_directory_id.as_bytes()).into_string(),
-            peer_id = %hex::encode(signer.peer_id().as_bytes()),
+            peer_id = %hex::encode(peer_id.as_bytes()),
             "Initialized workspace with root directory ID"
         );
 
@@ -894,154 +895,57 @@ impl Darn {
         }
     }
 
-    /// Discover and track any new files in the workspace.
+    /// Discover and track new (untracked, non-ignored) files.
     ///
-    /// Walks the workspace directory, finds non-ignored files that aren't in
-    /// the manifest, and creates sedimentrees for them.
+    /// Walks the workspace and finds files that are not in the manifest
+    /// and not ignored by `.darnignore`. For each new file, it creates
+    /// a sedimentree document and adds it to the manifest.
     ///
-    /// Returns the paths of newly tracked files.
+    /// Files are processed in parallel for performance.
+    ///
+    /// # Arguments
+    ///
+    /// * `manifest` - The manifest to update with new files
+    /// * `on_progress` - Callback for progress updates
+    /// * `cancel` - Cancellation token; if cancelled, returns immediately with partial results
     ///
     /// # Errors
     ///
-    /// Returns an error if file discovery or sedimentree creation fails.
-    ///
-    /// # Panics
-    ///
-    /// Panics if a discovered file path has no filename component (should be unreachable
-    /// since we only process files, not directories).
-    pub async fn discover_new_files(
+    /// Returns an error if file discovery fails fatally (e.g., can't read ignore rules).
+    /// Individual file errors are collected in the result.
+    pub async fn discover_new_files<F>(
         &self,
         manifest: &mut Manifest,
-    ) -> Result<Vec<PathBuf>, DiscoverError> {
-        let ignore_rules = IgnoreRules::from_workspace_root(&self.root)?;
-        let subduction = &self.subduction;
-        let root_dir_id = manifest.root_directory_id();
+        on_progress: F,
+        cancel: &CancellationToken,
+    ) -> Result<DiscoverResult, DiscoverError>
+    where
+        F: Fn(DiscoverProgress<'_>) + Send + Sync,
+    {
+        let (discovered, errors, cancelled) = discover::discover_files_parallel(
+            &self.root,
+            &self.subduction,
+            manifest,
+            on_progress,
+            cancel,
+        )
+        .await?;
 
-        let mut new_files = Vec::new();
-
-        // Walk the directory tree
-        for entry in walkdir::WalkDir::new(&self.root)
+        // Add discovered files to manifest
+        let new_files: Vec<PathBuf> = discovered
             .into_iter()
-            .filter_entry(|e| {
-                // Skip hidden directories and .darn, but allow .darnignore
-                let name = e.file_name().to_string_lossy();
-                !name.starts_with('.') || e.depth() == 0 || name == ".darnignore"
+            .map(|file| {
+                let path = file.relative_path.clone();
+                manifest.track(file.into_tracked());
+                path
             })
-        {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(e) => {
-                    tracing::warn!("Failed to read directory entry: {e}");
-                    continue;
-                }
-            };
+            .collect();
 
-            // Skip directories
-            if entry.file_type().is_dir() {
-                continue;
-            }
-
-            let path = entry.path();
-
-            // Get relative path
-            let relative_path = match path.strip_prefix(&self.root) {
-                Ok(p) => p.to_path_buf(),
-                Err(_) => continue,
-            };
-
-            // Check if ignored
-            if ignore_rules.is_ignored(&relative_path, false) {
-                continue;
-            }
-
-            // Check if already tracked
-            if manifest.get_by_path(&relative_path).is_some() {
-                continue;
-            }
-
-            // Track this file
-            tracing::debug!("Discovering new file: {}", relative_path.display());
-
-            // Create File from path
-            let doc = match File::from_path(path) {
-                Ok(f) => f,
-                Err(e) => {
-                    tracing::warn!("Failed to read {}: {e}", relative_path.display());
-                    continue;
-                }
-            };
-
-            let file_type = if doc.content.is_text() {
-                FileType::Text
-            } else {
-                FileType::Binary
-            };
-
-            // Convert to Automerge
-            let mut am_doc = match doc.into_automerge() {
-                Ok(d) => d,
-                Err(e) => {
-                    tracing::warn!("Failed to convert {} to Automerge: {e}", relative_path.display());
-                    continue;
-                }
-            };
-
-            // Generate random SedimentreeId
-            let mut id_bytes = [0u8; 32];
-            getrandom::getrandom(&mut id_bytes)
-                .map_err(|e| DiscoverError::Random(e.to_string()))?;
-            let sedimentree_id = sedimentree_core::id::SedimentreeId::new(id_bytes);
-
-            // Store as sedimentree commits
-            sedimentree::store_document(subduction, sedimentree_id, &mut am_doc).await?;
-
-            // Add file to directory tree
-            let parent_dir_id = sedimentree::ensure_parent_directories(
-                subduction,
-                root_dir_id,
-                &relative_path,
-            )
-            .await?;
-
-            let file_name = relative_path
-                .file_name()
-                .expect("file has name")
-                .to_string_lossy();
-
-            sedimentree::add_file_to_directory(
-                subduction,
-                parent_dir_id,
-                &file_name,
-                sedimentree_id,
-            )
-            .await?;
-
-            tracing::debug!(
-                ?parent_dir_id,
-                ?sedimentree_id,
-                file_name = %file_name,
-                "Added file to directory tree"
-            );
-
-            // Compute digests
-            let file_system_digest = content_hash::hash_file(path)?;
-            let sedimentree_digest =
-                sedimentree::compute_digest(subduction, sedimentree_id).await?;
-
-            // Add to manifest
-            let entry = Tracked::new(
-                sedimentree_id,
-                relative_path.clone(),
-                file_type,
-                file_system_digest,
-                sedimentree_digest,
-            );
-            manifest.track(entry);
-
-            new_files.push(relative_path);
-        }
-
-        Ok(new_files)
+        Ok(DiscoverResult {
+            new_files,
+            errors,
+            cancelled,
+        })
     }
 
     // ============================================================================
@@ -1051,9 +955,9 @@ impl Darn {
     /// Default connection timeout for peer connections.
     const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-    /// Connect to a peer and return the connection.
+    /// Connect to a peer and return the authenticated connection.
     ///
-    /// The connection can then be attached to Subduction for syncing.
+    /// The connection can then be registered with Subduction for syncing.
     ///
     /// # Errors
     ///
@@ -1061,11 +965,11 @@ impl Darn {
     pub async fn connect_peer(
         &self,
         peer: &Peer,
-    ) -> Result<(DarnConnection, PeerId), SyncError> {
+    ) -> Result<(AuthenticatedDarnConnection, PeerId), SyncError> {
         let uri: Uri = peer.url.parse()?;
         let signer = self.load_signer()?;
 
-        let (client, listener_fut) = TokioWebSocketClient::new(
+        let (authenticated_client, listener_fut, sender_fut) = TokioWebSocketClient::new(
             uri,
             TimeoutTokio,
             Self::DEFAULT_TIMEOUT,
@@ -1074,17 +978,22 @@ impl Darn {
         )
         .await?;
 
-        // Spawn the listener to handle incoming messages
+        // Spawn background tasks for incoming and outgoing messages
         tokio::spawn(async move {
             if let Err(e) = listener_fut.await {
                 tracing::error!("WebSocket listener error: {e:?}");
             }
         });
+        tokio::spawn(async move {
+            if let Err(e) = sender_fut.await {
+                tracing::error!("WebSocket sender error: {e:?}");
+            }
+        });
 
         // Get the actual peer ID from the connection (may differ from expectation in discovery mode)
-        let actual_peer_id = Connection::peer_id(&client);
+        let actual_peer_id = Connection::peer_id(authenticated_client.inner());
 
-        Ok((client, actual_peer_id))
+        Ok((authenticated_client, actual_peer_id))
     }
 
     /// Connect to a peer, attach to Subduction, and perform a full sync.
@@ -1093,21 +1002,25 @@ impl Darn {
     ///
     /// Returns an error if connection or sync fails.
     pub async fn sync_with_peer(&self, peer: &Peer) -> Result<SyncResult, SyncError> {
-        let (connection, peer_id) = self.connect_peer(peer).await?;
+        let (authenticated_connection, peer_id) = self.connect_peer(peer).await?;
 
         tracing::info!("Connected to peer {}", peer_id);
 
-        // Register the connection (without auto-syncing - we use full_sync below)
-        self.subduction.register(connection).await?;
+        // Register the authenticated connection (without auto-syncing - we use full_sync below)
+        self.subduction.register(authenticated_connection).await?;
 
         // Perform full sync with all connected peers
-        let (success, stats, errors) = self
+        let (success, stats, call_errors, io_errors) = self
             .subduction
             .full_sync(Some(Self::DEFAULT_TIMEOUT))
-            .await?;
+            .await;
 
-        for (conn, err) in &errors {
+        for (conn, err) in &call_errors {
             tracing::warn!("Sync error with {:?}: {err:?}", Connection::peer_id(conn));
+        }
+
+        for (id, err) in &io_errors {
+            tracing::warn!("I/O error syncing sedimentree {id:?}: {err}");
         }
 
         Ok(SyncResult {
@@ -1140,13 +1053,13 @@ impl Darn {
             url: peer.url.clone(),
         });
 
-        let (connection, peer_id) = self.connect_peer(peer).await?;
+        let (authenticated_connection, peer_id) = self.connect_peer(peer).await?;
         tracing::info!("Connected to peer {}", peer_id);
 
         on_progress(SyncProgressEvent::Connected { peer_id });
 
-        // Register the connection (without auto-syncing - we handle sync manually below)
-        self.subduction.register(connection).await?;
+        // Register the authenticated connection (without auto-syncing - we handle sync manually below)
+        self.subduction.register(authenticated_connection).await?;
 
         // Collect sedimentree IDs to sync:
         // - Root directory
@@ -1527,27 +1440,15 @@ pub struct SyncResult {
     pub success: bool,
 
     /// Statistics about the sync operation.
-    pub stats: subduction_core::connection::message::SyncStats,
+    pub stats: subduction_core::connection::stats::SyncStats,
 }
 
 /// Errors discovering new files.
 #[derive(Debug, Error)]
 pub enum DiscoverError {
     /// Failed to build ignore rules.
-    #[error("failed to build ignore rules: {0}")]
-    IgnoreRules(#[from] crate::ignore::IgnorePatternError),
-
-    /// Sedimentree error.
     #[error(transparent)]
-    Sedimentree(#[from] SedimentreeError),
-
-    /// I/O error.
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-
-    /// Random generation failed.
-    #[error("random generation failed: {0}")]
-    Random(String),
+    Ignore(#[from] crate::ignore::IgnorePatternError),
 }
 
 /// Errors from sync operations.

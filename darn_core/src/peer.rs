@@ -6,7 +6,7 @@
 
 use std::{collections::BTreeMap, fmt, path::Path, str::FromStr};
 
-use sedimentree_core::{digest::Digest, id::SedimentreeId, sedimentree::Sedimentree};
+use sedimentree_core::{crypto::digest::Digest, id::SedimentreeId, sedimentree::Sedimentree};
 use serde::{Deserialize, Serialize};
 use subduction_core::{connection::handshake::Audience, peer::id::PeerId};
 use thiserror::Error;
@@ -44,7 +44,11 @@ impl PeerName {
         }
 
         // Must start with alphanumeric
-        if !name.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()) {
+        if !name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+        {
             return Err(InvalidPeerName::InvalidStart);
         }
 
@@ -135,7 +139,11 @@ pub struct Peer {
     pub last_synced_at: Option<UnixTimestamp>,
 
     /// Per-sedimentree sync state: maps `sedimentree_id` to the digest last synced to this peer.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty", with = "serde_base58::synced_digests")]
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        with = "serde_base58::synced_digests"
+    )]
     pub synced_digests: BTreeMap<SedimentreeId, Digest<Sedimentree>>,
 }
 

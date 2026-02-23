@@ -2,7 +2,7 @@
 //!
 //! Used for human-readable JSON serialization of `SedimentreeId`, `Digest`, `PeerId`, etc.
 
-use serde::{Deserialize, Deserializer, Serializer, de};
+use serde::{de, Deserialize, Deserializer, Serializer};
 
 /// Serialize a 32-byte array as base58.
 ///
@@ -58,7 +58,7 @@ pub mod sedimentree_id {
 
 /// Serde module for `Digest<T>` (wraps 32-byte array).
 pub mod digest {
-    use sedimentree_core::digest::Digest;
+    use sedimentree_core::crypto::digest::Digest;
     use serde::{Deserializer, Serializer};
 
     /// Serialize `Digest<T>` as base58.
@@ -82,7 +82,7 @@ pub mod digest {
         deserializer: D,
     ) -> Result<Digest<T>, D::Error> {
         let bytes = super::deserialize(deserializer)?;
-        Ok(Digest::from_bytes(bytes))
+        Ok(Digest::force_from_bytes(bytes))
     }
 }
 
@@ -145,8 +145,8 @@ pub mod discovery_id {
 pub mod synced_digests {
     use std::collections::BTreeMap;
 
-    use sedimentree_core::{digest::Digest, id::SedimentreeId, sedimentree::Sedimentree};
-    use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+    use sedimentree_core::{crypto::digest::Digest, id::SedimentreeId, sedimentree::Sedimentree};
+    use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 
     #[derive(Serialize, Deserialize)]
     struct Entry {
@@ -188,18 +188,21 @@ pub mod synced_digests {
             let id_bytes = bs58::decode(&entry.id)
                 .into_vec()
                 .map_err(|e| de::Error::custom(format!("invalid base58 id: {e}")))?;
-            let id_arr: [u8; 32] = id_bytes
-                .try_into()
-                .map_err(|v: Vec<u8>| de::Error::custom(format!("id: expected 32 bytes, got {}", v.len())))?;
+            let id_arr: [u8; 32] = id_bytes.try_into().map_err(|v: Vec<u8>| {
+                de::Error::custom(format!("id: expected 32 bytes, got {}", v.len()))
+            })?;
 
             let digest_bytes = bs58::decode(&entry.digest)
                 .into_vec()
                 .map_err(|e| de::Error::custom(format!("invalid base58 digest: {e}")))?;
-            let digest_arr: [u8; 32] = digest_bytes
-                .try_into()
-                .map_err(|v: Vec<u8>| de::Error::custom(format!("digest: expected 32 bytes, got {}", v.len())))?;
+            let digest_arr: [u8; 32] = digest_bytes.try_into().map_err(|v: Vec<u8>| {
+                de::Error::custom(format!("digest: expected 32 bytes, got {}", v.len()))
+            })?;
 
-            map.insert(SedimentreeId::new(id_arr), Digest::from_bytes(digest_arr));
+            map.insert(
+                SedimentreeId::new(id_arr),
+                Digest::force_from_bytes(digest_arr),
+            );
         }
 
         Ok(map)
@@ -208,7 +211,7 @@ pub mod synced_digests {
 
 /// Serde module for `Audience` enum (Known or Discover).
 pub mod audience {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+    use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
     use subduction_core::connection::handshake::{Audience, DiscoveryId};
     use subduction_core::peer::id::PeerId;
 

@@ -23,18 +23,14 @@
 //! └──────────────────────────────────────────────────────────────────────┘
 //! ```
 
-use std::{convert::Infallible, path::Path};
+use std::{collections::BTreeSet, convert::Infallible, path::Path};
 
 use automerge::{AutoCommit, Change, ChangeHash};
 use future_form::Sendable;
 use sedimentree_fs_storage::FsStorage;
 use subduction_core::subduction::error::WriteError;
 use sedimentree_core::{
-    blob::{Blob, BlobMeta},
-    digest::Digest,
-    id::SedimentreeId,
-    loose_commit::LooseCommit,
-    sedimentree::Sedimentree,
+    blob::Blob, crypto::digest::Digest, id::SedimentreeId, sedimentree::Sedimentree,
 };
 use thiserror::Error;
 
@@ -76,20 +72,15 @@ pub async fn store_change(
     change: &Change,
 ) -> Result<(), SedimentreeError> {
     let blob = Blob::new(change.raw_bytes().to_vec());
-    let blob_meta = BlobMeta::new(blob.as_slice());
 
-    let digest = Digest::from_bytes(change.hash().0);
-
-    let parents: Vec<_> = change
+    let parents: BTreeSet<_> = change
         .deps()
         .iter()
-        .map(|h| Digest::from_bytes(h.0))
+        .map(|h| Digest::force_from_bytes(h.0))
         .collect();
 
-    let commit = LooseCommit::new(digest, parents, blob_meta);
-
     subduction
-        .add_commit(id, &commit, blob)
+        .add_commit(id, parents, blob)
         .await
         .map_err(|e| SedimentreeError::SubductionWrite(Box::new(e)))?;
 
@@ -166,7 +157,10 @@ pub async fn compute_digest(
 ) -> Result<Digest<Sedimentree>, SedimentreeError> {
     let commits = subduction.get_commits(id).await.unwrap_or_default();
 
-    let mut digests: Vec<[u8; 32]> = commits.iter().map(|c| *c.digest().as_bytes()).collect();
+    let mut digests: Vec<[u8; 32]> = commits
+        .iter()
+        .map(|c| *Digest::hash(c).as_bytes())
+        .collect();
     digests.sort_unstable();
 
     let mut hasher = blake3::Hasher::new();
@@ -174,7 +168,7 @@ pub async fn compute_digest(
         hasher.update(digest_bytes);
     }
 
-    Ok(Digest::from_bytes(*hasher.finalize().as_bytes()))
+    Ok(Digest::force_from_bytes(*hasher.finalize().as_bytes()))
 }
 
 // ============================================================================

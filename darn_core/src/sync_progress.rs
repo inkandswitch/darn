@@ -101,7 +101,7 @@ impl SyncSummary {
     }
 
     /// Add a sedimentree sync result to the summary.
-    pub fn add_sync_stats(&mut self, stats: &subduction_core::connection::message::SyncStats) {
+    pub fn add_sync_stats(&mut self, stats: &subduction_core::connection::stats::SyncStats) {
         self.sedimentrees_synced += 1;
         self.commits_received += stats.commits_received;
         self.fragments_received += stats.fragments_received;

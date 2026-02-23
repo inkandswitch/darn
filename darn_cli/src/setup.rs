@@ -5,6 +5,7 @@
 use std::io::IsTerminal;
 
 use darn_core::{config, signer};
+use subduction_core::peer::id::PeerId;
 
 /// Checks if first-run setup is needed and runs it interactively.
 ///
@@ -28,9 +29,10 @@ pub(crate) fn ensure_signer() -> anyhow::Result<bool> {
         println!("  Location: {}", key_path.display());
 
         let s = signer::generate_and_save(&signer_dir)?;
-        let peer_id = bs58::encode(s.peer_id().as_bytes()).into_string();
+        let peer_id: PeerId = s.verifying_key().into();
+        let peer_id_str = bs58::encode(peer_id.as_bytes()).into_string();
 
-        println!("  Peer ID: {peer_id}");
+        println!("  Peer ID: {peer_id_str}");
         return Ok(true);
     }
 
@@ -58,11 +60,12 @@ pub(crate) fn ensure_signer() -> anyhow::Result<bool> {
     spinner.start("Generating Ed25519 keypair...");
 
     let s = signer::generate_and_save(&signer_dir)?;
-    let peer_id = bs58::encode(s.peer_id().as_bytes()).into_string();
+    let peer_id: PeerId = s.verifying_key().into();
+    let peer_id_str = bs58::encode(peer_id.as_bytes()).into_string();
 
     spinner.stop("Signer generated!");
 
-    cliclack::note("Your Peer ID", &peer_id)?;
+    cliclack::note("Your Peer ID", &peer_id_str)?;
 
     cliclack::outro("You can share your Peer ID with collaborators.")?;
 

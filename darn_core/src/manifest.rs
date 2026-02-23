@@ -218,7 +218,7 @@ mod tests {
 
     use std::path::PathBuf;
 
-    use sedimentree_core::digest::Digest;
+    use sedimentree_core::crypto::digest::Digest;
 
     use crate::file::{file_type::FileType, state::FileState};
     use content_hash::{self, FileSystemContent};
@@ -235,7 +235,7 @@ mod tests {
     }
 
     fn dummy_sedimentree_digest() -> Digest<Sedimentree> {
-        Digest::from_bytes([0u8; 32])
+        Digest::force_from_bytes([0u8; 32])
     }
 
     #[test]

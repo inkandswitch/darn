@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use sedimentree_core::{digest::Digest, id::SedimentreeId};
+use sedimentree_core::{crypto::digest::Digest, id::SedimentreeId};
 use serde::{Deserialize, Serialize};
 
 pub use sedimentree_core::sedimentree::Sedimentree;

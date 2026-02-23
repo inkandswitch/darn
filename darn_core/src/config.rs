@@ -21,6 +21,12 @@ const SIGNER_DIR: &str = "signer";
 /// Subdirectory for peers within the config directory.
 const PEERS_DIR: &str = "peers";
 
+/// Subdirectory for shared storage within the config directory.
+const STORAGE_DIR: &str = "storage";
+
+/// Subdirectory for workspaces within the config directory.
+const WORKSPACES_DIR: &str = "workspaces";
+
 /// Returns the global `darn` config directory.
 ///
 /// If `DARN_CONFIG_DIR` is set, uses that path. Otherwise defaults to
@@ -59,6 +65,33 @@ pub fn global_signer_dir() -> Result<PathBuf, NoConfigDir> {
 /// Returns [`NoConfigDir`] if the config directory cannot be determined.
 pub fn global_peers_dir() -> Result<PathBuf, NoConfigDir> {
     Ok(global_config_dir()?.join(PEERS_DIR))
+}
+
+/// Returns the global shared storage directory.
+///
+/// Default: `~/.config/darn/storage/`
+///
+/// This is where all sedimentree blobs, commits, and fragments are stored,
+/// shared across all workspaces for deduplication.
+///
+/// # Errors
+///
+/// Returns [`NoConfigDir`] if the config directory cannot be determined.
+pub fn global_storage_dir() -> Result<PathBuf, NoConfigDir> {
+    Ok(global_config_dir()?.join(STORAGE_DIR))
+}
+
+/// Returns the global workspaces directory.
+///
+/// Default: `~/.config/darn/workspaces/`
+///
+/// Each workspace has a subdirectory here with its manifest and ping-pong trees.
+///
+/// # Errors
+///
+/// Returns [`NoConfigDir`] if the config directory cannot be determined.
+pub fn global_workspaces_dir() -> Result<PathBuf, NoConfigDir> {
+    Ok(global_config_dir()?.join(WORKSPACES_DIR))
 }
 
 /// Returns `true` if the global config directory exists.

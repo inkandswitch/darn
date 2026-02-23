@@ -3,25 +3,36 @@
 //! This module provides type aliases and helper functions for creating and
 //! managing Subduction instances that handle all sedimentree storage, signing,
 //! and peer-to-peer synchronization.
+//!
+//! Storage is shared globally at `~/.config/darn/storage/` for deduplication
+//! across workspaces.
 
-use std::{convert::Infallible, sync::Arc};
+use std::{convert::Infallible, path::Path, sync::Arc};
 
 use future_form::Sendable;
 use sedimentree_core::commit::CountLeadingZeroBytes;
 use sedimentree_fs_storage::FsStorage;
 
 use subduction_core::{
-    connection::nonce_cache::NonceCache,
-    crypto::signer::MemorySigner,
+    connection::{authenticated::Authenticated, nonce_cache::NonceCache},
     policy::open::OpenPolicy,
     sharded_map::ShardedMap,
     subduction::{Subduction, error::{AttachError, HydrationError, IoError}},
 };
+use subduction_crypto::signer::memory::MemorySigner;
 use subduction_websocket::tokio::{TimeoutTokio, TokioSpawn, client::TokioWebSocketClient};
 use thiserror::Error;
 
+use crate::config::{self, NoConfigDir};
+
+/// Default number of pending blob requests allowed per connection.
+const DEFAULT_MAX_PENDING_BLOB_REQUESTS: usize = 64;
+
 /// Type alias for the WebSocket client connection used by darn.
 pub type DarnConnection = TokioWebSocketClient<MemorySigner, TimeoutTokio>;
+
+/// Type alias for an authenticated WebSocket client connection.
+pub type AuthenticatedDarnConnection = Authenticated<DarnConnection, Sendable>;
 
 /// Type alias for the Subduction instance used by darn workspaces.
 ///
@@ -49,6 +60,27 @@ pub type DarnRegistrationError =
 /// Concrete error type for I/O operations during sync.
 pub type DarnIoError = IoError<Sendable, FsStorage, DarnConnection>;
 
+/// Create global storage at the standard location.
+///
+/// # Errors
+///
+/// Returns an error if the storage directory cannot be determined or created.
+pub fn create_global_storage() -> Result<FsStorage, StorageError> {
+    let storage_dir = config::global_storage_dir()?;
+    std::fs::create_dir_all(&storage_dir)?;
+    FsStorage::new(storage_dir).map_err(StorageError::from)
+}
+
+/// Create storage at a custom path (for testing).
+///
+/// # Errors
+///
+/// Returns an error if storage cannot be created.
+pub fn create_storage_at(path: &Path) -> Result<FsStorage, StorageError> {
+    std::fs::create_dir_all(path)?;
+    FsStorage::new(path.to_path_buf()).map_err(StorageError::from)
+}
+
 /// Create a new Subduction instance and spawn its background tasks.
 ///
 /// The listener and manager futures are spawned onto the tokio runtime.
@@ -63,6 +95,7 @@ pub fn spawn(signer: MemorySigner, storage: FsStorage) -> Arc<DarnSubduction> {
         CountLeadingZeroBytes,
         ShardedMap::new(),
         TokioSpawn,
+        DEFAULT_MAX_PENDING_BLOB_REQUESTS,
     );
 
     tokio::spawn(async move {
@@ -97,6 +130,7 @@ pub async fn hydrate(signer: MemorySigner, storage: FsStorage) -> Result<Arc<Dar
         CountLeadingZeroBytes,
         ShardedMap::new(),
         TokioSpawn,
+        DEFAULT_MAX_PENDING_BLOB_REQUESTS,
     ))
     .await
     .map_err(SubductionInitError::Hydration)?;
@@ -122,4 +156,24 @@ pub enum SubductionInitError {
     /// Hydration from storage failed.
     #[error("failed to hydrate from storage: {0}")]
     Hydration(HydrationError<Sendable, FsStorage>),
+
+    /// Storage initialization failed.
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+}
+
+/// Errors creating storage.
+#[derive(Debug, Error)]
+pub enum StorageError {
+    /// Could not determine config directory.
+    #[error(transparent)]
+    NoConfigDir(#[from] NoConfigDir),
+
+    /// I/O error.
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// FsStorage creation failed.
+    #[error("storage error: {0}")]
+    FsStorage(#[from] sedimentree_fs_storage::FsStorageError),
 }

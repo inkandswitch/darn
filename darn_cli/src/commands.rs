@@ -7,14 +7,15 @@
 use std::{
     fmt::Write as _,
     path::Path, collections::BTreeMap,
+    sync::{Arc, atomic::{AtomicUsize, Ordering}},
     time::{Duration, SystemTime, UNIX_EPOCH},
-    sync::{Arc, atomic::{AtomicUsize, Ordering}}
 };
 
 use console::Style;
 use darn_core::{
     darn::Darn,
     directory::{Directory, entry::EntryType},
+    discover::{DiscoverProgress, DiscoverResult},
     file::{File, file_type::FileType, state::FileState},
     manifest::{Manifest, content_hash, tracked::Tracked},
     peer::{Peer, PeerName},
@@ -24,6 +25,7 @@ use darn_core::{
 };
 use sedimentree_core::id::SedimentreeId;
 use subduction_core::{storage::traits::Storage, peer::id::PeerId};
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 /// Style for command references in messages (mauve color).
@@ -523,13 +525,15 @@ pub(crate) fn tree() -> anyhow::Result<()> {
                 red.apply_to("!").to_string()
             }
         };
-        let sed_id = bs58::encode(entry.sedimentree_id.as_bytes()).into_string();
+        let sed_id = bs58::encode(entry.sedimentree_id.as_bytes())
+            .with_check()
+            .into_string();
         writeln!(
             file_list,
             "{} {}  {}",
             styled_indicator,
             entry.relative_path.display(),
-            dim.apply_to(&sed_id)
+            dim.apply_to(format!("automerge:{sed_id}"))
         )
         .expect("write to string");
     }
@@ -605,7 +609,10 @@ pub(crate) async fn stat(target: &str) -> anyhow::Result<()> {
 
     // Build stats content
     let dim = Style::new().dim();
-    let sed_id_str = bs58::encode(sed_id.as_bytes()).into_string();
+    let sed_id_str = format!(
+        "automerge:{}",
+        bs58::encode(sed_id.as_bytes()).with_check().into_string()
+    );
     let fs_digest = bs58::encode(tracked.file_system_digest.as_bytes()).into_string();
     let sed_digest = bs58::encode(tracked.sedimentree_digest.as_bytes()).into_string();
 
@@ -672,9 +679,64 @@ pub(crate) async fn sync_cmd(
     // Step 1: Discover new files (auto-track non-ignored files)
     let spinner = cliclack::spinner();
     spinner.start("Scanning for new files...");
-    match darn.discover_new_files(&mut manifest).await {
-        Ok(new_files) => {
+
+    // Set up cancellation token for Ctrl+C
+    let cancel_token = CancellationToken::new();
+    let cancel_token_clone = cancel_token.clone();
+
+    // Handle Ctrl+C to cancel discovery
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            cancel_token_clone.cancel();
+        }
+    });
+
+    // Progress callback updates spinner with last completed file and in-flight count
+    let progress_callback = |progress: DiscoverProgress<'_>| {
+        let msg = match (progress.last_completed, progress.in_flight) {
+            (Some(file), 0) => format!(
+                "Scanning ({}/{})... {}",
+                progress.completed,
+                progress.total,
+                file.display()
+            ),
+            (Some(file), n) => format!(
+                "Scanning ({}/{})... {} (+{n} in progress)",
+                progress.completed,
+                progress.total,
+                file.display()
+            ),
+            (None, n) if n > 0 => format!(
+                "Scanning ({}/{})... {n} in progress",
+                progress.completed,
+                progress.total
+            ),
+            (None, _) => format!("Scanning ({}/{})...", progress.completed, progress.total),
+        };
+        spinner.set_message(msg);
+    };
+
+    let result = darn
+        .discover_new_files(&mut manifest, progress_callback, &cancel_token)
+        .await;
+
+    match result {
+        Ok(DiscoverResult { new_files, errors, cancelled }) => {
             spinner.clear();
+
+            // Handle cancellation
+            if cancelled {
+                cliclack::log::warning("Discovery cancelled")?;
+                return Ok(());
+            }
+
+            // Report any errors that occurred during discovery
+            if !errors.is_empty() {
+                for (path, err) in &errors {
+                    cliclack::log::warning(format!("{}: {}", path.display(), err))?;
+                }
+            }
+
             if !new_files.is_empty() {
                 // Show what was found as a tree
                 let tree = format_paths_as_tree(&new_files);
@@ -1012,7 +1074,7 @@ fn sync_dry_run(peer_name: Option<&str>) -> anyhow::Result<()> {
         let peer_id_display = if let Some(id) = peer.peer_id() {
             bs58::encode(id.as_bytes()).into_string()
         } else {
-            "(TOFU)".to_string()
+            "(discovery)".to_string()
         };
         let last_sync = peer
             .last_synced_at
@@ -1587,7 +1649,7 @@ pub(crate) fn peer_add(name: &str, url: &str, peer_id: Option<&str>) -> anyhow::
     let peer_id_display = if let Some(id) = peer.peer_id() {
         bs58::encode(id.as_bytes()).into_string()
     } else {
-        "[TOFU]".to_string()
+        "(discovery)".to_string()
     };
 
     darn.add_peer(&peer)?;
@@ -1622,7 +1684,7 @@ pub(crate) fn peer_list() -> anyhow::Result<()> {
             let id_str = bs58::encode(id.as_bytes()).into_string();
             dim.apply_to(&id_str).to_string()
         } else {
-            "(TOFU)".to_string()
+            "(discovery)".to_string()
         };
         let last_sync = peer
             .last_synced_at
@@ -1736,7 +1798,14 @@ pub(crate) fn info() -> anyhow::Result<()> {
             let manifest = darn.load_manifest();
             let root_id_str = manifest
                 .as_ref()
-                .map(|m| bs58::encode(m.root_directory_id().as_bytes()).into_string())
+                .map(|m| {
+                    format!(
+                        "automerge:{}",
+                        bs58::encode(m.root_directory_id().as_bytes())
+                            .with_check()
+                            .into_string()
+                    )
+                })
                 .unwrap_or_else(|_| "(error)".to_string());
             let file_count = manifest.as_ref().map(|m| m.len()).unwrap_or(0);
 
