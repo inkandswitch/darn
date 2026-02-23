@@ -12,45 +12,44 @@ edition = "2024"
 keywords = ["automerge", "crdt", "filesystem", "local-first", "p2p"]
 license = "Apache-2.0 OR MIT"
 readme = "README.md"
-repository = "https://codeberg.org/expede.darn"
+repository = "https://codeberg.org/expede/darn"
 rust-version = "1.90"
-version = "0.1.0"
+version = "0.2.0"
 
 [workspace.dependencies]
 # Local crates
 darn_core = { path = "darn_core" }
 
 anyhow = "1.0"
-bolero = "0.11"
 automerge = "0.7.3"
 blake3 = "1.8"
+bolero = "0.11"
 bs58 = { version = "0.5", features = ["check"] }
-dirs = "6.0"
-future_form = "0.2.0"
-automerge_sedimentree = { path = "../subduction/automerge_sedimentree" }
 clap = { version = "4.0", features = ["derive"] }
 cliclack = "0.3"
 console = "0.15"
-minicbor = { version = "2.1", default-features = false, features = ["alloc", "derive", "std"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-sedimentree_core = { path = "../subduction/sedimentree_core", features = ["std"] }
-sedimentree_fs_storage = { path = "../subduction/sedimentree_fs_storage" }
-subduction_core = { path = "../subduction/subduction_core", features = ["std", "test_utils"] }
-subduction_crypto = { path = "../subduction/subduction_crypto", features = ["std"] }
-subduction_websocket = { path = "../subduction/subduction_websocket", features = ["tokio_client"] }
+dirs = "6.0"
+future_form = "0.2"
+futures = "0.3"
 getrandom = "0.2"
 hex = "0.4"
 ignore = "0.4"
+minicbor = { version = "2.1", default-features = false, features = ["alloc", "derive", "std"] }
+notify-debouncer-mini = "0.5"
+sedimentree_core = { version = "0.4", features = ["std"] }
+sedimentree_fs_storage = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+subduction_core = { version = "0.4", features = ["std", "test_utils"] }
+subduction_crypto = { version = "0.1", features = ["std"] }
+subduction_websocket = { version = "0.4", features = ["tokio_client"] }
+tempfile = "3.16"
 thiserror = "2.0"
 tokio = { version = "1.0", features = ["full"] }
 tokio-util = "0.7"
-futures = "0.3"
-tracing = "0.1.44"
-tempfile = "3.16"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tungstenite = "0.27"
-tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
-notify-debouncer-mini = "0.5"
 walkdir = "2.5"
 
 [workspace.lints.rust]

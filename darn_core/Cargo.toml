@@ -17,11 +17,11 @@ workspace = true
 
 [dependencies]
 automerge.workspace = true
-automerge_sedimentree.workspace = true
 blake3.workspace = true
 bs58.workspace = true
 dirs.workspace = true
 future_form.workspace = true
+futures.workspace = true
 getrandom.workspace = true
 hex.workspace = true
 ignore.workspace = true
@@ -37,7 +37,6 @@ subduction_websocket.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
-futures.workspace = true
 tracing.workspace = true
 tungstenite.workspace = true
 walkdir.workspace = true
