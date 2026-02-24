@@ -12,10 +12,12 @@ use subduction_core::peer::id::PeerId;
 /// Returns `Ok(true)` if setup was completed (or already existed),
 /// `Ok(false)` if the user declined setup.
 ///
+/// In porcelain mode, auto-generates signer without prompting.
+///
 /// # Errors
 ///
 /// Returns an error if signer generation fails.
-pub(crate) fn ensure_signer() -> eyre::Result<bool> {
+pub(crate) fn ensure_signer(porcelain: bool) -> eyre::Result<bool> {
     if config::global_signer_exists() {
         return Ok(true);
     }
@@ -23,16 +25,20 @@ pub(crate) fn ensure_signer() -> eyre::Result<bool> {
     let signer_dir = config::global_signer_dir()?;
     let key_path = signer_dir.join("signing_key.ed25519");
 
-    // Non-interactive mode: auto-generate signer
-    if !std::io::stdin().is_terminal() {
-        println!("No signer found. Generating Ed25519 keypair...");
-        println!("  Location: {}", key_path.display());
-
+    // Non-interactive mode (porcelain or non-TTY): auto-generate signer
+    if porcelain || !std::io::stdin().is_terminal() {
         let s = signer::generate_and_save(&signer_dir)?;
         let peer_id: PeerId = s.verifying_key().into();
         let peer_id_str = bs58::encode(peer_id.as_bytes()).into_string();
 
-        println!("  Peer ID: {peer_id_str}");
+        if porcelain {
+            println!("signer_generated\t{}", key_path.display());
+            println!("peer_id\t{peer_id_str}");
+        } else {
+            println!("No signer found. Generating Ed25519 keypair...");
+            println!("  Location: {}", key_path.display());
+            println!("  Peer ID: {peer_id_str}");
+        }
         return Ok(true);
     }
 
