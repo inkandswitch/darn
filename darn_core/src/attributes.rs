@@ -280,6 +280,7 @@ pub enum AttributeError {
     },
 }
 
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;

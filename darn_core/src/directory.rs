@@ -99,11 +99,7 @@ fn url_to_sedimentree_id(url: &str) -> Result<SedimentreeId, DeserializeError> {
                 .into_vec()
                 .map_err(|e| e.to_string())
         })
-        .or_else(|_| {
-            bs58::decode(encoded)
-                .into_vec()
-                .map_err(|e| e.to_string())
-        })
+        .or_else(|_| bs58::decode(encoded).into_vec().map_err(|e| e.to_string()))
         .map_err(|e| DeserializeError::InvalidSchema(format!("invalid base58 in url: {e}")))?;
 
     let arr: [u8; 32] = match bytes.len() {
@@ -533,6 +529,7 @@ pub enum DeserializeError {
     InvalidSchema(String),
 }
 
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -659,8 +656,6 @@ mod tests {
         let decoded = bs58check_decode(&encoded).expect("decode should succeed");
         assert_eq!(decoded, payload);
     }
-
-
 
     #[test]
     fn sedimentree_url_roundtrip() {

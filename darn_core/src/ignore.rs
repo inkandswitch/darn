@@ -199,6 +199,7 @@ pub fn list_patterns(root: &Path) -> Result<Vec<String>, std::io::Error> {
         .collect())
 }
 
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;

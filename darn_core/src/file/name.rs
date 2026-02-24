@@ -60,6 +60,7 @@ impl std::fmt::Display for Name {
     }
 }
 
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;

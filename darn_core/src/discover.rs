@@ -497,6 +497,7 @@ where
     (final_results, final_errors, cancel.is_cancelled())
 }
 
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;
