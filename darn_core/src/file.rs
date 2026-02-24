@@ -505,31 +505,34 @@ pub enum DeserializeError {
     InvalidSchema(String),
 }
 
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+#[allow(clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;
+    use testresult::TestResult;
 
     #[test]
-    fn text_roundtrip() {
+    fn text_roundtrip() -> TestResult {
         let doc = File::text("hello.txt", "Hello, world!");
 
-        let am = doc.to_automerge().expect("to_automerge failed");
-        let loaded = File::from_automerge(&am).expect("from_automerge failed");
+        let am = doc.to_automerge()?;
+        let loaded = File::from_automerge(&am)?;
 
         assert_eq!(doc.name, loaded.name);
         assert_eq!(doc.content, loaded.content);
+        Ok(())
     }
 
     #[test]
-    fn binary_roundtrip() {
+    fn binary_roundtrip() -> TestResult {
         let doc = File::binary("image.png", vec![0x89, 0x50, 0x4E, 0x47]);
 
-        let am = doc.to_automerge().expect("to_automerge failed");
-        let loaded = File::from_automerge(&am).expect("from_automerge failed");
+        let am = doc.to_automerge()?;
+        let loaded = File::from_automerge(&am)?;
 
         assert_eq!(doc.name, loaded.name);
         assert_eq!(doc.content, loaded.content);
+        Ok(())
     }
 
     #[test]
@@ -539,174 +542,186 @@ mod tests {
     }
 
     #[test]
-    fn from_path_text() {
-        let dir = tempfile::tempdir().expect("create tempdir");
+    fn from_path_text() -> TestResult {
+        let dir = tempfile::tempdir()?;
         let file_path = dir.path().join("test.txt");
-        std::fs::write(&file_path, "Hello, world!").expect("write file");
+        std::fs::write(&file_path, "Hello, world!")?;
 
-        let doc = File::from_path(&file_path).expect("from_path");
+        let doc = File::from_path(&file_path)?;
 
         assert_eq!(doc.name.as_str(), "test.txt");
         assert_eq!(
             doc.content,
             content::Content::Text("Hello, world!".to_string())
         );
+        Ok(())
     }
 
     #[test]
-    fn from_path_binary() {
-        let dir = tempfile::tempdir().expect("create tempdir");
+    fn from_path_binary() -> TestResult {
+        let dir = tempfile::tempdir()?;
         let file_path = dir.path().join("data.bin");
         let binary_data = vec![0x00, 0xFF, 0x80, 0x7F];
-        std::fs::write(&file_path, &binary_data).expect("write file");
+        std::fs::write(&file_path, &binary_data)?;
 
-        let doc = File::from_path(&file_path).expect("from_path");
+        let doc = File::from_path(&file_path)?;
 
         assert_eq!(doc.name.as_str(), "data.bin");
         assert_eq!(doc.content, content::Content::Bytes(binary_data));
+        Ok(())
     }
 
     #[test]
-    fn write_to_path_text() {
-        let dir = tempfile::tempdir().expect("create tempdir");
+    fn write_to_path_text() -> TestResult {
+        let dir = tempfile::tempdir()?;
         let file_path = dir.path().join("output.txt");
 
         let doc = File::text("output.txt", "Written content");
-        doc.write_to_path(&file_path).expect("write_to_path");
+        doc.write_to_path(&file_path)?;
 
-        let content = std::fs::read_to_string(&file_path).expect("read file");
+        let content = std::fs::read_to_string(&file_path)?;
         assert_eq!(content, "Written content");
+        Ok(())
     }
 
     #[test]
-    fn write_to_path_binary() {
-        let dir = tempfile::tempdir().expect("create tempdir");
+    fn write_to_path_binary() -> TestResult {
+        let dir = tempfile::tempdir()?;
         let file_path = dir.path().join("output.bin");
         let binary_data = vec![0xDE, 0xAD, 0xBE, 0xEF];
 
         let doc = File::binary("output.bin", binary_data.clone());
-        doc.write_to_path(&file_path).expect("write_to_path");
+        doc.write_to_path(&file_path)?;
 
-        let content = std::fs::read(&file_path).expect("read file");
+        let content = std::fs::read(&file_path)?;
         assert_eq!(content, binary_data);
+        Ok(())
     }
 
     #[test]
-    fn roundtrip_via_filesystem() {
-        let dir = tempfile::tempdir().expect("create tempdir");
+    fn roundtrip_via_filesystem() -> TestResult {
+        let dir = tempfile::tempdir()?;
         let original_path = dir.path().join("original.rs");
         let output_path = dir.path().join("copy.rs");
 
         let original_content = "fn main() {\n    println!(\"Hello!\");\n}\n";
-        std::fs::write(&original_path, original_content).expect("write original");
+        std::fs::write(&original_path, original_content)?;
 
-        let doc = File::from_path(&original_path).expect("from_path");
-        doc.write_to_path(&output_path).expect("write_to_path");
+        let doc = File::from_path(&original_path)?;
+        doc.write_to_path(&output_path)?;
 
-        let written_content = std::fs::read_to_string(&output_path).expect("read output");
+        let written_content = std::fs::read_to_string(&output_path)?;
         assert_eq!(written_content, original_content);
+        Ok(())
     }
 
     #[test]
-    fn permissions_preserved_in_automerge() {
+    fn permissions_preserved_in_automerge() -> TestResult {
         let doc = File::text("script.sh", "#!/bin/bash\necho hi").with_permissions(0o755);
 
-        let am = doc.to_automerge().expect("to_automerge");
-        let loaded = File::from_automerge(&am).expect("from_automerge");
+        let am = doc.to_automerge()?;
+        let loaded = File::from_automerge(&am)?;
 
         assert_eq!(loaded.metadata.mode(), 0o755);
+        Ok(())
     }
 
     #[test]
-    fn empty_content_roundtrip() {
+    fn empty_content_roundtrip() -> TestResult {
         let text_doc = File::text("empty.txt", "");
-        let am = text_doc.to_automerge().expect("to_automerge");
-        let loaded = File::from_automerge(&am).expect("from_automerge");
+        let am = text_doc.to_automerge()?;
+        let loaded = File::from_automerge(&am)?;
         assert_eq!(loaded.content, content::Content::Text(String::new()));
 
         let binary_doc = File::binary("empty.bin", Vec::new());
-        let am = binary_doc.to_automerge().expect("to_automerge");
-        let loaded = File::from_automerge(&am).expect("from_automerge");
+        let am = binary_doc.to_automerge()?;
+        let loaded = File::from_automerge(&am)?;
         assert_eq!(loaded.content, content::Content::Bytes(Vec::new()));
+        Ok(())
     }
 
     #[test]
-    fn unicode_content_preserved() {
+    fn unicode_content_preserved() -> TestResult {
         let content = "Hello, 世界! 🦀 Ñoño";
         let doc = File::text("unicode.txt", content);
 
-        let am = doc.to_automerge().expect("to_automerge");
-        let loaded = File::from_automerge(&am).expect("from_automerge");
+        let am = doc.to_automerge()?;
+        let loaded = File::from_automerge(&am)?;
 
         assert_eq!(loaded.content, content::Content::Text(content.to_string()));
+        Ok(())
     }
 
     #[test]
-    fn large_content_roundtrip() {
+    fn large_content_roundtrip() -> TestResult {
         use std::fmt::Write;
         let mut content = String::new();
         for i in 0..10_000 {
-            writeln!(content, "Line {i}").expect("write to string");
+            writeln!(content, "Line {i}")?;
         }
         let doc = File::text("large.txt", &content);
 
-        let am = doc.to_automerge().expect("to_automerge");
-        let loaded = File::from_automerge(&am).expect("from_automerge");
+        let am = doc.to_automerge()?;
+        let loaded = File::from_automerge(&am)?;
 
         assert_eq!(loaded.content, content::Content::Text(content));
+        Ok(())
     }
 
     #[test]
-    fn large_file_defaults_to_binary() {
-        let dir = tempfile::tempdir().expect("create tempdir");
+    fn large_file_defaults_to_binary() -> TestResult {
+        let dir = tempfile::tempdir()?;
         let file_path = dir.path().join("big.txt");
 
         // Create a file just over the threshold (valid UTF-8 content)
         let content = "x".repeat(LARGE_FILE_THRESHOLD as usize + 1);
-        std::fs::write(&file_path, &content).expect("write file");
+        std::fs::write(&file_path, &content)?;
 
-        let doc = File::from_path(&file_path).expect("from_path");
+        let doc = File::from_path(&file_path)?;
 
         assert!(
             matches!(doc.content, content::Content::Bytes(_)),
             "large file should default to binary"
         );
+        Ok(())
     }
 
     #[test]
-    fn large_file_respects_text_attribute() {
+    fn large_file_respects_text_attribute() -> TestResult {
         use crate::attributes::AttributeRules;
 
-        let dir = tempfile::tempdir().expect("create tempdir");
+        let dir = tempfile::tempdir()?;
         let file_path = dir.path().join("big.txt");
 
         // Create .darnattributes forcing text
-        std::fs::write(dir.path().join(".darnattributes"), "*.txt text").expect("write attrs");
+        std::fs::write(dir.path().join(".darnattributes"), "*.txt text")?;
 
         // Create a file just over the threshold
         let content = "x".repeat(LARGE_FILE_THRESHOLD as usize + 1);
-        std::fs::write(&file_path, &content).expect("write file");
+        std::fs::write(&file_path, &content)?;
 
-        let attrs = AttributeRules::from_workspace_root(dir.path()).expect("load attrs");
-        let doc = File::from_path_with_attributes(&file_path, Some(&attrs)).expect("from_path");
+        let attrs = AttributeRules::from_workspace_root(dir.path())?;
+        let doc = File::from_path_with_attributes(&file_path, Some(&attrs))?;
 
         assert!(
             matches!(doc.content, content::Content::Text(_)),
             "explicit text attribute should override size heuristic"
         );
+        Ok(())
     }
 
     #[test]
-    fn extension_and_mimetype_set() {
+    fn extension_and_mimetype_set() -> TestResult {
         let doc = File::text("script.js", "console.log('hello');");
-        let am = doc.to_automerge().expect("to_automerge");
+        let am = doc.to_automerge()?;
 
         // Check extension
-        let ext = get_string(&am, ROOT, "extension").expect("extension");
+        let ext = get_string(&am, ROOT, "extension")?;
         assert_eq!(ext, "js");
 
         // Check mimeType
-        let mime = get_string(&am, ROOT, "mimeType").expect("mimeType");
+        let mime = get_string(&am, ROOT, "mimeType")?;
         assert_eq!(mime, "text/javascript");
+        Ok(())
     }
 }

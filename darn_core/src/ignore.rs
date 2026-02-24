@@ -199,11 +199,16 @@ pub fn list_patterns(root: &Path) -> Result<Vec<String>, std::io::Error> {
         .collect())
 }
 
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+#[allow(clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;
     use bolero::check;
+    use testresult::TestResult;
+
+    // NOTE: These two tests use bolero's `check!()` macro which expands to a
+    // bare `return;`, making them incompatible with a non-`()` return type.
+    // They keep `.expect()` for fallible setup and retain `clippy::expect_used`.
 
     #[test]
     fn darn_dir_always_ignored() {
@@ -261,38 +266,42 @@ mod tests {
     }
 
     #[test]
-    fn darnignore_patterns_respected() {
-        let dir = tempfile::tempdir().expect("create tempdir");
-        std::fs::write(dir.path().join(".darnignore"), "*.log\ntarget/\n")
-            .expect("write .darnignore");
+    fn darnignore_patterns_respected() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        std::fs::write(dir.path().join(".darnignore"), "*.log\ntarget/\n")?;
 
-        let rules = IgnoreRules::from_workspace_root(dir.path()).expect("build rules");
+        let rules = IgnoreRules::from_workspace_root(dir.path())?;
 
         assert!(rules.is_ignored(Path::new("debug.log"), false));
         assert!(rules.is_ignored(Path::new("logs/app.log"), false));
         assert!(rules.is_ignored(Path::new("target"), true));
         assert!(rules.is_ignored(Path::new("target/debug/binary"), false));
         assert!(!rules.is_ignored(Path::new("src/main.rs"), false));
+
+        Ok(())
     }
 
     #[test]
-    fn negation_patterns_work() {
-        let dir = tempfile::tempdir().expect("create tempdir");
-        std::fs::write(dir.path().join(".darnignore"), "*.log\n!important.log\n")
-            .expect("write .darnignore");
+    fn negation_patterns_work() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        std::fs::write(dir.path().join(".darnignore"), "*.log\n!important.log\n")?;
 
-        let rules = IgnoreRules::from_workspace_root(dir.path()).expect("build rules");
+        let rules = IgnoreRules::from_workspace_root(dir.path())?;
 
         assert!(rules.is_ignored(Path::new("debug.log"), false));
         assert!(!rules.is_ignored(Path::new("important.log"), false));
+
+        Ok(())
     }
 
     #[test]
-    fn missing_darnignore_is_fine() {
-        let dir = tempfile::tempdir().expect("create tempdir");
-        let rules = IgnoreRules::from_workspace_root(dir.path()).expect("build rules");
+    fn missing_darnignore_is_fine() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let rules = IgnoreRules::from_workspace_root(dir.path())?;
 
         assert!(rules.is_ignored(Path::new(".darn"), true));
         assert!(!rules.is_ignored(Path::new("foo.txt"), false));
+
+        Ok(())
     }
 }

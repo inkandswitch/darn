@@ -80,33 +80,38 @@ pub enum RefreshError {
     InvalidDocument(String),
 }
 
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+#[allow(clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::file::File;
+    use testresult::TestResult;
 
     #[test]
-    fn update_text_content() {
+    fn update_text_content() -> TestResult {
         let doc = File::text("test.txt", "original content");
-        let mut am_doc = doc.to_automerge().expect("to_automerge");
+        let mut am_doc = doc.to_automerge()?;
 
         let new_content = Content::Text("updated content".to_string());
-        update_automerge_content(&mut am_doc, new_content).expect("update content");
+        update_automerge_content(&mut am_doc, new_content)?;
 
-        let loaded = File::from_automerge(&am_doc).expect("from_automerge");
+        let loaded = File::from_automerge(&am_doc)?;
         assert_eq!(loaded.content, Content::Text("updated content".to_string()));
+
+        Ok(())
     }
 
     #[test]
-    fn update_binary_content() {
+    fn update_binary_content() -> TestResult {
         let doc = File::binary("test.bin", vec![1, 2, 3]);
-        let mut am_doc = doc.to_automerge().expect("to_automerge");
+        let mut am_doc = doc.to_automerge()?;
 
         let new_content = Content::Bytes(vec![4, 5, 6, 7]);
-        update_automerge_content(&mut am_doc, new_content).expect("update content");
+        update_automerge_content(&mut am_doc, new_content)?;
 
-        let loaded = File::from_automerge(&am_doc).expect("from_automerge");
+        let loaded = File::from_automerge(&am_doc)?;
         assert_eq!(loaded.content, Content::Bytes(vec![4, 5, 6, 7]));
+
+        Ok(())
     }
 }
