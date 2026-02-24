@@ -3,16 +3,18 @@
 //! Files in `darn` are stored as Automerge documents following the Patchwork convention:
 //!
 //! ```ignore
-//! File {
-//!   "@patchwork": { type: "file" },
+//! UnixFileEntry {
 //!   name: string,
 //!   content: Text | Bytes,
-//!   metadata: { permissions: u32 },
+//!   extension: string,
+//!   mimeType: string,
 //! }
 //! ```
 //!
 //! - Text files use `Text` (character-level CRDT with automatic merging)
 //! - Binary files use `Bytes` (last-writer-wins semantics)
+//!
+//! Note: Unix permissions are stored as a darn-specific extension field `_darn_mode`.
 
 pub mod content;
 pub mod file_type;
@@ -25,7 +27,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use automerge::{transaction::Transactable, AutoCommit, ObjType, ReadDoc, ROOT};
+use automerge::{transaction::Transactable, Automerge, AutomergeError, ObjType, ReadDoc, ROOT};
 use thiserror::Error;
 
 use crate::attributes::AttributeRules;
@@ -43,7 +45,7 @@ const LARGE_FILE_THRESHOLD: u64 = 1024 * 1024; // 1 MB
 /// A file represented as an Automerge document.
 ///
 /// This is the in-memory representation of a tracked file. It can be
-/// converted to/from an `AutoCommit` document for persistence and sync.
+/// converted to/from an Automerge document for persistence and sync.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct File {
     /// File name without path (e.g., "README.md", "Makefile").
@@ -159,30 +161,37 @@ impl File {
     /// # Errors
     ///
     /// Returns an error if the Automerge operations fail.
-    pub fn to_automerge(&self) -> Result<AutoCommit, SerializeError> {
-        let mut doc = AutoCommit::new();
+    pub fn to_automerge(&self) -> Result<Automerge, SerializeError> {
+        let mut doc = Automerge::new();
 
-        let patchwork = doc.put_object(ROOT, "@patchwork", ObjType::Map)?;
-        doc.put(&patchwork, "type", "file")?;
+        let extension = extract_extension(self.name.as_str());
+        let mime_type = mime_type_for_extension(&extension, self.content.is_text());
+        let mode = self.metadata.mode();
 
-        doc.put(ROOT, "name", self.name.as_str())?;
+        doc.transact::<_, _, AutomergeError>(|tx| {
+            tx.put(ROOT, "name", self.name.as_str())?;
 
-        match &self.content {
-            content::Content::Text(text) => {
-                let text_obj = doc.put_object(ROOT, "content", ObjType::Text)?;
-                doc.splice_text(&text_obj, 0, 0, text)?;
+            match &self.content {
+                content::Content::Text(text) => {
+                    let text_obj = tx.put_object(ROOT, "content", ObjType::Text)?;
+                    tx.splice_text(&text_obj, 0, 0, text)?;
+                }
+                content::Content::Bytes(bytes) => {
+                    tx.put(
+                        ROOT,
+                        "content",
+                        automerge::ScalarValue::Bytes(bytes.clone()),
+                    )?;
+                }
             }
-            content::Content::Bytes(bytes) => {
-                doc.put(
-                    ROOT,
-                    "content",
-                    automerge::ScalarValue::Bytes(bytes.clone()),
-                )?;
-            }
-        }
 
-        let metadata = doc.put_object(ROOT, "metadata", ObjType::Map)?;
-        doc.put(&metadata, "permissions", i64::from(self.metadata.mode()))?;
+            tx.put(ROOT, "extension", extension.as_str())?;
+            tx.put(ROOT, "mimeType", mime_type.as_str())?;
+            tx.put(ROOT, "_darn_mode", i64::from(mode))?;
+
+            Ok(())
+        })
+        .map_err(|f| f.error)?;
 
         Ok(doc)
     }
@@ -195,26 +204,39 @@ impl File {
     /// # Errors
     ///
     /// Returns an error if the Automerge operations fail.
-    pub fn into_automerge(self) -> Result<AutoCommit, SerializeError> {
-        let mut doc = AutoCommit::new();
+    pub fn into_automerge(self) -> Result<Automerge, SerializeError> {
+        let mut doc = Automerge::new();
 
-        let patchwork = doc.put_object(ROOT, "@patchwork", ObjType::Map)?;
-        doc.put(&patchwork, "type", "file")?;
+        let extension = extract_extension(self.name.as_str());
+        let mime_type = mime_type_for_extension(&extension, self.content.is_text());
+        let mode = self.metadata.mode();
+        let name = self.name;
+        let content = self.content;
 
-        doc.put(ROOT, "name", self.name.as_str())?;
+        doc.transact::<_, _, AutomergeError>(|tx| {
+            tx.put(ROOT, "name", name.as_str())?;
 
-        match self.content {
-            content::Content::Text(text) => {
-                let text_obj = doc.put_object(ROOT, "content", ObjType::Text)?;
-                doc.splice_text(&text_obj, 0, 0, &text)?;
+            match content {
+                content::Content::Text(ref text) => {
+                    let text_obj = tx.put_object(ROOT, "content", ObjType::Text)?;
+                    tx.splice_text(&text_obj, 0, 0, text)?;
+                }
+                content::Content::Bytes(ref bytes) => {
+                    tx.put(
+                        ROOT,
+                        "content",
+                        automerge::ScalarValue::Bytes(bytes.clone()),
+                    )?;
+                }
             }
-            content::Content::Bytes(bytes) => {
-                doc.put(ROOT, "content", automerge::ScalarValue::Bytes(bytes))?;
-            }
-        }
 
-        let metadata = doc.put_object(ROOT, "metadata", ObjType::Map)?;
-        doc.put(&metadata, "permissions", i64::from(self.metadata.mode()))?;
+            tx.put(ROOT, "extension", extension.as_str())?;
+            tx.put(ROOT, "mimeType", mime_type.as_str())?;
+            tx.put(ROOT, "_darn_mode", i64::from(mode))?;
+
+            Ok(())
+        })
+        .map_err(|f| f.error)?;
 
         Ok(doc)
     }
@@ -224,7 +246,7 @@ impl File {
     /// # Errors
     ///
     /// Returns an error if the document doesn't match the expected schema.
-    pub fn from_automerge(doc: &AutoCommit) -> Result<Self, DeserializeError> {
+    pub fn from_automerge(doc: &Automerge) -> Result<Self, DeserializeError> {
         let name = name::Name::new(get_string(doc, ROOT, "name")?);
 
         let file_content = match doc.get(ROOT, "content")? {
@@ -248,29 +270,33 @@ impl File {
             }
         };
 
-        // Read metadata
-        let Some((automerge::Value::Object(ObjType::Map), metadata_id)) =
-            doc.get(ROOT, "metadata")?
-        else {
-            return Err(DeserializeError::InvalidSchema(
-                "missing metadata object".into(),
-            ));
-        };
-
-        let permissions = match doc.get(&metadata_id, "permissions")? {
+        // Read permissions from _darn_mode (new) or metadata.permissions (legacy)
+        let permissions = match doc.get(ROOT, "_darn_mode")? {
             Some((automerge::Value::Scalar(s), _)) => match s.as_ref() {
                 automerge::ScalarValue::Int(i) => u32::try_from(*i).unwrap_or(0o644),
                 automerge::ScalarValue::Uint(u) => u32::try_from(*u).unwrap_or(0o644),
-                automerge::ScalarValue::Str(_)
-                | automerge::ScalarValue::Bytes(_)
-                | automerge::ScalarValue::F64(_)
-                | automerge::ScalarValue::Counter(_)
-                | automerge::ScalarValue::Timestamp(_)
-                | automerge::ScalarValue::Boolean(_)
-                | automerge::ScalarValue::Null
-                | automerge::ScalarValue::Unknown { .. } => 0o644,
+                _ => 0o644,
             },
-            _ => 0o644,
+            _ => {
+                // Fall back to legacy metadata.permissions
+                match doc.get(ROOT, "metadata")? {
+                    Some((automerge::Value::Object(ObjType::Map), metadata_id)) => {
+                        match doc.get(&metadata_id, "permissions")? {
+                            Some((automerge::Value::Scalar(s), _)) => match s.as_ref() {
+                                automerge::ScalarValue::Int(i) => {
+                                    u32::try_from(*i).unwrap_or(0o644)
+                                }
+                                automerge::ScalarValue::Uint(u) => {
+                                    u32::try_from(*u).unwrap_or(0o644)
+                                }
+                                _ => 0o644,
+                            },
+                            _ => 0o644,
+                        }
+                    }
+                    _ => 0o644,
+                }
+            }
         };
 
         Ok(Self {
@@ -302,38 +328,80 @@ impl File {
     }
 }
 
+/// Extract file extension from a filename.
+fn extract_extension(name: &str) -> String {
+    Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Get MIME type for a file extension.
+fn mime_type_for_extension(extension: &str, is_text: bool) -> String {
+    match extension.to_lowercase().as_str() {
+        // Text formats
+        "html" | "htm" => "text/html",
+        "css" => "text/css",
+        "js" | "mjs" => "text/javascript",
+        "json" => "application/json",
+        "xml" => "application/xml",
+        "md" => "text/markdown",
+        "txt" => "text/plain",
+        "rs" => "text/x-rust",
+        "ts" => "text/typescript",
+        "tsx" => "text/typescript-jsx",
+        "jsx" => "text/javascript-jsx",
+        "yaml" | "yml" => "text/yaml",
+        "toml" => "text/toml",
+        "sh" => "text/x-shellscript",
+
+        // Image formats
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "webp" => "image/webp",
+        "ico" => "image/x-icon",
+
+        // Other binary formats
+        "wasm" => "application/wasm",
+        "pdf" => "application/pdf",
+        "zip" => "application/zip",
+        "tar" => "application/x-tar",
+        "gz" => "application/gzip",
+
+        // Source maps
+        "map" => "application/json",
+
+        // Default based on content type
+        _ => {
+            if is_text {
+                "text/plain"
+            } else {
+                "application/octet-stream"
+            }
+        }
+    }
+    .to_string()
+}
+
 /// Helper to get a string value from an Automerge document.
 fn get_string(
-    doc: &AutoCommit,
+    doc: &Automerge,
     obj: automerge::ObjId,
     key: &str,
 ) -> Result<String, DeserializeError> {
     match doc.get(obj, key)? {
         Some((automerge::Value::Scalar(s), _)) => match s.as_ref() {
             automerge::ScalarValue::Str(s) => Ok(s.to_string()),
-            automerge::ScalarValue::Bytes(_)
-            | automerge::ScalarValue::Int(_)
-            | automerge::ScalarValue::Uint(_)
-            | automerge::ScalarValue::F64(_)
-            | automerge::ScalarValue::Counter(_)
-            | automerge::ScalarValue::Timestamp(_)
-            | automerge::ScalarValue::Boolean(_)
-            | automerge::ScalarValue::Null
-            | automerge::ScalarValue::Unknown { .. } => Err(DeserializeError::InvalidSchema(
-                format!("{key} must be a string"),
-            )),
+            _ => Err(DeserializeError::InvalidSchema(format!(
+                "{key} must be a string"
+            ))),
         },
         _ => Err(DeserializeError::InvalidSchema(format!(
             "missing {key} field"
         ))),
-    }
-}
-
-impl TryFrom<&AutoCommit> for File {
-    type Error = DeserializeError;
-
-    fn try_from(doc: &AutoCommit) -> Result<File, DeserializeError> {
-        File::from_automerge(doc)
     }
 }
 
@@ -625,5 +693,19 @@ mod tests {
             matches!(doc.content, content::Content::Text(_)),
             "explicit text attribute should override size heuristic"
         );
+    }
+
+    #[test]
+    fn extension_and_mimetype_set() {
+        let doc = File::text("script.js", "console.log('hello');");
+        let am = doc.to_automerge().expect("to_automerge");
+
+        // Check extension
+        let ext = get_string(&am, ROOT, "extension").expect("extension");
+        assert_eq!(ext, "js");
+
+        // Check mimeType
+        let mime = get_string(&am, ROOT, "mimeType").expect("mimeType");
+        assert_eq!(mime, "text/javascript");
     }
 }

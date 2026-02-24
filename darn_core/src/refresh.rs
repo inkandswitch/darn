@@ -1,6 +1,6 @@
 //! Refresh error types and Automerge content update helpers.
 
-use automerge::{transaction::Transactable, AutoCommit, ObjType, ReadDoc, ROOT};
+use automerge::{transaction::Transactable, Automerge, AutomergeError, ObjType, ReadDoc, ROOT};
 use thiserror::Error;
 
 use crate::file::content::Content;
@@ -19,12 +19,12 @@ use crate::sedimentree::SedimentreeError;
 /// - The document schema is invalid (content field missing or wrong type)
 /// - An Automerge operation fails
 pub fn update_automerge_content(
-    doc: &mut AutoCommit,
+    doc: &mut Automerge,
     new_content: Content,
 ) -> Result<(), RefreshError> {
-    match new_content {
-        Content::Text(text) => {
-            // Get the content text object
+    // For text, we need to get the content_id first (read-only)
+    let content_info = match &new_content {
+        Content::Text(_) => {
             let Some((automerge::Value::Object(ObjType::Text), content_id)) =
                 doc.get(ROOT, "content")?
             else {
@@ -32,17 +32,27 @@ pub fn update_automerge_content(
                     "content must be Text object".into(),
                 ));
             };
-
-            // Replace all text content
             let old_len = doc.text(&content_id)?.chars().count();
-            let old_len_isize = isize::try_from(old_len).unwrap_or(isize::MAX);
-            doc.splice_text(&content_id, 0, old_len_isize, &text)?;
+            Some((content_id, old_len))
         }
-        Content::Bytes(bytes) => {
-            // Replace bytes directly (LWW, no clone needed)
-            doc.put(ROOT, "content", automerge::ScalarValue::Bytes(bytes))?;
+        Content::Bytes(_) => None,
+    };
+
+    doc.transact::<_, _, AutomergeError>(|tx| {
+        match new_content {
+            Content::Text(text) => {
+                let (content_id, old_len) = content_info.expect("content_info set for text");
+                let old_len_isize = isize::try_from(old_len).unwrap_or(isize::MAX);
+                tx.splice_text(&content_id, 0, old_len_isize, &text)?;
+            }
+            Content::Bytes(bytes) => {
+                tx.put(ROOT, "content", automerge::ScalarValue::Bytes(bytes))?;
+            }
         }
-    }
+        Ok(())
+    })
+    .map_err(|f| f.error)?;
+
     Ok(())
 }
 
