@@ -15,7 +15,7 @@ use std::{
 use console::Style;
 use darn_core::{
     darn::Darn,
-    directory::{Directory, entry::EntryType},
+    directory::{Directory, entry::EntryType, sedimentree_id_to_url},
     discover::{DiscoverProgress, DiscoverResult},
     file::{File, file_type::FileType, state::FileState},
     manifest::{Manifest, content_hash, tracked::Tracked},
@@ -129,10 +129,8 @@ pub(crate) async fn init(path: &Path) -> eyre::Result<()> {
         // Convert to Automerge
         let mut am_doc = doc.into_automerge()?;
 
-        // Generate random SedimentreeId
-        let mut id_bytes = [0u8; 32];
-        getrandom::getrandom(&mut id_bytes)?;
-        let sedimentree_id = sedimentree_core::id::SedimentreeId::new(id_bytes);
+        // Generate random SedimentreeId (16-byte for automerge-repo compatibility)
+        let sedimentree_id = darn_core::generate_sedimentree_id();
 
         // Store as sedimentree commits
         darn_core::sedimentree::store_document(
@@ -190,10 +188,7 @@ pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path) -> eyre::Result<()
     let root_dir_id = SedimentreeId::new(root_id_bytes);
 
     let dim = Style::new().dim();
-    let display_url = format!(
-        "automerge:{}",
-        bs58::encode(&root_id_bytes).with_check().into_string()
-    );
+    let display_url = sedimentree_id_to_url(root_dir_id);
     cliclack::log::info(format!("Root directory: {}", dim.apply_to(&display_url)))?;
 
     // Step 2: Check we have peers configured
@@ -515,15 +510,13 @@ pub(crate) fn tree() -> eyre::Result<()> {
                 red.apply_to("!").to_string()
             }
         };
-        let sed_id = bs58::encode(entry.sedimentree_id.as_bytes())
-            .with_check()
-            .into_string();
+        let url = sedimentree_id_to_url(entry.sedimentree_id);
         writeln!(
             file_list,
             "{} {}  {}",
             styled_indicator,
             entry.relative_path.display(),
-            dim.apply_to(format!("automerge:{sed_id}"))
+            dim.apply_to(&url)
         )
         .expect("write to string");
     }
@@ -599,10 +592,7 @@ pub(crate) async fn stat(target: &str) -> eyre::Result<()> {
 
     // Build stats content
     let dim = Style::new().dim();
-    let sed_id_str = format!(
-        "automerge:{}",
-        bs58::encode(sed_id.as_bytes()).with_check().into_string()
-    );
+    let sed_id_str = sedimentree_id_to_url(sed_id);
     let fs_digest = bs58::encode(tracked.file_system_digest.as_bytes()).into_string();
     let sed_digest = bs58::encode(tracked.sedimentree_digest.as_bytes()).into_string();
 
@@ -644,10 +634,15 @@ pub(crate) async fn stat(target: &str) -> eyre::Result<()> {
 /// Returns an error if the input is invalid or not 32 bytes.
 fn parse_automerge_url(s: &str) -> eyre::Result<[u8; 32]> {
     let bytes = if let Some(encoded) = s.strip_prefix("automerge:") {
-        // Automerge URL format with base58check
-        bs58::decode(encoded)
-            .with_check(None)
-            .into_vec()
+        // Try JS-compatible bs58check first, then Rust's with_check, then plain bs58
+        darn_core::directory::bs58check_decode(encoded)
+            .or_else(|_| {
+                bs58::decode(encoded)
+                    .with_check(None)
+                    .into_vec()
+                    .map_err(|e| e.to_string())
+            })
+            .or_else(|_| bs58::decode(encoded).into_vec().map_err(|e| e.to_string()))
             .map_err(|e| eyre::eyre!("invalid automerge URL: {e}"))?
     } else {
         // Plain base58 (no checksum)
@@ -656,13 +651,20 @@ fn parse_automerge_url(s: &str) -> eyre::Result<[u8; 32]> {
             .map_err(|e| eyre::eyre!("invalid base58: {e}"))?
     };
 
-    if bytes.len() != 32 {
-        eyre::bail!("ID must be 32 bytes (got {})", bytes.len());
+    // Accept 16-byte IDs (zero-pad to 32) or 32-byte IDs
+    match bytes.len() {
+        16 => {
+            let mut arr = [0u8; 32];
+            arr[..16].copy_from_slice(&bytes);
+            Ok(arr)
+        }
+        32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            Ok(arr)
+        }
+        n => eyre::bail!("ID must be 16 or 32 bytes (got {n})"),
     }
-
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&bytes);
-    Ok(arr)
 }
 
 /// Try to parse a sedimentree ID from an automerge URL or plain base58.
@@ -1598,10 +1600,8 @@ async fn track_single_file(
     // Convert to Automerge
     let mut am_doc = doc.into_automerge()?;
 
-    // Generate random SedimentreeId
-    let mut id_bytes = [0u8; 32];
-    getrandom::getrandom(&mut id_bytes)?;
-    let sedimentree_id = sedimentree_core::id::SedimentreeId::new(id_bytes);
+    // Generate random SedimentreeId (16-byte for automerge-repo compatibility)
+    let sedimentree_id = darn_core::generate_sedimentree_id();
 
     // Store as sedimentree commits
     sedimentree::store_document(darn.subduction(), sedimentree_id, &mut am_doc).await?;
@@ -1825,14 +1825,7 @@ pub(crate) fn info() -> eyre::Result<()> {
             let manifest = darn.load_manifest();
             let root_id_str = manifest
                 .as_ref()
-                .map(|m| {
-                    format!(
-                        "automerge:{}",
-                        bs58::encode(m.root_directory_id().as_bytes())
-                            .with_check()
-                            .into_string()
-                    )
-                })
+                .map(|m| sedimentree_id_to_url(m.root_directory_id()))
                 .unwrap_or_else(|_| "(error)".to_string());
             let file_count = manifest.as_ref().map(|m| m.len()).unwrap_or(0);
 

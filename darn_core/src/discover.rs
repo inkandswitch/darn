@@ -316,10 +316,13 @@ async fn ensure_parent_directories_cached(
     Ok(parent_id)
 }
 
-/// Generate a random `SedimentreeId`.
+/// Generate a random `SedimentreeId` compatible with automerge-repo.
+///
+/// Uses 16 random bytes (zero-padded to 32) for automerge URL compatibility.
 fn generate_sedimentree_id() -> Result<SedimentreeId, FileProcessError> {
     let mut id_bytes = [0u8; 32];
-    getrandom::getrandom(&mut id_bytes).map_err(|e| FileProcessError::Random(e.to_string()))?;
+    // Only fill first 16 bytes; rest stays zero for automerge-repo compatibility
+    getrandom::getrandom(&mut id_bytes[..16]).map_err(|e| FileProcessError::Random(e.to_string()))?;
     Ok(SedimentreeId::new(id_bytes))
 }
 

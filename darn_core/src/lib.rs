@@ -10,6 +10,25 @@
 
 #![forbid(unsafe_code)]
 
+use sedimentree_core::id::SedimentreeId;
+
+/// Generate a new random `SedimentreeId` compatible with automerge-repo.
+///
+/// Generates 16 random bytes (zero-padded to 32 bytes) so that when encoded
+/// as an automerge URL using `directory::sedimentree_id_to_url`, it produces
+/// a valid 16-byte bs58check URL that automerge-repo can parse.
+///
+/// # Panics
+///
+/// Panics if the system random number generator fails.
+#[must_use]
+pub fn generate_sedimentree_id() -> SedimentreeId {
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes[..16]).expect("getrandom failed");
+    // Leave bytes 16..32 as zeros
+    SedimentreeId::new(bytes)
+}
+
 pub mod attributes;
 pub mod config;
 pub mod darn;

@@ -381,9 +381,14 @@ pub async fn find_directory_id(
 }
 
 /// Generate a random sedimentree ID.
+///
+/// Only the first 16 bytes are randomized; the remaining 16 bytes are zero.
+/// This ensures compatibility with automerge-repo's 16-byte document IDs
+/// when converting to/from automerge URLs.
 fn generate_sedimentree_id() -> Result<SedimentreeId, SedimentreeError> {
     let mut id_bytes = [0u8; 32];
-    getrandom::getrandom(&mut id_bytes).map_err(SedimentreeError::Random)?;
+    // Only randomize the first 16 bytes for automerge-repo compatibility
+    getrandom::getrandom(&mut id_bytes[..16]).map_err(SedimentreeError::Random)?;
     Ok(SedimentreeId::new(id_bytes))
 }
 

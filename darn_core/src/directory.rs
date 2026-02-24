@@ -21,27 +21,111 @@ pub mod entry;
 use self::entry::{DirectoryEntry, EntryType};
 use automerge::{transaction::Transactable, Automerge, AutomergeError, ObjType, ReadDoc, ROOT};
 use sedimentree_core::id::SedimentreeId;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+/// Encode bytes as bs58check (matching JavaScript's `bs58check` library).
+///
+/// JavaScript's `bs58check` encodes as: `base58(payload || sha256d(payload)[..4])`.
+/// Note: Rust's `bs58::encode().with_check()` prepends a version byte (`0x00`),
+/// which is incompatible with the JS library. This function computes the checksum
+/// manually to match.
+fn bs58check_encode(payload: &[u8]) -> String {
+    let checksum = {
+        let first = Sha256::digest(payload);
+        let second = Sha256::digest(first);
+        second
+    };
+
+    let mut buf = Vec::with_capacity(payload.len() + 4);
+    buf.extend_from_slice(payload);
+    buf.extend_from_slice(&checksum[..4]);
+
+    bs58::encode(buf).into_string()
+}
+
+/// Decode a bs58check string (matching JavaScript's `bs58check` library).
+///
+/// Returns the payload bytes after verifying the 4-byte SHA-256d checksum.
+pub fn bs58check_decode(encoded: &str) -> Result<Vec<u8>, String> {
+    let bytes = bs58::decode(encoded)
+        .into_vec()
+        .map_err(|e| format!("invalid base58: {e}"))?;
+
+    if bytes.len() < 5 {
+        return Err("too short for bs58check".into());
+    }
+
+    let (payload, checksum) = bytes.split_at(bytes.len() - 4);
+    let expected = {
+        let first = Sha256::digest(payload);
+        let second = Sha256::digest(first);
+        second
+    };
+
+    if checksum != &expected[..4] {
+        return Err("checksum mismatch".into());
+    }
+
+    Ok(payload.to_vec())
+}
+
 /// Convert a `SedimentreeId` to an Automerge URL string.
-fn sedimentree_id_to_url(id: SedimentreeId) -> String {
-    format!("automerge:{}", bs58::encode(id.as_bytes()).into_string())
+///
+/// Uses bs58check encoding of the first 16 bytes for compatibility with automerge-repo,
+/// which expects 16-byte document IDs. The remaining 16 bytes of the sedimentree ID
+/// are assumed to be zero-padding.
+#[must_use]
+pub fn sedimentree_id_to_url(id: SedimentreeId) -> String {
+    let bytes = id.as_bytes();
+    format!("automerge:{}", bs58check_encode(&bytes[..16]))
 }
 
 /// Parse an Automerge URL string to a `SedimentreeId`.
+///
+/// Accepts both 16-byte (automerge-repo style) and 32-byte (legacy darn) IDs.
+/// For 16-byte IDs, zero-pads to 32 bytes for `SedimentreeId`.
 fn url_to_sedimentree_id(url: &str) -> Result<SedimentreeId, DeserializeError> {
     let encoded = url.strip_prefix("automerge:").ok_or_else(|| {
         DeserializeError::InvalidSchema(format!("url must start with 'automerge:': {url}"))
     })?;
 
-    let bytes = bs58::decode(encoded)
-        .into_vec()
+    // Try JS-compatible bs58check first, then Rust's bs58check (version byte),
+    // then plain bs58 for backward compatibility
+    let bytes = bs58check_decode(encoded)
+        .or_else(|_| {
+            bs58::decode(encoded)
+                .with_check(None)
+                .into_vec()
+                .map_err(|e| e.to_string())
+        })
+        .or_else(|_| {
+            bs58::decode(encoded)
+                .into_vec()
+                .map_err(|e| e.to_string())
+        })
         .map_err(|e| DeserializeError::InvalidSchema(format!("invalid base58 in url: {e}")))?;
 
-    let arr: [u8; 32] = bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| DeserializeError::InvalidSchema("url must encode exactly 32 bytes".into()))?;
+    let arr: [u8; 32] = match bytes.len() {
+        16 => {
+            // 16-byte automerge-repo style ID: zero-pad to 32 bytes
+            let mut arr = [0u8; 32];
+            arr[..16].copy_from_slice(&bytes);
+            arr
+        }
+        32 => {
+            // 32-byte legacy darn ID
+            bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| DeserializeError::InvalidSchema("invalid 32-byte id".into()))?
+        }
+        n => {
+            return Err(DeserializeError::InvalidSchema(format!(
+                "url must encode 16 or 32 bytes, got {n}"
+            )));
+        }
+    };
 
     Ok(SedimentreeId::new(arr))
 }
@@ -453,9 +537,11 @@ pub enum DeserializeError {
 mod tests {
     use super::*;
 
+    /// Generate a random 16-byte ID (zero-padded to 32) matching our convention
+    /// for automerge-repo compatibility.
     fn random_id() -> SedimentreeId {
         let mut bytes = [0u8; 32];
-        getrandom::getrandom(&mut bytes).expect("getrandom failed");
+        getrandom::getrandom(&mut bytes[..16]).expect("getrandom failed");
         SedimentreeId::new(bytes)
     }
 
@@ -562,6 +648,29 @@ mod tests {
         let src = loaded.get("src").expect("src exists");
         assert_eq!(src.entry_type, EntryType::Folder);
         assert_eq!(src.sedimentree_id, folder_id);
+    }
+
+    #[test]
+    fn bs58check_roundtrip() {
+        let mut payload = [0u8; 16];
+        getrandom::getrandom(&mut payload).expect("getrandom failed");
+
+        let encoded = bs58check_encode(&payload);
+        let decoded = bs58check_decode(&encoded).expect("decode should succeed");
+        assert_eq!(decoded, payload);
+    }
+
+
+
+    #[test]
+    fn sedimentree_url_roundtrip() {
+        let id = random_id();
+        let url = sedimentree_id_to_url(id);
+
+        assert!(url.starts_with("automerge:"));
+
+        let recovered = url_to_sedimentree_id(&url).expect("parse url");
+        assert_eq!(recovered, id);
     }
 
     #[test]

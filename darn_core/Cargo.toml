@@ -19,6 +19,7 @@ workspace = true
 automerge.workspace = true
 blake3.workspace = true
 bs58.workspace = true
+sha2 = "0.10"
 dirs.workspace = true
 future_form.workspace = true
 futures.workspace = true

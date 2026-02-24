@@ -38,15 +38,16 @@ impl Default for Manifest {
 impl Manifest {
     /// Creates an empty manifest with a new random root directory ID.
     ///
+    /// Generates a 16-byte random ID (zero-padded to 32 bytes) for compatibility
+    /// with automerge-repo's 16-byte document IDs.
+    ///
     /// # Panics
     ///
     /// Panics if the system random number generator fails.
     #[must_use]
     pub fn new() -> Self {
-        let mut root_bytes = [0u8; 32];
-        getrandom::getrandom(&mut root_bytes).expect("getrandom failed");
         Self {
-            root_directory_id: SedimentreeId::new(root_bytes),
+            root_directory_id: crate::generate_sedimentree_id(),
             entries: BTreeMap::new(),
         }
     }
