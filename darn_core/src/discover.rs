@@ -17,6 +17,7 @@ use sedimentree_core::id::SedimentreeId;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    attributes::AttributeRules,
     file::{file_type::FileType, File, SerializeError},
     ignore::IgnoreRules,
     manifest::{content_hash::{self, FileSystemContent}, tracked::Tracked, Manifest},
@@ -157,9 +158,12 @@ fn collect_discovery_candidates(
     for entry in walkdir::WalkDir::new(root)
         .into_iter()
         .filter_entry(|e| {
-            // Skip hidden directories and .darn, but allow .darnignore
+            // Skip hidden directories and .darn, but allow config files
             let name = e.file_name().to_string_lossy();
-            !name.starts_with('.') || e.depth() == 0 || name == ".darnignore"
+            !name.starts_with('.')
+                || e.depth() == 0
+                || name == ".darnignore"
+                || name == ".darnattributes"
         })
     {
         let entry = match entry {
@@ -209,23 +213,34 @@ pub(crate) async fn process_single_file(
     subduction: &DarnSubduction,
     root_dir_id: SedimentreeId,
     dir_cache: &ShardedDirCache,
+    attributes: &AttributeRules,
 ) -> Result<DiscoveredFile, FileProcessError> {
     let relative_path = path
         .strip_prefix(root)
         .map_err(|_| FileProcessError::InvalidPath)?
         .to_path_buf();
 
-    // Read file
-    let doc = File::from_path(path).map_err(FileProcessError::Read)?;
+    // CPU-intensive work: file read + Automerge conversion
+    // Run on blocking threadpool to avoid starving the async runtime
+    let path_owned = path.to_path_buf();
+    let attributes_default = attributes.clone();
+    let (file_type, am_doc) = tokio::task::spawn_blocking(move || {
+        let doc = File::from_path_with_attributes(&path_owned, Some(&attributes_default))
+            .map_err(FileProcessError::Read)?;
 
-    let file_type = if doc.content.is_text() {
-        FileType::Text
-    } else {
-        FileType::Binary
-    };
+        let file_type = if doc.content.is_text() {
+            FileType::Text
+        } else {
+            FileType::Binary
+        };
 
-    // Convert to Automerge
-    let mut am_doc = doc.into_automerge().map_err(FileProcessError::Automerge)?;
+        let am_doc = doc.into_automerge().map_err(FileProcessError::Automerge)?;
+        Ok::<_, FileProcessError>((file_type, am_doc))
+    })
+    .await
+    .map_err(|e| FileProcessError::Spawn(e.to_string()))??;
+
+    let mut am_doc = am_doc;
 
     // Generate random SedimentreeId
     let sedimentree_id = generate_sedimentree_id()?;
@@ -250,8 +265,14 @@ pub(crate) async fn process_single_file(
         .await
         .map_err(FileProcessError::Sedimentree)?;
 
-    // Compute digests
-    let file_system_digest = content_hash::hash_file(path).map_err(FileProcessError::Hash)?;
+    // Compute digests (hash is CPU-bound, run on blocking pool)
+    let path_for_hash = path.to_path_buf();
+    let file_system_digest = tokio::task::spawn_blocking(move || {
+        content_hash::hash_file(&path_for_hash)
+    })
+    .await
+    .map_err(|e| FileProcessError::Spawn(e.to_string()))?
+    .map_err(FileProcessError::Hash)?;
     let sedimentree_digest = sedimentree::compute_digest(subduction, sedimentree_id)
         .await
         .map_err(FileProcessError::Sedimentree)?;
@@ -328,6 +349,10 @@ pub enum FileProcessError {
     /// Random number generation failed.
     #[error("random generation failed: {0}")]
     Random(String),
+
+    /// Failed to spawn blocking task.
+    #[error("spawn error: {0}")]
+    Spawn(String),
 }
 
 /// Ingest files into storage in parallel.
@@ -366,6 +391,9 @@ where
         return (Vec::new(), Vec::new(), false);
     }
 
+    // Load attribute rules for file type detection
+    let attributes = AttributeRules::from_workspace_root(root).unwrap_or_default();
+
     // Process in parallel
     let concurrency = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -388,6 +416,7 @@ where
             let completed = &completed;
             let in_flight = &in_flight;
             let on_progress = &on_progress;
+            let attributes = &attributes;
 
             async move {
                 // Check cancellation before processing
@@ -400,7 +429,7 @@ where
 
                 // Process the file
                 let result =
-                    process_single_file(&path, root, subduction, root_dir_id, dir_cache).await;
+                    process_single_file(&path, root, subduction, root_dir_id, dir_cache, attributes).await;
 
                 // Update counters and last_completed
                 in_flight.fetch_sub(1, Ordering::Relaxed);

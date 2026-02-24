@@ -23,6 +23,7 @@ dirs.workspace = true
 future_form.workspace = true
 futures.workspace = true
 getrandom.workspace = true
+globset.workspace = true
 hex.workspace = true
 ignore.workspace = true
 minicbor.workspace = true

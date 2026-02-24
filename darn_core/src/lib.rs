@@ -10,6 +10,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod attributes;
 pub mod config;
 pub mod darn;
 pub mod directory;

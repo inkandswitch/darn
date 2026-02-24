@@ -21,6 +21,7 @@ use tungstenite::http::Uri;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    attributes::AttributeRules,
     config::{self, NoConfigDir},
     directory::{Directory, entry::EntryType},
     discover::{self, DiscoverProgress, DiscoverResult},
@@ -93,6 +94,9 @@ impl Darn {
         // Create default .darnignore file
         crate::ignore::create_default(&root)?;
 
+        // Create default .darnattributes file
+        crate::attributes::create_default_darnattributes(&root)?;
+
         // Ensure global signer exists
         let signer_dir = config::global_signer_dir()?;
         let signer = signer::load_or_generate(&signer_dir)?;
@@ -136,6 +140,9 @@ impl Darn {
         // Create manifest with the provided root directory ID
         let manifest = crate::manifest::Manifest::with_root_id(root_directory_id);
         manifest.save(&darn_dir.join(MANIFEST_FILE))?;
+
+        // Create default .darnattributes file
+        crate::attributes::create_default_darnattributes(&root)?;
 
         // Ensure global signer exists
         let signer_dir = config::global_signer_dir()?;
@@ -314,9 +321,12 @@ impl Darn {
             FileState::Modified => {}
         }
 
+        // Load attribute rules for consistent file type detection
+        let attributes = AttributeRules::from_workspace_root(&self.root).ok();
+
         // Read current file content
         let current_fs_digest = content_hash::hash_file(&path)?;
-        let new_file = File::from_path(&path)?;
+        let new_file = File::from_path_with_attributes(&path, attributes.as_ref())?;
 
         // Load existing Automerge doc from sedimentree
         let mut am_doc = sedimentree::load_document(&self.subduction, entry.sedimentree_id)
@@ -1078,11 +1088,20 @@ impl Darn {
         // Register the authenticated connection (without auto-syncing - we handle sync manually below)
         self.subduction.register(authenticated_connection).await?;
 
-        // Collect sedimentree IDs to sync:
-        // - Root directory
-        // - All tracked files
-        let mut sedimentree_ids: Vec<_> = vec![manifest.root_directory_id()];
-        sedimentree_ids.extend(manifest.iter().map(|e| e.sedimentree_id));
+        // Collect ALL sedimentree IDs to sync (root, all directories, and all files)
+        let root_dir_id = manifest.root_directory_id();
+        let mut all_ids = std::collections::HashSet::new();
+        all_ids.insert(root_dir_id);
+
+        // Traverse directory tree to find all subdirectories
+        if let Err(e) = self.collect_all_sedimentree_ids(root_dir_id, &mut all_ids).await {
+            tracing::warn!("Error collecting directory tree IDs: {e}");
+        }
+
+        // Also include all file IDs from manifest (in case tree traversal missed any)
+        all_ids.extend(manifest.iter().map(|e| e.sedimentree_id));
+
+        let sedimentree_ids: Vec<_> = all_ids.into_iter().collect();
 
         // Build path lookup for progress reporting
         let path_lookup: std::collections::HashMap<_, _> = manifest

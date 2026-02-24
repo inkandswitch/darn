@@ -28,8 +28,17 @@ use std::{
 use automerge::{transaction::Transactable, AutoCommit, ObjType, ReadDoc, ROOT};
 use thiserror::Error;
 
+use crate::attributes::AttributeRules;
+
 /// Chunk size for streaming UTF-8 validation.
 const UTF8_CHECK_CHUNK_SIZE: usize = 64 * 1024; // 64 KB
+
+/// Files larger than this are treated as binary by default.
+///
+/// Character-level CRDT merging is expensive for large files, and files this
+/// size are almost always generated (bundler output, build artifacts, etc.)
+/// rather than hand-edited. Users can override with `*.ext text` in `.darnattributes`.
+const LARGE_FILE_THRESHOLD: u64 = 1024 * 1024; // 1 MB
 
 /// A file represented as an Automerge document.
 ///
@@ -77,6 +86,22 @@ impl File {
     ///
     /// Returns an error if the file cannot be read.
     pub fn from_path(path: &Path) -> Result<Self, ReadFileError> {
+        Self::from_path_with_attributes(path, None)
+    }
+
+    /// Creates a file document from a filesystem path with attribute rules.
+    ///
+    /// If `attributes` is provided and matches the file path, the specified
+    /// file type (text/binary) is used. Otherwise, falls back to automatic
+    /// detection via streaming UTF-8 validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read.
+    pub fn from_path_with_attributes(
+        path: &Path,
+        attributes: Option<&AttributeRules>,
+    ) -> Result<Self, ReadFileError> {
         let name = name::Name::from_path(path)
             .ok_or_else(|| ReadFileError::InvalidPath(path.to_path_buf()))?;
 
@@ -91,8 +116,26 @@ impl File {
         #[cfg(not(unix))]
         let permissions = 0o644;
 
-        // Use streaming UTF-8 validation to detect text vs binary
-        let file_content = streaming_utf8_read(path)?;
+        // Check if attributes specify a file type
+        let file_content = match attributes.and_then(|a| a.get_attribute(path)) {
+            Some(file_type::FileType::Binary) => {
+                // Explicitly binary - read as bytes without UTF-8 check
+                content::Content::Bytes(std::fs::read(path)?)
+            }
+            Some(file_type::FileType::Text) => {
+                // Explicitly text - read as string (will fail if not valid UTF-8)
+                content::Content::Text(std::fs::read_to_string(path)?)
+            }
+            None => {
+                // Large files default to binary — character-level CRDT is too expensive
+                if file_metadata.len() > LARGE_FILE_THRESHOLD {
+                    content::Content::Bytes(std::fs::read(path)?)
+                } else {
+                    // Auto-detect using streaming UTF-8 validation
+                    streaming_utf8_read(path)?
+                }
+            }
+        };
 
         Ok(Self {
             name,
@@ -542,5 +585,45 @@ mod tests {
         let loaded = File::from_automerge(&am).expect("from_automerge");
 
         assert_eq!(loaded.content, content::Content::Text(content));
+    }
+
+    #[test]
+    fn large_file_defaults_to_binary() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let file_path = dir.path().join("big.txt");
+
+        // Create a file just over the threshold (valid UTF-8 content)
+        let content = "x".repeat(LARGE_FILE_THRESHOLD as usize + 1);
+        std::fs::write(&file_path, &content).expect("write file");
+
+        let doc = File::from_path(&file_path).expect("from_path");
+
+        assert!(
+            matches!(doc.content, content::Content::Bytes(_)),
+            "large file should default to binary"
+        );
+    }
+
+    #[test]
+    fn large_file_respects_text_attribute() {
+        use crate::attributes::AttributeRules;
+
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let file_path = dir.path().join("big.txt");
+
+        // Create .darnattributes forcing text
+        std::fs::write(dir.path().join(".darnattributes"), "*.txt text").expect("write attrs");
+
+        // Create a file just over the threshold
+        let content = "x".repeat(LARGE_FILE_THRESHOLD as usize + 1);
+        std::fs::write(&file_path, &content).expect("write file");
+
+        let attrs = AttributeRules::from_workspace_root(dir.path()).expect("load attrs");
+        let doc = File::from_path_with_attributes(&file_path, Some(&attrs)).expect("from_path");
+
+        assert!(
+            matches!(doc.content, content::Content::Text(_)),
+            "explicit text attribute should override size heuristic"
+        );
     }
 }

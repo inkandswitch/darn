@@ -727,8 +727,9 @@ pub(crate) async fn sync_cmd(
 
         if should_track {
             // Phase 2: Ingest files (only after confirmation)
-            let spinner = cliclack::spinner();
-            spinner.start("Processing files...");
+            let total_files = candidates.len();
+            let progress_bar = cliclack::progress_bar(total_files as u64);
+            progress_bar.start("Processing files...");
 
             // Set up cancellation token for Ctrl+C
             let cancel_token = CancellationToken::new();
@@ -740,31 +741,24 @@ pub(crate) async fn sync_cmd(
                 }
             });
 
-            // Progress callback updates spinner
+            // Track last position to know when to increment
+            let last_completed = std::sync::atomic::AtomicUsize::new(0);
+
+            // Progress callback updates progress bar
             let progress_callback = |progress: DiscoverProgress<'_>| {
-                let msg = match (progress.last_completed, progress.in_flight) {
-                    (Some(file), 0) => format!(
-                        "Processing ({}/{})... {}",
-                        progress.completed,
-                        progress.total,
-                        file.display()
-                    ),
-                    (Some(file), n) => format!(
-                        "Processing ({}/{})... {} (+{n} in progress)",
-                        progress.completed,
-                        progress.total,
-                        file.display()
-                    ),
-                    (None, n) if n > 0 => format!(
-                        "Processing ({}/{})... {n} in progress",
-                        progress.completed,
-                        progress.total
-                    ),
-                    (None, _) => {
-                        format!("Processing ({}/{})...", progress.completed, progress.total)
-                    }
+                // Increment progress bar for each newly completed file
+                let prev = last_completed.swap(progress.completed, std::sync::atomic::Ordering::Relaxed);
+                let newly_completed = progress.completed.saturating_sub(prev);
+                for _ in 0..newly_completed {
+                    progress_bar.inc(1);
+                }
+
+                // Update message with current file
+                let msg = match progress.last_completed {
+                    Some(file) => format!("{}", file.display()),
+                    None => "Processing...".to_string(),
                 };
-                spinner.set_message(msg);
+                progress_bar.set_message(msg);
             };
 
             let result = darn
@@ -777,7 +771,7 @@ pub(crate) async fn sync_cmd(
                     errors,
                     cancelled,
                 }) => {
-                    spinner.clear();
+                    progress_bar.stop(format!("Processed {total_files} file(s)"));
 
                     if cancelled {
                         cliclack::log::warning("Processing cancelled")?;
@@ -801,7 +795,7 @@ pub(crate) async fn sync_cmd(
                     }
                 }
                 Err(e) => {
-                    spinner.clear();
+                    progress_bar.stop("Processing failed");
                     cliclack::log::warning(format!("Processing error: {e}"))?;
                 }
             }
