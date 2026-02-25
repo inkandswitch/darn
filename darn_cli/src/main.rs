@@ -52,9 +52,11 @@ async fn main() -> Result<()> {
         Commands::Unignore { patterns } => commands::unignore(&patterns, &out),
         Commands::Tree => commands::tree(&out),
         Commands::Stat { target } => commands::stat(&target, &out).await,
-        Commands::Sync { peer, dry_run, force } => {
-            commands::sync_cmd(peer.as_deref(), dry_run, force, &out).await
-        }
+        Commands::Sync {
+            peer,
+            dry_run,
+            force,
+        } => commands::sync_cmd(peer.as_deref(), dry_run, force, &out).await,
         Commands::Watch { interval, no_track } => commands::watch(&interval, no_track, &out).await,
         Commands::Info => commands::info(&out),
         Commands::Peer { command } => match command {

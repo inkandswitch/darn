@@ -8,7 +8,7 @@ pub mod refresh_diff;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration
+    time::Duration,
 };
 
 use sedimentree_fs_storage::FsStorage;
@@ -413,18 +413,14 @@ impl Darn {
         for entry in manifest.iter_mut() {
             let path = entry.relative_path.clone();
 
-            let new_sed_digest = match sedimentree::compute_digest(
-                &self.subduction,
-                entry.sedimentree_id,
-            )
-            .await
-            {
-                Ok(d) => d,
-                Err(e) => {
-                    result.errors.push((path, format!("compute digest: {e}")));
-                    continue;
-                }
-            };
+            let new_sed_digest =
+                match sedimentree::compute_digest(&self.subduction, entry.sedimentree_id).await {
+                    Ok(d) => d,
+                    Err(e) => {
+                        result.errors.push((path, format!("compute digest: {e}")));
+                        continue;
+                    }
+                };
 
             tracing::debug!(
                 path = %path.display(),
@@ -440,19 +436,20 @@ impl Darn {
 
             let local_changed = entry.state(&self.root) == FileState::Modified;
 
-            let am_doc = match sedimentree::load_document(&self.subduction, entry.sedimentree_id)
-                .await
-            {
-                Ok(Some(doc)) => doc,
-                Ok(None) => {
-                    result.errors.push((path, "document not found after sync".into()));
-                    continue;
-                }
-                Err(e) => {
-                    result.errors.push((path, format!("load document: {e}")));
-                    continue;
-                }
-            };
+            let am_doc =
+                match sedimentree::load_document(&self.subduction, entry.sedimentree_id).await {
+                    Ok(Some(doc)) => doc,
+                    Ok(None) => {
+                        result
+                            .errors
+                            .push((path, "document not found after sync".into()));
+                        continue;
+                    }
+                    Err(e) => {
+                        result.errors.push((path, format!("load document: {e}")));
+                        continue;
+                    }
+                };
 
             // Parse as File
             let file = match File::from_automerge(&am_doc) {
@@ -477,7 +474,9 @@ impl Darn {
                     entry.sedimentree_digest = new_sed_digest;
                 }
                 Err(e) => {
-                    result.errors.push((path.clone(), format!("hash file: {e}")));
+                    result
+                        .errors
+                        .push((path.clone(), format!("hash file: {e}")));
                     // Still mark as updated since we wrote it
                 }
             }
@@ -490,18 +489,12 @@ impl Darn {
         }
 
         // Step 2: Discover new files from remote directory tree
-        if let Err(e) = self
-            .discover_remote_files(manifest, &mut result)
-            .await
-        {
+        if let Err(e) = self.discover_remote_files(manifest, &mut result).await {
             tracing::warn!("Error discovering remote files: {e}");
         }
 
         // Step 3: Detect and remove files deleted from remote
-        if let Err(e) = self
-            .remove_deleted_files(manifest, &mut result)
-            .await
-        {
+        if let Err(e) = self.remove_deleted_files(manifest, &mut result).await {
             tracing::warn!("Error detecting deleted files: {e}");
         }
 
@@ -515,13 +508,8 @@ impl Darn {
         result: &mut ApplyResult,
     ) -> Result<(), SedimentreeError> {
         let root_dir_id = manifest.root_directory_id();
-        self.discover_remote_files_recursive(
-            root_dir_id,
-            PathBuf::new(),
-            manifest,
-            result,
-        )
-        .await
+        self.discover_remote_files_recursive(root_dir_id, PathBuf::new(), manifest, result)
+            .await
     }
 
     /// Recursively discover files from a remote directory.
@@ -541,8 +529,7 @@ impl Darn {
         );
 
         // Load directory document
-        let Some(am_doc) = sedimentree::load_document(&self.subduction, dir_id).await?
-        else {
+        let Some(am_doc) = sedimentree::load_document(&self.subduction, dir_id).await? else {
             tracing::debug!(?dir_id, "discover_remote_files_recursive: empty directory");
             return Ok(()); // Empty directory
         };
@@ -577,21 +564,19 @@ impl Darn {
 
                     tracing::info!(name = %entry.name, "discovered new remote file");
                     // This is a new file from remote
-                    let am_doc = match sedimentree::load_document(
-                        &self.subduction,
-                        entry.sedimentree_id,
-                    )
-                    .await
-                    {
-                        Ok(Some(doc)) => doc,
-                        Ok(None) => continue,
-                        Err(e) => {
-                            result
-                                .errors
-                                .push((entry_path.clone(), format!("load file: {e}")));
-                            continue;
-                        }
-                    };
+                    let am_doc =
+                        match sedimentree::load_document(&self.subduction, entry.sedimentree_id)
+                            .await
+                        {
+                            Ok(Some(doc)) => doc,
+                            Ok(None) => continue,
+                            Err(e) => {
+                                result
+                                    .errors
+                                    .push((entry_path.clone(), format!("load file: {e}")));
+                                continue;
+                            }
+                        };
 
                     let file = match File::from_automerge(&am_doc) {
                         Ok(f) => f,
@@ -638,20 +623,18 @@ impl Darn {
                         }
                     };
 
-                    let sedimentree_digest = match sedimentree::compute_digest(
-                        &self.subduction,
-                        entry.sedimentree_id,
-                    )
-                    .await
-                    {
-                        Ok(d) => d,
-                        Err(e) => {
-                            result
-                                .errors
-                                .push((entry_path.clone(), format!("compute digest: {e}")));
-                            continue;
-                        }
-                    };
+                    let sedimentree_digest =
+                        match sedimentree::compute_digest(&self.subduction, entry.sedimentree_id)
+                            .await
+                        {
+                            Ok(d) => d,
+                            Err(e) => {
+                                result
+                                    .errors
+                                    .push((entry_path.clone(), format!("compute digest: {e}")));
+                                continue;
+                            }
+                        };
 
                     // Add to manifest
                     let tracked = Tracked::new(
@@ -711,7 +694,9 @@ impl Darn {
             let full_path = self.root.join(&relative_path);
 
             // Delete file from filesystem
-            if full_path.exists() && let Err(e) = std::fs::remove_file(&full_path) {
+            if full_path.exists()
+                && let Err(e) = std::fs::remove_file(&full_path)
+            {
                 result
                     .errors
                     .push((relative_path.clone(), format!("delete file: {e}")));
@@ -741,8 +726,7 @@ impl Darn {
         tracing::debug!(?dir_id, "Loading directory document for deletion check");
 
         // Load directory document
-        let Some(am_doc) = sedimentree::load_document(&self.subduction, dir_id).await?
-        else {
+        let Some(am_doc) = sedimentree::load_document(&self.subduction, dir_id).await? else {
             tracing::debug!(?dir_id, "No directory document found (empty)");
             return Ok(()); // Empty directory
         };
@@ -752,7 +736,11 @@ impl Darn {
             return Ok(()); // Not a directory document
         };
 
-        tracing::debug!(?dir_id, entries = dir.entries.len(), "Loaded directory with entries");
+        tracing::debug!(
+            ?dir_id,
+            entries = dir.entries.len(),
+            "Loaded directory with entries"
+        );
 
         for entry in &dir.entries {
             match entry.entry_type {
@@ -788,7 +776,10 @@ impl Darn {
         // Collect IDs we already have
         let mut known_ids: HashSet<_> = manifest.iter().map(|e| e.sedimentree_id).collect();
         known_ids.insert(manifest.root_directory_id());
-        tracing::debug!(known_count = known_ids.len(), "sync_missing_sedimentrees: known IDs from manifest");
+        tracing::debug!(
+            known_count = known_ids.len(),
+            "sync_missing_sedimentrees: known IDs from manifest"
+        );
 
         // Collect all IDs from the remote directory tree
         let mut remote_ids = HashSet::new();
@@ -798,11 +789,17 @@ impl Darn {
         {
             tracing::warn!("Error collecting remote sedimentree IDs: {e}");
         }
-        tracing::debug!(remote_count = remote_ids.len(), "sync_missing_sedimentrees: remote IDs from directory tree");
+        tracing::debug!(
+            remote_count = remote_ids.len(),
+            "sync_missing_sedimentrees: remote IDs from directory tree"
+        );
 
         // Find IDs we don't have
         let missing: Vec<_> = remote_ids.difference(&known_ids).copied().collect();
-        tracing::debug!(missing_count = missing.len(), "sync_missing_sedimentrees: missing IDs");
+        tracing::debug!(
+            missing_count = missing.len(),
+            "sync_missing_sedimentrees: missing IDs"
+        );
 
         if missing.is_empty() {
             tracing::debug!("sync_missing_sedimentrees: no missing sedimentrees");
@@ -842,14 +839,16 @@ impl Darn {
         tracing::debug!(?dir_id, "collect_all_sedimentree_ids: loading directory");
 
         // Load directory document
-        let Some(am_doc) = sedimentree::load_document(&self.subduction, dir_id).await?
-        else {
+        let Some(am_doc) = sedimentree::load_document(&self.subduction, dir_id).await? else {
             tracing::debug!(?dir_id, "collect_all_sedimentree_ids: no document found");
             return Ok(()); // Empty directory
         };
 
         let Ok(dir) = Directory::from_automerge(&am_doc) else {
-            tracing::debug!(?dir_id, "collect_all_sedimentree_ids: not a directory document");
+            tracing::debug!(
+                ?dir_id,
+                "collect_all_sedimentree_ids: not a directory document"
+            );
             return Ok(()); // Not a directory document
         };
 
@@ -1037,10 +1036,8 @@ impl Darn {
         self.subduction.register(authenticated_connection).await?;
 
         // Perform full sync with all connected peers
-        let (success, stats, call_errors, io_errors) = self
-            .subduction
-            .full_sync(Some(Self::DEFAULT_TIMEOUT))
-            .await;
+        let (success, stats, call_errors, io_errors) =
+            self.subduction.full_sync(Some(Self::DEFAULT_TIMEOUT)).await;
 
         for (conn, err) in &call_errors {
             tracing::warn!("Sync error with {:?}: {err:?}", Connection::peer_id(conn));
@@ -1094,7 +1091,10 @@ impl Darn {
         all_ids.insert(root_dir_id);
 
         // Traverse directory tree to find all subdirectories
-        if let Err(e) = self.collect_all_sedimentree_ids(root_dir_id, &mut all_ids).await {
+        if let Err(e) = self
+            .collect_all_sedimentree_ids(root_dir_id, &mut all_ids)
+            .await
+        {
             tracing::warn!("Error collecting directory tree IDs: {e}");
         }
 
@@ -1181,7 +1181,10 @@ impl Darn {
         // and sync their sedimentrees
         if let Ok(new_count) = self.sync_missing_sedimentrees(manifest, &peer_id).await {
             if new_count > 0 {
-                tracing::info!("Synced {} new sedimentrees from remote directory tree", new_count);
+                tracing::info!(
+                    "Synced {} new sedimentrees from remote directory tree",
+                    new_count
+                );
                 summary.sedimentrees_synced += new_count;
             }
         }

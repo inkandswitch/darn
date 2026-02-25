@@ -84,9 +84,42 @@ jobs:
           path: dist/${{ matrix.artifact-name }}-${{ env.VERSION }}
           retention-days: 90
 
+  build-nix:
+    needs: version
+    runs-on: ubuntu-latest
+
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v21
+
+      - name: Setup Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@v13
+
+      - name: Setup Cachix
+        uses: cachix/cachix-action@v15
+        if: ${{ !github.event.pull_request.head.repo.fork }}
+        with:
+          name: inkandswitch
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Build via Nix
+        run: nix build
+
+      - name: Upload Nix artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: darn-nix-${{ env.VERSION }}
+          path: result/bin/darn
+          retention-days: 90
+
   release:
     if: github.ref == 'refs/heads/main'
-    needs: [version, build-cli]
+    needs: [version, build-cli, build-nix]
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -7,20 +7,24 @@ use std::{
     hash::{DefaultHasher, Hash, Hasher},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
     },
 };
 
-use futures::{stream, StreamExt};
+use futures::{StreamExt, stream};
 use sedimentree_core::id::SedimentreeId;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     attributes::AttributeRules,
-    file::{file_type::FileType, File, SerializeError},
+    file::{File, SerializeError, file_type::FileType},
     ignore::IgnoreRules,
-    manifest::{content_hash::{self, FileSystemContent}, tracked::Tracked, Manifest},
+    manifest::{
+        Manifest,
+        content_hash::{self, FileSystemContent},
+        tracked::Tracked,
+    },
     sedimentree::{self, SedimentreeError},
     subduction::DarnSubduction,
 };
@@ -111,7 +115,8 @@ pub(crate) struct DiscoveredFile {
     pub sedimentree_id: SedimentreeId,
     pub file_type: FileType,
     pub file_system_digest: sedimentree_core::crypto::digest::Digest<FileSystemContent>,
-    pub sedimentree_digest: sedimentree_core::crypto::digest::Digest<sedimentree_core::sedimentree::Sedimentree>,
+    pub sedimentree_digest:
+        sedimentree_core::crypto::digest::Digest<sedimentree_core::sedimentree::Sedimentree>,
 }
 
 impl DiscoveredFile {
@@ -155,17 +160,14 @@ fn collect_discovery_candidates(
 ) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
-    for entry in walkdir::WalkDir::new(root)
-        .into_iter()
-        .filter_entry(|e| {
-            // Skip hidden directories and .darn, but allow config files
-            let name = e.file_name().to_string_lossy();
-            !name.starts_with('.')
-                || e.depth() == 0
-                || name == ".darnignore"
-                || name == ".darnattributes"
-        })
-    {
+    for entry in walkdir::WalkDir::new(root).into_iter().filter_entry(|e| {
+        // Skip hidden directories and .darn, but allow config files
+        let name = e.file_name().to_string_lossy();
+        !name.starts_with('.')
+            || e.depth() == 0
+            || name == ".darnignore"
+            || name == ".darnattributes"
+    }) {
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {
@@ -267,12 +269,11 @@ pub(crate) async fn process_single_file(
 
     // Compute digests (hash is CPU-bound, run on blocking pool)
     let path_for_hash = path.to_path_buf();
-    let file_system_digest = tokio::task::spawn_blocking(move || {
-        content_hash::hash_file(&path_for_hash)
-    })
-    .await
-    .map_err(|e| FileProcessError::Spawn(e.to_string()))?
-    .map_err(FileProcessError::Hash)?;
+    let file_system_digest =
+        tokio::task::spawn_blocking(move || content_hash::hash_file(&path_for_hash))
+            .await
+            .map_err(|e| FileProcessError::Spawn(e.to_string()))?
+            .map_err(FileProcessError::Hash)?;
     let sedimentree_digest = sedimentree::compute_digest(subduction, sedimentree_id)
         .await
         .map_err(FileProcessError::Sedimentree)?;
@@ -308,7 +309,8 @@ async fn ensure_parent_directories_cached(
     }
 
     // Cache miss - need to ensure directories exist
-    let parent_id = sedimentree::ensure_parent_directories(subduction, root_id, relative_path).await?;
+    let parent_id =
+        sedimentree::ensure_parent_directories(subduction, root_id, relative_path).await?;
 
     // Cache the result
     cache.insert(parent_path.to_path_buf(), parent_id);
@@ -322,7 +324,8 @@ async fn ensure_parent_directories_cached(
 fn generate_sedimentree_id() -> Result<SedimentreeId, FileProcessError> {
     let mut id_bytes = [0u8; 32];
     // Only fill first 16 bytes; rest stays zero for automerge-repo compatibility
-    getrandom::getrandom(&mut id_bytes[..16]).map_err(|e| FileProcessError::Random(e.to_string()))?;
+    getrandom::getrandom(&mut id_bytes[..16])
+        .map_err(|e| FileProcessError::Random(e.to_string()))?;
     Ok(SedimentreeId::new(id_bytes))
 }
 
@@ -431,8 +434,15 @@ where
                 in_flight.fetch_add(1, Ordering::Relaxed);
 
                 // Process the file
-                let result =
-                    process_single_file(&path, root, subduction, root_dir_id, dir_cache, attributes).await;
+                let result = process_single_file(
+                    &path,
+                    root,
+                    subduction,
+                    root_dir_id,
+                    dir_cache,
+                    attributes,
+                )
+                .await;
 
                 // Update counters and last_completed
                 in_flight.fetch_sub(1, Ordering::Relaxed);
@@ -486,12 +496,18 @@ where
     // Extract results - at this point the stream is done so we're the only holder
     let final_results = match Arc::try_unwrap(results) {
         Ok(mutex) => mutex.into_inner().unwrap_or_default(),
-        Err(arc) => arc.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default(),
+        Err(arc) => arc
+            .lock()
+            .map(|mut g| std::mem::take(&mut *g))
+            .unwrap_or_default(),
     };
 
     let final_errors = match Arc::try_unwrap(errors) {
         Ok(mutex) => mutex.into_inner().unwrap_or_default(),
-        Err(arc) => arc.lock().map(|mut g| std::mem::take(&mut *g)).unwrap_or_default(),
+        Err(arc) => arc
+            .lock()
+            .map(|mut g| std::mem::take(&mut *g))
+            .unwrap_or_default(),
     };
 
     (final_results, final_errors, cancel.is_cancelled())

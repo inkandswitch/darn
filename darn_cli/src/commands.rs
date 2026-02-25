@@ -8,7 +8,10 @@ use std::{
     collections::BTreeMap,
     fmt::Write as _,
     path::{Path, PathBuf},
-    sync::{Arc, atomic::{AtomicUsize, Ordering}},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -22,10 +25,10 @@ use darn_core::{
     peer::{Peer, PeerName},
     sedimentree,
     sync_progress::SyncProgressEvent,
-    watcher::{WatcherConfig, Watcher, WatchEventProcessor, WatchEvent}
+    watcher::{WatchEvent, WatchEventProcessor, Watcher, WatcherConfig},
 };
 use sedimentree_core::id::SedimentreeId;
-use subduction_core::{storage::traits::Storage, peer::id::PeerId};
+use subduction_core::{peer::id::PeerId, storage::traits::Storage};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -135,12 +138,8 @@ pub(crate) async fn init(path: &Path, out: &Output) -> eyre::Result<()> {
         let sedimentree_id = darn_core::generate_sedimentree_id();
 
         // Store as sedimentree commits
-        darn_core::sedimentree::store_document(
-            darn.subduction(),
-            sedimentree_id,
-            &mut am_doc,
-        )
-        .await?;
+        darn_core::sedimentree::store_document(darn.subduction(), sedimentree_id, &mut am_doc)
+            .await?;
 
         // Add to root directory
         darn_core::sedimentree::add_file_to_directory(
@@ -152,11 +151,9 @@ pub(crate) async fn init(path: &Path, out: &Output) -> eyre::Result<()> {
         .await?;
 
         // Compute digests
-        let file_system_digest =
-            darn_core::manifest::content_hash::hash_file(&darnignore_path)?;
+        let file_system_digest = darn_core::manifest::content_hash::hash_file(&darnignore_path)?;
         let sedimentree_digest =
-            darn_core::sedimentree::compute_digest(darn.subduction(), sedimentree_id)
-                .await?;
+            darn_core::sedimentree::compute_digest(darn.subduction(), sedimentree_id).await?;
 
         // Add to manifest
         let entry = darn_core::manifest::tracked::Tracked::new(
@@ -500,7 +497,9 @@ pub(crate) fn unignore(patterns: &[String], out: &Output) -> eyre::Result<()> {
     }
 
     if !out.is_porcelain() && removed_count > 0 {
-        out.info(&format!("{removed_count} pattern(s) removed from .darnignore"))?;
+        out.info(&format!(
+            "{removed_count} pattern(s) removed from .darnignore"
+        ))?;
     }
 
     Ok(())
@@ -590,12 +589,22 @@ pub(crate) fn tree(out: &Output) -> eyre::Result<()> {
 
     let mut summary = format!("{total} tracked: {clean} clean");
     if modified > 0 {
-        write!(summary, ", {} {}", yellow.apply_to(modified), yellow.apply_to("modified"))
-            .expect("write to string");
+        write!(
+            summary,
+            ", {} {}",
+            yellow.apply_to(modified),
+            yellow.apply_to("modified")
+        )
+        .expect("write to string");
     }
     if missing > 0 {
-        write!(summary, ", {} {}", red.apply_to(missing), red.apply_to("missing"))
-            .expect("write to string");
+        write!(
+            summary,
+            ", {} {}",
+            red.apply_to(missing),
+            red.apply_to("missing")
+        )
+        .expect("write to string");
     }
 
     out.outro(&summary)?;
@@ -612,8 +621,8 @@ pub(crate) async fn stat(target: &str, out: &Output) -> eyre::Result<()> {
     // Try to find by path first, then by Sedimentree ID
     let tracked = if let Some(entry) = manifest.get_by_path(Path::new(target)) {
         entry
-    } else if let Some(entry) = try_parse_sedimentree_id(target)
-        .and_then(|id| manifest.get_by_id(&id))
+    } else if let Some(entry) =
+        try_parse_sedimentree_id(target).and_then(|id| manifest.get_by_id(&id))
     {
         entry
     } else {
@@ -626,10 +635,8 @@ pub(crate) async fn stat(target: &str, out: &Output) -> eyre::Result<()> {
     let sed_id = tracked.sedimentree_id;
 
     // Get commit and fragment counts from storage
-    let commits =
-        Storage::<future_form::Sendable>::load_loose_commits(&storage, sed_id).await?;
-    let fragments =
-        Storage::<future_form::Sendable>::load_fragments(&storage, sed_id).await?;
+    let commits = Storage::<future_form::Sendable>::load_loose_commits(&storage, sed_id).await?;
+    let fragments = Storage::<future_form::Sendable>::load_fragments(&storage, sed_id).await?;
 
     // Get file state
     let state = tracked.state(root);
@@ -833,7 +840,8 @@ pub(crate) async fn sync_cmd(
             // Progress callback updates progress bar
             let progress_callback = |progress: DiscoverProgress<'_>| {
                 // Increment progress bar for each newly completed file
-                let prev = last_completed.swap(progress.completed, std::sync::atomic::Ordering::Relaxed);
+                let prev =
+                    last_completed.swap(progress.completed, std::sync::atomic::Ordering::Relaxed);
                 let newly_completed = progress.completed.saturating_sub(prev);
                 for _ in 0..newly_completed {
                     progress_bar.inc(newly_completed as u64);
@@ -876,10 +884,7 @@ pub(crate) async fn sync_cmd(
                                 out.kv("tracked", &path.display().to_string())?;
                             }
                         } else {
-                            out.success(&format!(
-                                "Tracking {} new file(s)",
-                                new_files.len()
-                            ))?;
+                            out.success(&format!("Tracking {} new file(s)", new_files.len()))?;
                         }
                         for path in &new_files {
                             info!(path = %path.display(), "Tracked file");
@@ -907,7 +912,6 @@ async fn continue_sync(
     peer_name: Option<&str>,
     out: &Output,
 ) -> eyre::Result<()> {
-
     // Refresh all modified files (commit local changes)
     let spinner = out.spinner("Checking for local changes...");
     let result = darn.refresh_all(&mut manifest).await;
@@ -920,7 +924,10 @@ async fn continue_sync(
                 out.kv("committed", &path.display().to_string())?;
             }
         } else {
-            out.success(&format!("Committed {} local change(s)", result.updated.len()))?;
+            out.success(&format!(
+                "Committed {} local change(s)",
+                result.updated.len()
+            ))?;
         }
         for path in &result.updated {
             info!(path = %path.display(), "Refreshed file");
@@ -933,7 +940,10 @@ async fn continue_sync(
                 out.kv("missing", &path.display().to_string())?;
             }
         } else {
-            out.warning(&format!("{} file(s) missing from disk", result.missing.len()))?;
+            out.warning(&format!(
+                "{} file(s) missing from disk",
+                result.missing.len()
+            ))?;
         }
     }
 
@@ -959,7 +969,10 @@ async fn continue_sync(
     if peers.is_empty() {
         out.warning("No peers configured")?;
         if !out.is_porcelain() {
-            out.outro(&format!("Use {} to add peers", cmd("darn peer add <name> <url>")))?;
+            out.outro(&format!(
+                "Use {} to add peers",
+                cmd("darn peer add <name> <url>")
+            ))?;
         }
         return Ok(());
     }
@@ -1144,10 +1157,16 @@ async fn sync_peer_with_progress(
                     progress_bar.set_length(total_sedimentrees.try_into().unwrap_or(u64::MAX));
                     progress_bar.set_message(format!("Syncing {total_sedimentrees} items..."));
                 }
-                SyncProgressEvent::SedimentreeStarted { file_path, index, total, .. } => {
+                SyncProgressEvent::SedimentreeStarted {
+                    file_path,
+                    index,
+                    total,
+                    ..
+                } => {
                     let display_index = index + 1;
                     if is_porcelain {
-                        let path_str = file_path.as_ref()
+                        let path_str = file_path
+                            .as_ref()
                             .map_or("root_directory".to_string(), |p| p.display().to_string());
                         println!("syncing\t{display_index}\t{total}\t{path_str}");
                     } else {
@@ -1243,7 +1262,10 @@ fn sync_dry_run(peer_name: Option<&str>, out: &Output) -> eyre::Result<()> {
     if peers.is_empty() {
         out.warning("No peers configured")?;
         if !out.is_porcelain() {
-            out.outro(&format!("Use {} to add peers", cmd("darn peer add <name> <url>")))?;
+            out.outro(&format!(
+                "Use {} to add peers",
+                cmd("darn peer add <name> <url>")
+            ))?;
         }
         return Ok(());
     }
@@ -1268,7 +1290,12 @@ fn sync_dry_run(peer_name: Option<&str>, out: &Output) -> eyre::Result<()> {
         }
 
         if out.is_porcelain() {
-            println!("peer\t{}\t{}\t{peer_id_display}\t{last_sync}\t{}", peer.name, peer.url, unsynced.len());
+            println!(
+                "peer\t{}\t{}\t{peer_id_display}\t{last_sync}\t{}",
+                peer.name,
+                peer.url,
+                unsynced.len()
+            );
             for path in &unsynced {
                 println!("unsynced\t{}\t{}", peer.name, path.display());
             }
@@ -1282,16 +1309,19 @@ fn sync_dry_run(peer_name: Option<&str>, out: &Output) -> eyre::Result<()> {
                 write!(content, "Status:    all {total} file(s) synced").expect("write to string");
             } else if unsynced.len() == total {
                 let count = unsynced.len();
-                write!(content, "Status:    {count} file(s) never synced").expect("write to string");
+                write!(content, "Status:    {count} file(s) never synced")
+                    .expect("write to string");
             } else {
                 let count = unsynced.len();
-                writeln!(content, "Status:    {count} of {total} file(s) unsynced").expect("write to string");
+                writeln!(content, "Status:    {count} of {total} file(s) unsynced")
+                    .expect("write to string");
                 for path in unsynced.iter().take(5) {
                     writeln!(content, "           - {}", path.display()).expect("write to string");
                 }
                 if unsynced.len() > 5 {
                     let remaining = unsynced.len() - 5;
-                    write!(content, "           ... and {remaining} more").expect("write to string");
+                    write!(content, "           ... and {remaining} more")
+                        .expect("write to string");
                 } else {
                     content.pop();
                 }
@@ -1351,7 +1381,11 @@ fn format_timestamp(ts: darn_core::unix_timestamp::UnixTimestamp) -> String {
 /// - Modified tracked files: Auto-refreshed to CRDT storage
 /// - Optionally syncs with peers at the specified interval
 #[allow(clippy::too_many_lines)]
-pub(crate) async fn watch(sync_interval: &std::time::Duration, no_track: bool, out: &Output) -> eyre::Result<()> {
+pub(crate) async fn watch(
+    sync_interval: &std::time::Duration,
+    no_track: bool,
+    out: &Output,
+) -> eyre::Result<()> {
     let darn = Darn::open(Path::new(".")).await?;
     let root = darn.root().to_path_buf();
     let mut manifest = darn.load_manifest()?;
@@ -1368,7 +1402,10 @@ pub(crate) async fn watch(sync_interval: &std::time::Duration, no_track: bool, o
     if sync_interval.is_zero() {
         out.remark("Sync on change (immediate)")?;
     } else {
-        out.remark(&format!("Sync interval: {}", format_duration(sync_interval)))?;
+        out.remark(&format!(
+            "Sync interval: {}",
+            format_duration(sync_interval)
+        ))?;
     }
 
     if no_track {
@@ -1811,12 +1848,9 @@ async fn track_single_file(
 
     // Add file to directory tree
     let root_dir_id = manifest.root_directory_id();
-    let parent_dir_id = sedimentree::ensure_parent_directories(
-        darn.subduction(),
-        root_dir_id,
-        relative_path,
-    )
-    .await?;
+    let parent_dir_id =
+        sedimentree::ensure_parent_directories(darn.subduction(), root_dir_id, relative_path)
+            .await?;
 
     let file_name = relative_path
         .file_name()
@@ -1833,8 +1867,7 @@ async fn track_single_file(
 
     // Compute digests
     let file_system_digest = content_hash::hash_file(&full_path)?;
-    let sedimentree_digest =
-        sedimentree::compute_digest(darn.subduction(), sedimentree_id).await?;
+    let sedimentree_digest = sedimentree::compute_digest(darn.subduction(), sedimentree_id).await?;
 
     // Add to manifest
     let entry = Tracked::new(
@@ -1850,7 +1883,12 @@ async fn track_single_file(
 }
 
 /// Add a peer.
-pub(crate) fn peer_add(name: &str, url: &str, peer_id: Option<&str>, out: &Output) -> eyre::Result<()> {
+pub(crate) fn peer_add(
+    name: &str,
+    url: &str,
+    peer_id: Option<&str>,
+    out: &Output,
+) -> eyre::Result<()> {
     let darn = Darn::open_without_subduction(Path::new("."))?;
 
     // Validate peer name
@@ -1923,7 +1961,10 @@ pub(crate) fn peer_list(out: &Output) -> eyre::Result<()> {
             let last_sync = peer
                 .last_synced_at
                 .map_or_else(|| "never".to_string(), |ts| ts.as_secs().to_string());
-            println!("{}\t{}\t{mode}\t{peer_id_display}\t{last_sync}", peer.name, peer.url);
+            println!(
+                "{}\t{}\t{mode}\t{peer_id_display}\t{last_sync}",
+                peer.name, peer.url
+            );
         }
         return Ok(());
     }
@@ -1933,7 +1974,10 @@ pub(crate) fn peer_list(out: &Output) -> eyre::Result<()> {
 
     if peers.is_empty() {
         out.remark("No peers configured")?;
-        out.outro(&format!("Use {} to add peers", cmd("darn peer add <name> <url>")))?;
+        out.outro(&format!(
+            "Use {} to add peers",
+            cmd("darn peer add <name> <url>")
+        ))?;
         return Ok(());
     }
 
@@ -2009,7 +2053,10 @@ pub(crate) fn info(out: &Output) -> eyre::Result<()> {
                 } else {
                     "discovery".to_string()
                 };
-                println!("peer\t{}\t{}\t{mode}\t{peer_id_display}", peer.name, peer.url);
+                println!(
+                    "peer\t{}\t{}\t{mode}\t{peer_id_display}",
+                    peer.name, peer.url
+                );
             }
         }
 
@@ -2034,9 +2081,16 @@ pub(crate) fn info(out: &Output) -> eyre::Result<()> {
                         FileState::Modified => "modified",
                         FileState::Missing => "missing",
                     };
-                    let type_str = if entry.file_type.is_text() { "text" } else { "binary" };
+                    let type_str = if entry.file_type.is_text() {
+                        "text"
+                    } else {
+                        "binary"
+                    };
                     let url = sedimentree_id_to_url(entry.sedimentree_id);
-                    println!("file\t{}\t{type_str}\t{state_str}\t{url}", entry.relative_path.display());
+                    println!(
+                        "file\t{}\t{type_str}\t{state_str}\t{url}",
+                        entry.relative_path.display()
+                    );
                 }
             }
         } else {
@@ -2070,9 +2124,7 @@ pub(crate) fn info(out: &Output) -> eyre::Result<()> {
 
     // Configured Peers
     let peers_content = match darn_core::peer::list_peers() {
-        Ok(peers) if peers.is_empty() => {
-            dim.apply_to("(no peers configured)").to_string()
-        }
+        Ok(peers) if peers.is_empty() => dim.apply_to("(no peers configured)").to_string(),
         Ok(peers) => {
             let mut table = String::new();
             table.push_str(
@@ -2094,14 +2146,13 @@ pub(crate) fn info(out: &Output) -> eyre::Result<()> {
                     mode
                 ));
             }
-            table.push_str(
-                "└────────────────┴────────────────────────────────────────┴──────────┘",
-            );
+            table
+                .push_str("└────────────────┴────────────────────────────────────────┴──────────┘");
             table
         }
-        Err(e) => {
-            dim.apply_to(format!("(error listing peers: {e})")).to_string()
-        }
+        Err(e) => dim
+            .apply_to(format!("(error listing peers: {e})"))
+            .to_string(),
     };
     cliclack::note("Configured Peers", peers_content)?;
 

@@ -348,16 +348,20 @@ mod tests {
         assert!(decoded.get_by_path(Path::new("b/c.bin")).is_some());
 
         // Verify content kinds are preserved
-        assert!(decoded
-            .get_by_path(Path::new("a.txt"))
-            .ok_or("a.txt not found")?
-            .file_type
-            .is_text());
-        assert!(decoded
-            .get_by_path(Path::new("b/c.bin"))
-            .ok_or("b/c.bin not found")?
-            .file_type
-            .is_binary());
+        assert!(
+            decoded
+                .get_by_path(Path::new("a.txt"))
+                .ok_or("a.txt not found")?
+                .file_type
+                .is_text()
+        );
+        assert!(
+            decoded
+                .get_by_path(Path::new("b/c.bin"))
+                .ok_or("b/c.bin not found")?
+                .file_type
+                .is_binary()
+        );
         Ok(())
     }
 

@@ -27,16 +27,16 @@ use std::{collections::BTreeSet, convert::Infallible, path::Path};
 
 use automerge::{Automerge, Change, ChangeHash};
 use future_form::Sendable;
-use sedimentree_fs_storage::FsStorage;
-use subduction_core::subduction::error::WriteError;
 use sedimentree_core::{
     blob::Blob, crypto::digest::Digest, id::SedimentreeId, sedimentree::Sedimentree,
 };
+use sedimentree_fs_storage::FsStorage;
+use subduction_core::subduction::error::WriteError;
 use thiserror::Error;
 
 use crate::{
-    directory::{entry::EntryType, DeserializeError, Directory, SerializeError},
-    subduction::{DarnConnection, DarnSubduction}
+    directory::{DeserializeError, Directory, SerializeError, entry::EntryType},
+    subduction::{DarnConnection, DarnSubduction},
 };
 
 /// Store all changes from an Automerge document as sedimentree commits.
@@ -132,7 +132,11 @@ pub async fn load_document(
     let mut blobs_vec: Vec<_> = blobs.into_iter().collect();
     blobs_vec.sort_by_key(|b| std::cmp::Reverse(b.as_slice().len()));
 
-    tracing::debug!(?id, blob_count = blobs_vec.len(), "load_document: loading blobs");
+    tracing::debug!(
+        ?id,
+        blob_count = blobs_vec.len(),
+        "load_document: loading blobs"
+    );
 
     let mut doc = Automerge::new();
     for blob in blobs_vec {
@@ -327,8 +331,8 @@ pub async fn remove_file_from_directory(
     };
 
     let heads_before: Vec<_> = doc.get_heads().into_iter().collect();
-    let removed =
-        Directory::remove_entry_from_doc(&mut doc, file_name).map_err(SedimentreeError::Serialize)?;
+    let removed = Directory::remove_entry_from_doc(&mut doc, file_name)
+        .map_err(SedimentreeError::Serialize)?;
 
     if removed {
         add_changes(subduction, parent_id, &mut doc, &heads_before).await?;

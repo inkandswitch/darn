@@ -17,7 +17,10 @@ use subduction_core::{
     connection::{authenticated::Authenticated, nonce_cache::NonceCache},
     policy::open::OpenPolicy,
     sharded_map::ShardedMap,
-    subduction::{Subduction, error::{AttachError, HydrationError, IoError}},
+    subduction::{
+        Subduction,
+        error::{AttachError, HydrationError, IoError},
+    },
 };
 use subduction_crypto::signer::memory::MemorySigner;
 use subduction_websocket::tokio::{TimeoutTokio, TokioSpawn, client::TokioWebSocketClient};
@@ -43,8 +46,16 @@ pub type AuthenticatedDarnConnection = Authenticated<DarnConnection, Sendable>;
 /// - `OpenPolicy` for permissive access (can be made stricter later)
 /// - `MemorySigner` for ed25519 signing
 /// - `CountLeadingZeroBytes` depth metric for fragment building
-pub type DarnSubduction =
-    Subduction<'static, Sendable, FsStorage, DarnConnection, OpenPolicy, MemorySigner, CountLeadingZeroBytes, 256>;
+pub type DarnSubduction = Subduction<
+    'static,
+    Sendable,
+    FsStorage,
+    DarnConnection,
+    OpenPolicy,
+    MemorySigner,
+    CountLeadingZeroBytes,
+    256,
+>;
 
 /// Concrete error type for attach operations.
 ///
@@ -54,8 +65,7 @@ pub type DarnAttachError = AttachError<Sendable, FsStorage, DarnConnection, Infa
 /// Concrete error type for registration operations.
 ///
 /// Uses `Infallible` for the policy rejection type since `OpenPolicy` always allows connections.
-pub type DarnRegistrationError =
-    subduction_core::subduction::error::RegistrationError<Infallible>;
+pub type DarnRegistrationError = subduction_core::subduction::error::RegistrationError<Infallible>;
 
 /// Concrete error type for I/O operations during sync.
 pub type DarnIoError = IoError<Sendable, FsStorage, DarnConnection>;
@@ -120,7 +130,10 @@ pub fn spawn(signer: MemorySigner, storage: FsStorage) -> Arc<DarnSubduction> {
 /// # Errors
 ///
 /// Returns an error if hydration fails.
-pub async fn hydrate(signer: MemorySigner, storage: FsStorage) -> Result<Arc<DarnSubduction>, SubductionInitError> {
+pub async fn hydrate(
+    signer: MemorySigner,
+    storage: FsStorage,
+) -> Result<Arc<DarnSubduction>, SubductionInitError> {
     let (subduction, listener_fut, manager_fut) = Box::pin(DarnSubduction::hydrate(
         None,
         signer,

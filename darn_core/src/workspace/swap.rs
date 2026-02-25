@@ -225,7 +225,7 @@ pub enum SwapError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace::{layout::ActiveTree, WorkspaceId};
+    use crate::workspace::{WorkspaceId, layout::ActiveTree};
     use std::collections::HashSet;
 
     fn setup_test_workspace() -> (tempfile::TempDir, WorkspaceLayout) {
