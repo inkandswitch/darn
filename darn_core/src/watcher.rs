@@ -29,7 +29,7 @@ use std::{
     time::Duration,
 };
 
-use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode, DebounceEventResult, Debouncer};
+use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer, notify::RecursiveMode};
 use thiserror::Error;
 use tokio::sync::mpsc;
 

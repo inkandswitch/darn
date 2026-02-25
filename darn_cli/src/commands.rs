@@ -35,7 +35,7 @@ use tracing::info;
 use crate::output::Output;
 
 /// Style for command references in messages (mauve color).
-fn cmd_style() -> Style {
+const fn cmd_style() -> Style {
     Style::new().color256(183) // Approximate mauve
 }
 
@@ -61,25 +61,8 @@ fn format_paths_as_tree(paths: &[std::path::PathBuf]) -> String {
         is_file: bool,
     }
 
-    let mut root = TreeNode::default();
-
-    for path in paths {
-        let mut current = &mut root;
-        let components: Vec<_> = path.components().collect();
-        let len = components.len();
-
-        for (i, component) in components.into_iter().enumerate() {
-            let name = component.as_os_str().to_string_lossy().to_string();
-            let is_last = i == len - 1;
-
-            current = current.children.entry(name).or_default();
-            if is_last {
-                current.is_file = true;
-            }
-        }
-    }
-
     // Render the tree
+    #[allow(clippy::expect_used)] // Writing to String is infallible
     fn render(node: &TreeNode, prefix: &str, output: &mut String) {
         let entries: Vec<_> = node.children.iter().collect();
         let len = entries.len();
@@ -99,6 +82,24 @@ fn format_paths_as_tree(paths: &[std::path::PathBuf]) -> String {
         }
     }
 
+    let mut root = TreeNode::default();
+
+    for path in paths {
+        let mut current = &mut root;
+        let components: Vec<_> = path.components().collect();
+        let len = components.len();
+
+        for (i, component) in components.into_iter().enumerate() {
+            let name = component.as_os_str().to_string_lossy().to_string();
+            let is_last = i == len - 1;
+
+            current = current.children.entry(name).or_default();
+            if is_last {
+                current.is_file = true;
+            }
+        }
+    }
+
     let mut output = String::new();
     render(&root, "", &mut output);
 
@@ -111,7 +112,7 @@ fn format_paths_as_tree(paths: &[std::path::PathBuf]) -> String {
 }
 
 /// Initialize a new `darn` workspace.
-pub(crate) async fn init(path: &Path, out: &Output) -> eyre::Result<()> {
+pub(crate) async fn init(path: &Path, out: Output) -> eyre::Result<()> {
     out.intro("darn init")?;
 
     // Initialize workspace structure
@@ -185,7 +186,7 @@ pub(crate) async fn init(path: &Path, out: &Output) -> eyre::Result<()> {
 /// 3. Connect to all global peers
 /// 4. Sync root directory sedimentree, then recursively sync and write files
 #[allow(clippy::too_many_lines)]
-pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path, out: &Output) -> eyre::Result<()> {
+pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path, out: Output) -> eyre::Result<()> {
     out.intro("darn clone")?;
 
     // Step 1: Parse root directory ID (accepts automerge URL or plain base58)
@@ -307,11 +308,11 @@ async fn clone_directory_recursive_with_sync(
     total_received: &mut usize,
     total_sent: &mut usize,
     progress: &crate::output::Progress,
-    out: &Output,
+    out: Output,
 ) -> eyre::Result<usize> {
     // First, sync this directory's sedimentree from peers
     let sync_result = subduction.sync_all(dir_id, true, timeout).await?;
-    for (_peer_id, (success, stats, _errors)) in &sync_result {
+    for (success, stats, _errors) in sync_result.values() {
         if *success {
             *total_received += stats.total_received();
             *total_sent += stats.total_sent();
@@ -343,7 +344,7 @@ async fn clone_directory_recursive_with_sync(
                 let sync_result = subduction
                     .sync_all(entry.sedimentree_id, true, timeout)
                     .await?;
-                for (_peer_id, (success, stats, _errors)) in &sync_result {
+                for (success, stats, _errors) in sync_result.values() {
                     if *success {
                         *total_received += stats.total_received();
                         *total_sent += stats.total_sent();
@@ -430,7 +431,7 @@ async fn clone_directory_recursive_with_sync(
 }
 
 /// Add patterns to .darnignore.
-pub(crate) fn ignore(patterns: &[String], out: &Output) -> eyre::Result<()> {
+pub(crate) fn ignore(patterns: &[String], out: Output) -> eyre::Result<()> {
     let darn = Darn::open_without_subduction(Path::new("."))?;
     let root = darn.root();
 
@@ -467,7 +468,7 @@ pub(crate) fn ignore(patterns: &[String], out: &Output) -> eyre::Result<()> {
 }
 
 /// Remove patterns from .darnignore.
-pub(crate) fn unignore(patterns: &[String], out: &Output) -> eyre::Result<()> {
+pub(crate) fn unignore(patterns: &[String], out: Output) -> eyre::Result<()> {
     let darn = Darn::open_without_subduction(Path::new("."))?;
     let root = darn.root();
 
@@ -506,7 +507,7 @@ pub(crate) fn unignore(patterns: &[String], out: &Output) -> eyre::Result<()> {
 }
 
 /// Show tracked files as a tree with state indicators.
-pub(crate) fn tree(out: &Output) -> eyre::Result<()> {
+pub(crate) fn tree(out: Output) -> eyre::Result<()> {
     let darn = Darn::open_without_subduction(Path::new("."))?;
     let manifest = darn.load_manifest()?;
     let root = darn.root();
@@ -557,6 +558,7 @@ pub(crate) fn tree(out: &Output) -> eyre::Result<()> {
     let red = Style::new().red();
     let dim = Style::new().dim();
 
+    #[allow(clippy::expect_used)] // Writing to String is infallible
     for (entry, state) in &entries {
         let styled_indicator = match state {
             FileState::Clean => " ".to_string(),
@@ -587,25 +589,29 @@ pub(crate) fn tree(out: &Output) -> eyre::Result<()> {
     let total = entries.len();
     let clean = total - modified - missing;
 
-    let mut summary = format!("{total} tracked: {clean} clean");
-    if modified > 0 {
-        write!(
-            summary,
-            ", {} {}",
-            yellow.apply_to(modified),
-            yellow.apply_to("modified")
-        )
-        .expect("write to string");
-    }
-    if missing > 0 {
-        write!(
-            summary,
-            ", {} {}",
-            red.apply_to(missing),
-            red.apply_to("missing")
-        )
-        .expect("write to string");
-    }
+    let summary = {
+        #[allow(clippy::expect_used)] // Writing to String is infallible
+        let mut s = format!("{total} tracked: {clean} clean");
+        if modified > 0 {
+            write!(
+                s,
+                ", {} {}",
+                yellow.apply_to(modified),
+                yellow.apply_to("modified")
+            )
+            .expect("write to string");
+        }
+        if missing > 0 {
+            write!(
+                s,
+                ", {} {}",
+                red.apply_to(missing),
+                red.apply_to("missing")
+            )
+            .expect("write to string");
+        }
+        s
+    };
 
     out.outro(&summary)?;
 
@@ -613,7 +619,7 @@ pub(crate) fn tree(out: &Output) -> eyre::Result<()> {
 }
 
 /// Show stats for a tracked file.
-pub(crate) async fn stat(target: &str, out: &Output) -> eyre::Result<()> {
+pub(crate) async fn stat(target: &str, out: Output) -> eyre::Result<()> {
     let darn = Darn::open(Path::new(".")).await?;
     let manifest = darn.load_manifest()?;
     let root = darn.root();
@@ -769,7 +775,7 @@ pub(crate) async fn sync_cmd(
     peer_name: Option<&str>,
     dry_run: bool,
     force: bool,
-    out: &Output,
+    out: Output,
 ) -> eyre::Result<()> {
     info!(?peer_name, dry_run, force, "Syncing");
 
@@ -910,7 +916,7 @@ async fn continue_sync(
     darn: Darn,
     mut manifest: Manifest,
     peer_name: Option<&str>,
-    out: &Output,
+    out: Output,
 ) -> eyre::Result<()> {
     // Refresh all modified files (commit local changes)
     let spinner = out.spinner("Checking for local changes...");
@@ -1133,7 +1139,7 @@ async fn sync_peer_with_progress(
     darn: &Darn,
     peer: &Peer,
     manifest: &Manifest,
-    out: &Output,
+    out: Output,
 ) -> eyre::Result<darn_core::sync_progress::SyncSummary> {
     let progress_bar = out.progress(1, &format!("Connecting to {}...", peer.name));
     let current = Arc::new(AtomicUsize::new(0));
@@ -1199,7 +1205,7 @@ async fn sync_peer_with_progress(
 }
 
 /// Dry-run mode: show what would be synced without actually doing it.
-fn sync_dry_run(peer_name: Option<&str>, out: &Output) -> eyre::Result<()> {
+fn sync_dry_run(peer_name: Option<&str>, out: Output) -> eyre::Result<()> {
     let darn = Darn::open_without_subduction(Path::new("."))?;
     let manifest = darn.load_manifest()?;
     let root = darn.root();
@@ -1228,14 +1234,18 @@ fn sync_dry_run(peer_name: Option<&str>, out: &Output) -> eyre::Result<()> {
             println!("missing\t{}", path.display());
         }
     } else if !modified.is_empty() || !missing.is_empty() {
-        let mut changes = String::new();
-        for path in &modified {
-            writeln!(changes, "M  {}", path.display()).expect("write to string");
-        }
-        for path in &missing {
-            writeln!(changes, "!  {} (missing)", path.display()).expect("write to string");
-        }
-        changes.pop();
+        #[allow(clippy::expect_used)] // Writing to String is infallible
+        let changes = {
+            let mut buf = String::new();
+            for path in &modified {
+                writeln!(buf, "M  {}", path.display()).expect("write to string");
+            }
+            for path in &missing {
+                writeln!(buf, "!  {} (missing)", path.display()).expect("write to string");
+            }
+            buf.pop();
+            buf
+        };
 
         cliclack::note("Uncommitted changes", &changes)?;
         out.info(&format!(
@@ -1272,68 +1282,81 @@ fn sync_dry_run(peer_name: Option<&str>, out: &Output) -> eyre::Result<()> {
 
     // Show sync status per peer
     for peer in &peers {
-        let peer_id_display = if let Some(id) = peer.peer_id() {
-            bs58::encode(id.as_bytes()).into_string()
-        } else {
-            "(discovery)".to_string()
-        };
-        let last_sync = peer
-            .last_synced_at
-            .map_or_else(|| "never".to_string(), format_timestamp);
-
-        // Count unsynced files for this peer
-        let mut unsynced = Vec::new();
-        for entry in manifest.iter() {
-            if !peer.is_synced(&entry.sedimentree_id, &entry.sedimentree_digest) {
-                unsynced.push(&entry.relative_path);
-            }
-        }
-
-        if out.is_porcelain() {
-            println!(
-                "peer\t{}\t{}\t{peer_id_display}\t{last_sync}\t{}",
-                peer.name,
-                peer.url,
-                unsynced.len()
-            );
-            for path in &unsynced {
-                println!("unsynced\t{}\t{}", peer.name, path.display());
-            }
-        } else {
-            // Build peer status content
-            let mut content = format!("URL:       {}\n", peer.url);
-            writeln!(content, "Peer ID:   {peer_id_display}").expect("write to string");
-            writeln!(content, "Last sync: {last_sync}").expect("write to string");
-
-            if unsynced.is_empty() {
-                write!(content, "Status:    all {total} file(s) synced").expect("write to string");
-            } else if unsynced.len() == total {
-                let count = unsynced.len();
-                write!(content, "Status:    {count} file(s) never synced")
-                    .expect("write to string");
-            } else {
-                let count = unsynced.len();
-                writeln!(content, "Status:    {count} of {total} file(s) unsynced")
-                    .expect("write to string");
-                for path in unsynced.iter().take(5) {
-                    writeln!(content, "           - {}", path.display()).expect("write to string");
-                }
-                if unsynced.len() > 5 {
-                    let remaining = unsynced.len() - 5;
-                    write!(content, "           ... and {remaining} more")
-                        .expect("write to string");
-                } else {
-                    content.pop();
-                }
-            }
-
-            cliclack::note(peer.name.as_str(), &content)?;
-        }
+        display_peer_dry_run_status(peer, &manifest, total, out)?;
     }
 
     if !out.is_porcelain() {
         out.outro(&format!("Run {} to sync", cmd("darn sync")))?;
     }
+    Ok(())
+}
+
+/// Display dry-run sync status for a single peer.
+#[allow(clippy::expect_used)] // Writing to String is infallible
+fn display_peer_dry_run_status(
+    peer: &Peer,
+    manifest: &Manifest,
+    total: usize,
+    out: Output,
+) -> eyre::Result<()> {
+    let peer_id_display = if let Some(id) = peer.peer_id() {
+        bs58::encode(id.as_bytes()).into_string()
+    } else {
+        "(discovery)".to_string()
+    };
+    let last_sync = peer
+        .last_synced_at
+        .map_or_else(|| "never".to_string(), format_timestamp);
+
+    // Count unsynced files for this peer
+    let mut unsynced = Vec::new();
+    for entry in manifest.iter() {
+        if !peer.is_synced(&entry.sedimentree_id, &entry.sedimentree_digest) {
+            unsynced.push(&entry.relative_path);
+        }
+    }
+
+    if out.is_porcelain() {
+        println!(
+            "peer\t{}\t{}\t{peer_id_display}\t{last_sync}\t{}",
+            peer.name,
+            peer.url,
+            unsynced.len()
+        );
+        for path in &unsynced {
+            println!("unsynced\t{}\t{}", peer.name, path.display());
+        }
+    } else {
+        // Build peer status content
+        let mut content = format!("URL:       {}\n", peer.url);
+        writeln!(content, "Peer ID:   {peer_id_display}").expect("write to string");
+        writeln!(content, "Last sync: {last_sync}").expect("write to string");
+
+        if unsynced.is_empty() {
+            write!(content, "Status:    all {total} file(s) synced").expect("write to string");
+        } else if unsynced.len() == total {
+            let count = unsynced.len();
+            write!(content, "Status:    {count} file(s) never synced")
+                .expect("write to string");
+        } else {
+            let count = unsynced.len();
+            writeln!(content, "Status:    {count} of {total} file(s) unsynced")
+                .expect("write to string");
+            for path in unsynced.iter().take(5) {
+                writeln!(content, "           - {}", path.display()).expect("write to string");
+            }
+            if unsynced.len() > 5 {
+                let remaining = unsynced.len() - 5;
+                write!(content, "           ... and {remaining} more")
+                    .expect("write to string");
+            } else {
+                content.pop();
+            }
+        }
+
+        cliclack::note(peer.name.as_str(), &content)?;
+    }
+
     Ok(())
 }
 
@@ -1384,7 +1407,7 @@ fn format_timestamp(ts: darn_core::unix_timestamp::UnixTimestamp) -> String {
 pub(crate) async fn watch(
     sync_interval: &std::time::Duration,
     no_track: bool,
-    out: &Output,
+    out: Output,
 ) -> eyre::Result<()> {
     let darn = Darn::open(Path::new(".")).await?;
     let root = darn.root().to_path_buf();
@@ -1672,13 +1695,12 @@ pub(crate) async fn watch(
                                         }
                                     }
                                     // Sync any new sedimentrees discovered in the directory tree
-                                    if let Some(peer_id) = peer.peer_id() {
-                                        if let Ok(new_count) = darn.sync_missing_sedimentrees(&manifest, &peer_id).await {
-                                            if new_count > 0 {
-                                                any_received = true;
-                                                info!(new_count, peer = %peer.name, "Synced missing sedimentrees");
-                                            }
-                                        }
+                                    if let Some(peer_id) = peer.peer_id()
+                                        && let Ok(new_count) = darn.sync_missing_sedimentrees(&manifest, &peer_id).await
+                                        && new_count > 0
+                                    {
+                                        any_received = true;
+                                        info!(new_count, peer = %peer.name, "Synced missing sedimentrees");
                                     }
                                 }
                                 Err(e) => {
@@ -1887,7 +1909,7 @@ pub(crate) fn peer_add(
     name: &str,
     url: &str,
     peer_id: Option<&str>,
-    out: &Output,
+    out: Output,
 ) -> eyre::Result<()> {
     let darn = Darn::open_without_subduction(Path::new("."))?;
 
@@ -1943,7 +1965,7 @@ pub(crate) fn peer_add(
 }
 
 /// List known peers.
-pub(crate) fn peer_list(out: &Output) -> eyre::Result<()> {
+pub(crate) fn peer_list(out: Output) -> eyre::Result<()> {
     let darn = Darn::open_without_subduction(Path::new("."))?;
     let peers = darn.list_peers()?;
 
@@ -2007,7 +2029,7 @@ pub(crate) fn peer_list(out: &Output) -> eyre::Result<()> {
 }
 
 /// Remove a peer.
-pub(crate) fn peer_remove(name: &str, out: &Output) -> eyre::Result<()> {
+pub(crate) fn peer_remove(name: &str, out: Output) -> eyre::Result<()> {
     let darn = Darn::open_without_subduction(Path::new("."))?;
     let peer_name = PeerName::new(name)?;
 
@@ -2018,19 +2040,17 @@ pub(crate) fn peer_remove(name: &str, out: &Output) -> eyre::Result<()> {
         } else {
             out.success(&format!("Removed peer: {name}"))?;
         }
+    } else if out.is_porcelain() {
+        println!("not_found\t{name}");
     } else {
-        if out.is_porcelain() {
-            println!("not_found\t{name}");
-        } else {
-            out.warning(&format!("Peer not found: {name}"))?;
-        }
+        out.warning(&format!("Peer not found: {name}"))?;
     }
 
     Ok(())
 }
 
 /// Show info about global config and current workspace.
-pub(crate) fn info(out: &Output) -> eyre::Result<()> {
+pub(crate) fn info(out: Output) -> eyre::Result<()> {
     // Global Configuration
     let config_dir = darn_core::config::global_config_dir()?;
     let signer_dir = darn_core::config::global_signer_dir()?;

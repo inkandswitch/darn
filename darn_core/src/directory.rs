@@ -19,7 +19,7 @@
 pub mod entry;
 
 use self::entry::{DirectoryEntry, EntryType};
-use automerge::{transaction::Transactable, Automerge, AutomergeError, ObjType, ReadDoc, ROOT};
+use automerge::{Automerge, AutomergeError, ObjType, ROOT, ReadDoc, transaction::Transactable};
 use sedimentree_core::id::SedimentreeId;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -694,13 +694,11 @@ mod tests {
         let am = dir.to_automerge()?;
 
         // Check that url field exists and is a string starting with "automerge:"
-        let Some((automerge::Value::Object(ObjType::List), docs_id)) = am.get(ROOT, "docs")?
-        else {
+        let Some((automerge::Value::Object(ObjType::List), docs_id)) = am.get(ROOT, "docs")? else {
             panic!("docs should be a list")
         };
 
-        let Some((automerge::Value::Object(ObjType::Map), entry_id)) = am.get(&docs_id, 0)?
-        else {
+        let Some((automerge::Value::Object(ObjType::Map), entry_id)) = am.get(&docs_id, 0)? else {
             panic!("entry should be a map")
         };
 

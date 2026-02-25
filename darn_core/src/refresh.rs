@@ -1,6 +1,6 @@
 //! Refresh error types and Automerge content update helpers.
 
-use automerge::{transaction::Transactable, Automerge, AutomergeError, ObjType, ReadDoc, ROOT};
+use automerge::{Automerge, AutomergeError, ObjType, ROOT, ReadDoc, transaction::Transactable};
 use thiserror::Error;
 
 use crate::file::content::Content;
@@ -18,6 +18,11 @@ use crate::sedimentree::SedimentreeError;
 /// Returns an error if:
 /// - The document schema is invalid (content field missing or wrong type)
 /// - An Automerge operation fails
+///
+/// # Panics
+///
+/// Panics if the internal content-info state is inconsistent (should not
+/// happen in practice since the `Text` branch always populates it).
 pub fn update_automerge_content(
     doc: &mut Automerge,
     new_content: Content,

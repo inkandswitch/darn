@@ -15,18 +15,18 @@ pub(crate) struct Output {
 }
 
 impl Output {
-    pub(crate) fn new(porcelain: bool) -> Self {
+    pub(crate) const fn new(porcelain: bool) -> Self {
         Self { porcelain }
     }
 
-    pub(crate) fn is_porcelain(&self) -> bool {
+    pub(crate) const fn is_porcelain(self) -> bool {
         self.porcelain
     }
 
     // -- Lifecycle (intro/outro) --
 
     /// Print a command header. In porcelain mode, this is a no-op.
-    pub(crate) fn intro(&self, title: &str) -> eyre::Result<()> {
+    pub(crate) fn intro(self, title: &str) -> eyre::Result<()> {
         if !self.porcelain {
             cliclack::intro(title)?;
         }
@@ -34,7 +34,7 @@ impl Output {
     }
 
     /// Print a command footer. In porcelain mode, this is a no-op.
-    pub(crate) fn outro(&self, msg: &str) -> eyre::Result<()> {
+    pub(crate) fn outro(self, msg: &str) -> eyre::Result<()> {
         if !self.porcelain {
             cliclack::outro(msg)?;
         }
@@ -43,7 +43,7 @@ impl Output {
 
     // -- Logging --
 
-    pub(crate) fn success(&self, msg: &str) -> eyre::Result<()> {
+    pub(crate) fn success(self, msg: &str) -> eyre::Result<()> {
         if self.porcelain {
             println!("ok\t{msg}");
         } else {
@@ -52,7 +52,7 @@ impl Output {
         Ok(())
     }
 
-    pub(crate) fn error(&self, msg: &str) -> eyre::Result<()> {
+    pub(crate) fn error(self, msg: &str) -> eyre::Result<()> {
         if self.porcelain {
             println!("error\t{msg}");
         } else {
@@ -61,7 +61,7 @@ impl Output {
         Ok(())
     }
 
-    pub(crate) fn warning(&self, msg: &str) -> eyre::Result<()> {
+    pub(crate) fn warning(self, msg: &str) -> eyre::Result<()> {
         if self.porcelain {
             println!("warning\t{msg}");
         } else {
@@ -70,7 +70,7 @@ impl Output {
         Ok(())
     }
 
-    pub(crate) fn info(&self, msg: &str) -> eyre::Result<()> {
+    pub(crate) fn info(self, msg: &str) -> eyre::Result<()> {
         if self.porcelain {
             println!("info\t{msg}");
         } else {
@@ -79,7 +79,7 @@ impl Output {
         Ok(())
     }
 
-    pub(crate) fn remark(&self, msg: &str) -> eyre::Result<()> {
+    pub(crate) fn remark(self, msg: &str) -> eyre::Result<()> {
         if self.porcelain {
             // Remarks are low-priority; still emit them for completeness
             println!("info\t{msg}");
@@ -93,7 +93,7 @@ impl Output {
 
     /// Print a tab-separated data line (porcelain) or a note block (human).
     #[allow(dead_code)]
-    pub(crate) fn note(&self, title: &str, content: &str) -> eyre::Result<()> {
+    pub(crate) fn note(self, title: &str, content: &str) -> eyre::Result<()> {
         if self.porcelain {
             // Emit each line of content prefixed with the title as context
             for line in content.lines() {
@@ -108,8 +108,8 @@ impl Output {
         Ok(())
     }
 
-    /// Print a single key-value pair. In human mode, uses cliclack::log::info.
-    pub(crate) fn kv(&self, key: &str, value: &str) -> eyre::Result<()> {
+    /// Print a single key-value pair. In human mode, uses `cliclack::log::info`.
+    pub(crate) fn kv(self, key: &str, value: &str) -> eyre::Result<()> {
         if self.porcelain {
             println!("{key}\t{value}");
         } else {
@@ -120,7 +120,7 @@ impl Output {
 
     /// Print a raw data line (porcelain only). No-op in human mode.
     #[allow(dead_code)]
-    pub(crate) fn data(&self, line: &str) {
+    pub(crate) fn data(self, line: &str) {
         if self.porcelain {
             println!("{line}");
         }
@@ -130,7 +130,7 @@ impl Output {
 
     /// Start a spinner (human) or print a status message (porcelain).
     /// Returns a `Spinner` handle that can be stopped.
-    pub(crate) fn spinner(&self, msg: &str) -> Spinner {
+    pub(crate) fn spinner(self, msg: &str) -> Spinner {
         if self.porcelain {
             println!("info\t{msg}");
             Spinner::Porcelain
@@ -144,7 +144,7 @@ impl Output {
     // -- Progress bars --
 
     /// Start a progress bar (human) or return a no-op counter (porcelain).
-    pub(crate) fn progress(&self, total: u64, msg: &str) -> Progress {
+    pub(crate) fn progress(self, total: u64, msg: &str) -> Progress {
         if self.porcelain {
             println!("progress\t{msg}\t{total}");
             Progress::Porcelain
@@ -158,7 +158,7 @@ impl Output {
     // -- Confirm --
 
     /// Ask a yes/no question. In porcelain mode, returns the default value.
-    pub(crate) fn confirm(&self, question: &str, default: bool) -> eyre::Result<bool> {
+    pub(crate) fn confirm(self, question: &str, default: bool) -> eyre::Result<bool> {
         if self.porcelain {
             Ok(default)
         } else {
@@ -169,7 +169,7 @@ impl Output {
     }
 }
 
-/// Spinner abstraction: wraps cliclack::ProgressBar or is a no-op.
+/// Spinner abstraction: wraps `cliclack::ProgressBar` or is a no-op.
 pub(crate) enum Spinner {
     Interactive(cliclack::ProgressBar),
     Porcelain,
@@ -199,7 +199,7 @@ impl Spinner {
     }
 }
 
-/// Progress bar abstraction: wraps cliclack::ProgressBar or is a no-op.
+/// Progress bar abstraction: wraps `cliclack::ProgressBar` or is a no-op.
 pub(crate) enum Progress {
     Interactive(cliclack::ProgressBar),
     Porcelain,

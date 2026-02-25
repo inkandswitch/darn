@@ -46,25 +46,25 @@ async fn main() -> Result<()> {
     }
 
     match cli.command {
-        Commands::Init { path } => commands::init(&path, &out).await,
-        Commands::Clone { root_id, path } => commands::clone_cmd(&root_id, &path, &out).await,
-        Commands::Ignore { patterns } => commands::ignore(&patterns, &out),
-        Commands::Unignore { patterns } => commands::unignore(&patterns, &out),
-        Commands::Tree => commands::tree(&out),
-        Commands::Stat { target } => commands::stat(&target, &out).await,
+        Commands::Init { path } => commands::init(&path, out).await,
+        Commands::Clone { root_id, path } => commands::clone_cmd(&root_id, &path, out).await,
+        Commands::Ignore { patterns } => commands::ignore(&patterns, out),
+        Commands::Unignore { patterns } => commands::unignore(&patterns, out),
+        Commands::Tree => commands::tree(out),
+        Commands::Stat { target } => commands::stat(&target, out).await,
         Commands::Sync {
             peer,
             dry_run,
             force,
-        } => commands::sync_cmd(peer.as_deref(), dry_run, force, &out).await,
-        Commands::Watch { interval, no_track } => commands::watch(&interval, no_track, &out).await,
-        Commands::Info => commands::info(&out),
+        } => commands::sync_cmd(peer.as_deref(), dry_run, force, out).await,
+        Commands::Watch { interval, no_track } => commands::watch(&interval, no_track, out).await,
+        Commands::Info => commands::info(out),
         Commands::Peer { command } => match command {
             PeerCommands::Add { name, url, peer_id } => {
-                commands::peer_add(&name, &url, peer_id.as_deref(), &out)
+                commands::peer_add(&name, &url, peer_id.as_deref(), out)
             }
-            PeerCommands::List => commands::peer_list(&out),
-            PeerCommands::Remove { name } => commands::peer_remove(&name, &out),
+            PeerCommands::List => commands::peer_list(out),
+            PeerCommands::Remove { name } => commands::peer_remove(&name, out),
         },
     }
 }
