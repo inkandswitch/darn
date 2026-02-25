@@ -3,16 +3,18 @@
 //! Files in `darn` are stored as Automerge documents following the Patchwork convention:
 //!
 //! ```ignore
-//! File {
-//!   "@patchwork": { type: "file" },
+//! UnixFileEntry {
 //!   name: string,
 //!   content: Text | Bytes,
-//!   metadata: { permissions: u32 },
+//!   extension: string,
+//!   mimeType: string,
 //! }
 //! ```
 //!
 //! - Text files use `Text` (character-level CRDT with automatic merging)
 //! - Binary files use `Bytes` (last-writer-wins semantics)
+//!
+//! Note: Unix permissions are stored as a darn-specific extension field `_darn_mode`.
 
 pub mod content;
 pub mod file_type;
@@ -25,16 +27,25 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use automerge::{transaction::Transactable, AutoCommit, ObjType, ReadDoc, ROOT};
+use automerge::{Automerge, AutomergeError, ObjType, ROOT, ReadDoc, transaction::Transactable};
 use thiserror::Error;
+
+use crate::attributes::AttributeRules;
 
 /// Chunk size for streaming UTF-8 validation.
 const UTF8_CHECK_CHUNK_SIZE: usize = 64 * 1024; // 64 KB
 
+/// Files larger than this are treated as binary by default.
+///
+/// Character-level CRDT merging is expensive for large files, and files this
+/// size are almost always generated (bundler output, build artifacts, etc.)
+/// rather than hand-edited. Users can override with `*.ext text` in `.darnattributes`.
+const LARGE_FILE_THRESHOLD: u64 = 1024 * 1024; // 1 MB
+
 /// A file represented as an Automerge document.
 ///
 /// This is the in-memory representation of a tracked file. It can be
-/// converted to/from an `AutoCommit` document for persistence and sync.
+/// converted to/from an Automerge document for persistence and sync.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct File {
     /// File name without path (e.g., "README.md", "Makefile").
@@ -77,6 +88,22 @@ impl File {
     ///
     /// Returns an error if the file cannot be read.
     pub fn from_path(path: &Path) -> Result<Self, ReadFileError> {
+        Self::from_path_with_attributes(path, None)
+    }
+
+    /// Creates a file document from a filesystem path with attribute rules.
+    ///
+    /// If `attributes` is provided and matches the file path, the specified
+    /// file type (text/binary) is used. Otherwise, falls back to automatic
+    /// detection via streaming UTF-8 validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read.
+    pub fn from_path_with_attributes(
+        path: &Path,
+        attributes: Option<&AttributeRules>,
+    ) -> Result<Self, ReadFileError> {
         let name = name::Name::from_path(path)
             .ok_or_else(|| ReadFileError::InvalidPath(path.to_path_buf()))?;
 
@@ -91,8 +118,26 @@ impl File {
         #[cfg(not(unix))]
         let permissions = 0o644;
 
-        // Use streaming UTF-8 validation to detect text vs binary
-        let file_content = streaming_utf8_read(path)?;
+        // Check if attributes specify a file type
+        let file_content = match attributes.and_then(|a| a.get_attribute(path)) {
+            Some(file_type::FileType::Binary) => {
+                // Explicitly binary - read as bytes without UTF-8 check
+                content::Content::Bytes(std::fs::read(path)?)
+            }
+            Some(file_type::FileType::Text) => {
+                // Explicitly text - read as string (will fail if not valid UTF-8)
+                content::Content::Text(std::fs::read_to_string(path)?)
+            }
+            None => {
+                // Large files default to binary — character-level CRDT is too expensive
+                if file_metadata.len() > LARGE_FILE_THRESHOLD {
+                    content::Content::Bytes(std::fs::read(path)?)
+                } else {
+                    // Auto-detect using streaming UTF-8 validation
+                    streaming_utf8_read(path)?
+                }
+            }
+        };
 
         Ok(Self {
             name,
@@ -116,30 +161,37 @@ impl File {
     /// # Errors
     ///
     /// Returns an error if the Automerge operations fail.
-    pub fn to_automerge(&self) -> Result<AutoCommit, SerializeError> {
-        let mut doc = AutoCommit::new();
+    pub fn to_automerge(&self) -> Result<Automerge, SerializeError> {
+        let mut doc = Automerge::new();
 
-        let patchwork = doc.put_object(ROOT, "@patchwork", ObjType::Map)?;
-        doc.put(&patchwork, "type", "file")?;
+        let extension = extract_extension(self.name.as_str());
+        let mime_type = mime_type_for_extension(&extension, self.content.is_text());
+        let mode = self.metadata.mode();
 
-        doc.put(ROOT, "name", self.name.as_str())?;
+        doc.transact::<_, _, AutomergeError>(|tx| {
+            tx.put(ROOT, "name", self.name.as_str())?;
 
-        match &self.content {
-            content::Content::Text(text) => {
-                let text_obj = doc.put_object(ROOT, "content", ObjType::Text)?;
-                doc.splice_text(&text_obj, 0, 0, text)?;
+            match &self.content {
+                content::Content::Text(text) => {
+                    let text_obj = tx.put_object(ROOT, "content", ObjType::Text)?;
+                    tx.splice_text(&text_obj, 0, 0, text)?;
+                }
+                content::Content::Bytes(bytes) => {
+                    tx.put(
+                        ROOT,
+                        "content",
+                        automerge::ScalarValue::Bytes(bytes.clone()),
+                    )?;
+                }
             }
-            content::Content::Bytes(bytes) => {
-                doc.put(
-                    ROOT,
-                    "content",
-                    automerge::ScalarValue::Bytes(bytes.clone()),
-                )?;
-            }
-        }
 
-        let metadata = doc.put_object(ROOT, "metadata", ObjType::Map)?;
-        doc.put(&metadata, "permissions", i64::from(self.metadata.mode()))?;
+            tx.put(ROOT, "extension", extension.as_str())?;
+            tx.put(ROOT, "mimeType", mime_type.as_str())?;
+            tx.put(ROOT, "_darn_mode", i64::from(mode))?;
+
+            Ok(())
+        })
+        .map_err(|f| f.error)?;
 
         Ok(doc)
     }
@@ -152,26 +204,39 @@ impl File {
     /// # Errors
     ///
     /// Returns an error if the Automerge operations fail.
-    pub fn into_automerge(self) -> Result<AutoCommit, SerializeError> {
-        let mut doc = AutoCommit::new();
+    pub fn into_automerge(self) -> Result<Automerge, SerializeError> {
+        let mut doc = Automerge::new();
 
-        let patchwork = doc.put_object(ROOT, "@patchwork", ObjType::Map)?;
-        doc.put(&patchwork, "type", "file")?;
+        let extension = extract_extension(self.name.as_str());
+        let mime_type = mime_type_for_extension(&extension, self.content.is_text());
+        let mode = self.metadata.mode();
+        let name = self.name;
+        let content = self.content;
 
-        doc.put(ROOT, "name", self.name.as_str())?;
+        doc.transact::<_, _, AutomergeError>(|tx| {
+            tx.put(ROOT, "name", name.as_str())?;
 
-        match self.content {
-            content::Content::Text(text) => {
-                let text_obj = doc.put_object(ROOT, "content", ObjType::Text)?;
-                doc.splice_text(&text_obj, 0, 0, &text)?;
+            match content {
+                content::Content::Text(ref text) => {
+                    let text_obj = tx.put_object(ROOT, "content", ObjType::Text)?;
+                    tx.splice_text(&text_obj, 0, 0, text)?;
+                }
+                content::Content::Bytes(ref bytes) => {
+                    tx.put(
+                        ROOT,
+                        "content",
+                        automerge::ScalarValue::Bytes(bytes.clone()),
+                    )?;
+                }
             }
-            content::Content::Bytes(bytes) => {
-                doc.put(ROOT, "content", automerge::ScalarValue::Bytes(bytes))?;
-            }
-        }
 
-        let metadata = doc.put_object(ROOT, "metadata", ObjType::Map)?;
-        doc.put(&metadata, "permissions", i64::from(self.metadata.mode()))?;
+            tx.put(ROOT, "extension", extension.as_str())?;
+            tx.put(ROOT, "mimeType", mime_type.as_str())?;
+            tx.put(ROOT, "_darn_mode", i64::from(mode))?;
+
+            Ok(())
+        })
+        .map_err(|f| f.error)?;
 
         Ok(doc)
     }
@@ -181,7 +246,7 @@ impl File {
     /// # Errors
     ///
     /// Returns an error if the document doesn't match the expected schema.
-    pub fn from_automerge(doc: &AutoCommit) -> Result<Self, DeserializeError> {
+    pub fn from_automerge(doc: &Automerge) -> Result<Self, DeserializeError> {
         let name = name::Name::new(get_string(doc, ROOT, "name")?);
 
         let file_content = match doc.get(ROOT, "content")? {
@@ -205,29 +270,35 @@ impl File {
             }
         };
 
-        // Read metadata
-        let Some((automerge::Value::Object(ObjType::Map), metadata_id)) =
-            doc.get(ROOT, "metadata")?
-        else {
-            return Err(DeserializeError::InvalidSchema(
-                "missing metadata object".into(),
-            ));
-        };
-
-        let permissions = match doc.get(&metadata_id, "permissions")? {
+        // Read permissions from _darn_mode (new) or metadata.permissions (legacy)
+        #[allow(clippy::wildcard_enum_match_arm)]
+        // only Int/Uint carry mode; rest defaults to 0o644
+        let permissions = match doc.get(ROOT, "_darn_mode")? {
             Some((automerge::Value::Scalar(s), _)) => match s.as_ref() {
                 automerge::ScalarValue::Int(i) => u32::try_from(*i).unwrap_or(0o644),
                 automerge::ScalarValue::Uint(u) => u32::try_from(*u).unwrap_or(0o644),
-                automerge::ScalarValue::Str(_)
-                | automerge::ScalarValue::Bytes(_)
-                | automerge::ScalarValue::F64(_)
-                | automerge::ScalarValue::Counter(_)
-                | automerge::ScalarValue::Timestamp(_)
-                | automerge::ScalarValue::Boolean(_)
-                | automerge::ScalarValue::Null
-                | automerge::ScalarValue::Unknown { .. } => 0o644,
+                _ => 0o644,
             },
-            _ => 0o644,
+            _ => {
+                // Fall back to legacy metadata.permissions
+                match doc.get(ROOT, "metadata")? {
+                    Some((automerge::Value::Object(ObjType::Map), metadata_id)) => {
+                        match doc.get(&metadata_id, "permissions")? {
+                            Some((automerge::Value::Scalar(s), _)) => match s.as_ref() {
+                                automerge::ScalarValue::Int(i) => {
+                                    u32::try_from(*i).unwrap_or(0o644)
+                                }
+                                automerge::ScalarValue::Uint(u) => {
+                                    u32::try_from(*u).unwrap_or(0o644)
+                                }
+                                _ => 0o644,
+                            },
+                            _ => 0o644,
+                        }
+                    }
+                    _ => 0o644,
+                }
+            }
         };
 
         Ok(Self {
@@ -259,26 +330,74 @@ impl File {
     }
 }
 
+/// Extract file extension from a filename.
+fn extract_extension(name: &str) -> String {
+    Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Get MIME type for a file extension.
+fn mime_type_for_extension(extension: &str, is_text: bool) -> String {
+    match extension.to_lowercase().as_str() {
+        // Text formats
+        "html" | "htm" => "text/html",
+        "css" => "text/css",
+        "js" | "mjs" => "text/javascript",
+        "json" | "map" => "application/json",
+        "xml" => "application/xml",
+        "md" => "text/markdown",
+        "txt" => "text/plain",
+        "rs" => "text/x-rust",
+        "ts" => "text/typescript",
+        "tsx" => "text/typescript-jsx",
+        "jsx" => "text/javascript-jsx",
+        "yaml" | "yml" => "text/yaml",
+        "toml" => "text/toml",
+        "sh" => "text/x-shellscript",
+
+        // Image formats
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "webp" => "image/webp",
+        "ico" => "image/x-icon",
+
+        // Other binary formats
+        "wasm" => "application/wasm",
+        "pdf" => "application/pdf",
+        "zip" => "application/zip",
+        "tar" => "application/x-tar",
+        "gz" => "application/gzip",
+
+        // Default based on content type
+        _ => {
+            if is_text {
+                "text/plain"
+            } else {
+                "application/octet-stream"
+            }
+        }
+    }
+    .to_string()
+}
+
 /// Helper to get a string value from an Automerge document.
+#[allow(clippy::wildcard_enum_match_arm)] // only Str is valid; all other variants are the same error
 fn get_string(
-    doc: &AutoCommit,
+    doc: &Automerge,
     obj: automerge::ObjId,
     key: &str,
 ) -> Result<String, DeserializeError> {
     match doc.get(obj, key)? {
         Some((automerge::Value::Scalar(s), _)) => match s.as_ref() {
             automerge::ScalarValue::Str(s) => Ok(s.to_string()),
-            automerge::ScalarValue::Bytes(_)
-            | automerge::ScalarValue::Int(_)
-            | automerge::ScalarValue::Uint(_)
-            | automerge::ScalarValue::F64(_)
-            | automerge::ScalarValue::Counter(_)
-            | automerge::ScalarValue::Timestamp(_)
-            | automerge::ScalarValue::Boolean(_)
-            | automerge::ScalarValue::Null
-            | automerge::ScalarValue::Unknown { .. } => Err(DeserializeError::InvalidSchema(
-                format!("{key} must be a string"),
-            )),
+            _ => Err(DeserializeError::InvalidSchema(format!(
+                "{key} must be a string"
+            ))),
         },
         _ => Err(DeserializeError::InvalidSchema(format!(
             "missing {key} field"
@@ -286,26 +405,20 @@ fn get_string(
     }
 }
 
-impl TryFrom<&AutoCommit> for File {
-    type Error = DeserializeError;
-
-    fn try_from(doc: &AutoCommit) -> Result<File, DeserializeError> {
-        File::from_automerge(doc)
-    }
-}
-
 /// Reads a file with streaming UTF-8 validation.
 ///
 /// Returns `Content::Text` if valid UTF-8, `Content::Bytes` otherwise.
 /// Only reads the file once - validates UTF-8 as chunks are read.
+#[allow(clippy::indexing_slicing)] // all slice bounds are validated by loop/UTF-8 logic
 fn streaming_utf8_read(path: &Path) -> Result<content::Content, std::io::Error> {
     let file = std::fs::File::open(path)?;
+    #[allow(clippy::cast_possible_truncation)] // files > usize::MAX can't be allocated anyway
     let file_len = file.metadata()?.len() as usize;
     let mut reader = BufReader::with_capacity(UTF8_CHECK_CHUNK_SIZE, file);
 
     // Pre-allocate buffer for the expected file size
     let mut bytes = Vec::with_capacity(file_len);
-    let mut chunk = [0u8; UTF8_CHECK_CHUNK_SIZE];
+    let mut chunk = vec![0u8; UTF8_CHECK_CHUNK_SIZE].into_boxed_slice();
 
     // Track incomplete UTF-8 sequence at chunk boundary (max 3 bytes for UTF-8)
     let mut pending: [u8; 3] = [0; 3];
@@ -355,6 +468,7 @@ fn streaming_utf8_read(path: &Path) -> Result<content::Content, std::io::Error> 
     }
 
     // We validated all chunks - conversion cannot fail
+    #[allow(clippy::expect_used)] // UTF-8 validity was verified chunk-by-chunk above
     Ok(content::Content::Text(
         String::from_utf8(bytes).expect("validated UTF-8"),
     ))
@@ -394,30 +508,70 @@ pub enum DeserializeError {
     InvalidSchema(String),
 }
 
+#[allow(clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bolero::check;
+    use testresult::TestResult;
 
+    #[allow(clippy::expect_used)]
     #[test]
-    fn text_roundtrip() {
-        let doc = File::text("hello.txt", "Hello, world!");
+    fn text_automerge_roundtrip() {
+        check!().with_type::<String>().for_each(|text: &String| {
+            let doc = File::text("test.txt", text);
+            let am = doc.to_automerge().expect("to_automerge");
+            let loaded = File::from_automerge(&am).expect("from_automerge");
 
-        let am = doc.to_automerge().expect("to_automerge failed");
-        let loaded = File::from_automerge(&am).expect("from_automerge failed");
-
-        assert_eq!(doc.name, loaded.name);
-        assert_eq!(doc.content, loaded.content);
+            assert_eq!(doc.name, loaded.name);
+            assert_eq!(doc.content, loaded.content);
+        });
     }
 
+    #[allow(clippy::expect_used)]
     #[test]
-    fn binary_roundtrip() {
-        let doc = File::binary("image.png", vec![0x89, 0x50, 0x4E, 0x47]);
+    fn binary_automerge_roundtrip() {
+        check!().with_type::<Vec<u8>>().for_each(|bytes: &Vec<u8>| {
+            let doc = File::binary("test.bin", bytes.clone());
+            let am = doc.to_automerge().expect("to_automerge");
+            let loaded = File::from_automerge(&am).expect("from_automerge");
 
-        let am = doc.to_automerge().expect("to_automerge failed");
-        let loaded = File::from_automerge(&am).expect("from_automerge failed");
+            assert_eq!(doc.name, loaded.name);
+            assert_eq!(doc.content, loaded.content);
+        });
+    }
 
-        assert_eq!(doc.name, loaded.name);
-        assert_eq!(doc.content, loaded.content);
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn permissions_automerge_roundtrip() {
+        check!().with_type::<u16>().for_each(|&bits| {
+            let mode = u32::from(bits) & 0o777;
+            let doc = File::text("test.sh", "#!/bin/sh").with_permissions(mode);
+            let am = doc.to_automerge().expect("to_automerge");
+            let loaded = File::from_automerge(&am).expect("from_automerge");
+
+            assert_eq!(loaded.metadata.mode(), mode);
+        });
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn filesystem_roundtrip() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        check!().with_type::<Vec<u8>>().for_each(|bytes: &Vec<u8>| {
+            let original_path = dir.path().join("original.bin");
+            let output_path = dir.path().join("copy.bin");
+            std::fs::write(&original_path, bytes).expect("write");
+
+            let doc = File::from_path(&original_path).expect("from_path");
+            doc.write_to_path(&output_path).expect("write_to_path");
+
+            let written = std::fs::read(&output_path).expect("read back");
+            assert_eq!(
+                &written, bytes,
+                "content should survive filesystem roundtrip"
+            );
+        });
     }
 
     #[test]
@@ -427,120 +581,61 @@ mod tests {
     }
 
     #[test]
-    fn from_path_text() {
-        let dir = tempfile::tempdir().expect("create tempdir");
-        let file_path = dir.path().join("test.txt");
-        std::fs::write(&file_path, "Hello, world!").expect("write file");
+    fn large_file_defaults_to_binary() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let file_path = dir.path().join("big.txt");
 
-        let doc = File::from_path(&file_path).expect("from_path");
+        // Create a file just over the threshold (valid UTF-8 content)
+        #[allow(clippy::cast_possible_truncation)]
+        let content = "x".repeat(LARGE_FILE_THRESHOLD as usize + 1);
+        std::fs::write(&file_path, &content)?;
 
-        assert_eq!(doc.name.as_str(), "test.txt");
-        assert_eq!(
-            doc.content,
-            content::Content::Text("Hello, world!".to_string())
+        let doc = File::from_path(&file_path)?;
+
+        assert!(
+            matches!(doc.content, content::Content::Bytes(_)),
+            "large file should default to binary"
         );
+        Ok(())
     }
 
     #[test]
-    fn from_path_binary() {
-        let dir = tempfile::tempdir().expect("create tempdir");
-        let file_path = dir.path().join("data.bin");
-        let binary_data = vec![0x00, 0xFF, 0x80, 0x7F];
-        std::fs::write(&file_path, &binary_data).expect("write file");
+    fn large_file_respects_text_attribute() -> TestResult {
+        use crate::attributes::AttributeRules;
 
-        let doc = File::from_path(&file_path).expect("from_path");
+        let dir = tempfile::tempdir()?;
+        let file_path = dir.path().join("big.txt");
 
-        assert_eq!(doc.name.as_str(), "data.bin");
-        assert_eq!(doc.content, content::Content::Bytes(binary_data));
+        // Create .darnattributes forcing text
+        std::fs::write(dir.path().join(".darnattributes"), "*.txt text")?;
+
+        // Create a file just over the threshold
+        #[allow(clippy::cast_possible_truncation)]
+        let content = "x".repeat(LARGE_FILE_THRESHOLD as usize + 1);
+        std::fs::write(&file_path, &content)?;
+
+        let attrs = AttributeRules::from_workspace_root(dir.path())?;
+        let doc = File::from_path_with_attributes(&file_path, Some(&attrs))?;
+
+        assert!(
+            matches!(doc.content, content::Content::Text(_)),
+            "explicit text attribute should override size heuristic"
+        );
+        Ok(())
     }
 
     #[test]
-    fn write_to_path_text() {
-        let dir = tempfile::tempdir().expect("create tempdir");
-        let file_path = dir.path().join("output.txt");
+    fn extension_and_mimetype_set() -> TestResult {
+        let doc = File::text("script.js", "console.log('hello');");
+        let am = doc.to_automerge()?;
 
-        let doc = File::text("output.txt", "Written content");
-        doc.write_to_path(&file_path).expect("write_to_path");
+        // Check extension
+        let ext = get_string(&am, ROOT, "extension")?;
+        assert_eq!(ext, "js");
 
-        let content = std::fs::read_to_string(&file_path).expect("read file");
-        assert_eq!(content, "Written content");
-    }
-
-    #[test]
-    fn write_to_path_binary() {
-        let dir = tempfile::tempdir().expect("create tempdir");
-        let file_path = dir.path().join("output.bin");
-        let binary_data = vec![0xDE, 0xAD, 0xBE, 0xEF];
-
-        let doc = File::binary("output.bin", binary_data.clone());
-        doc.write_to_path(&file_path).expect("write_to_path");
-
-        let content = std::fs::read(&file_path).expect("read file");
-        assert_eq!(content, binary_data);
-    }
-
-    #[test]
-    fn roundtrip_via_filesystem() {
-        let dir = tempfile::tempdir().expect("create tempdir");
-        let original_path = dir.path().join("original.rs");
-        let output_path = dir.path().join("copy.rs");
-
-        let original_content = "fn main() {\n    println!(\"Hello!\");\n}\n";
-        std::fs::write(&original_path, original_content).expect("write original");
-
-        let doc = File::from_path(&original_path).expect("from_path");
-        doc.write_to_path(&output_path).expect("write_to_path");
-
-        let written_content = std::fs::read_to_string(&output_path).expect("read output");
-        assert_eq!(written_content, original_content);
-    }
-
-    #[test]
-    fn permissions_preserved_in_automerge() {
-        let doc = File::text("script.sh", "#!/bin/bash\necho hi").with_permissions(0o755);
-
-        let am = doc.to_automerge().expect("to_automerge");
-        let loaded = File::from_automerge(&am).expect("from_automerge");
-
-        assert_eq!(loaded.metadata.mode(), 0o755);
-    }
-
-    #[test]
-    fn empty_content_roundtrip() {
-        let text_doc = File::text("empty.txt", "");
-        let am = text_doc.to_automerge().expect("to_automerge");
-        let loaded = File::from_automerge(&am).expect("from_automerge");
-        assert_eq!(loaded.content, content::Content::Text(String::new()));
-
-        let binary_doc = File::binary("empty.bin", Vec::new());
-        let am = binary_doc.to_automerge().expect("to_automerge");
-        let loaded = File::from_automerge(&am).expect("from_automerge");
-        assert_eq!(loaded.content, content::Content::Bytes(Vec::new()));
-    }
-
-    #[test]
-    fn unicode_content_preserved() {
-        let content = "Hello, 世界! 🦀 Ñoño";
-        let doc = File::text("unicode.txt", content);
-
-        let am = doc.to_automerge().expect("to_automerge");
-        let loaded = File::from_automerge(&am).expect("from_automerge");
-
-        assert_eq!(loaded.content, content::Content::Text(content.to_string()));
-    }
-
-    #[test]
-    fn large_content_roundtrip() {
-        use std::fmt::Write;
-        let mut content = String::new();
-        for i in 0..10_000 {
-            writeln!(content, "Line {i}").expect("write to string");
-        }
-        let doc = File::text("large.txt", &content);
-
-        let am = doc.to_automerge().expect("to_automerge");
-        let loaded = File::from_automerge(&am).expect("from_automerge");
-
-        assert_eq!(loaded.content, content::Content::Text(content));
+        // Check mimeType
+        let mime = get_string(&am, ROOT, "mimeType")?;
+        assert_eq!(mime, "text/javascript");
+        Ok(())
     }
 }

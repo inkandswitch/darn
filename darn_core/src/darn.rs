@@ -8,7 +8,7 @@ pub mod refresh_diff;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration
+    time::Duration,
 };
 
 use sedimentree_fs_storage::FsStorage;
@@ -21,6 +21,7 @@ use tungstenite::http::Uri;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    attributes::AttributeRules,
     config::{self, NoConfigDir},
     directory::{Directory, entry::EntryType},
     discover::{self, DiscoverProgress, DiscoverResult},
@@ -93,6 +94,9 @@ impl Darn {
         // Create default .darnignore file
         crate::ignore::create_default(&root)?;
 
+        // Create default .darnattributes file
+        crate::attributes::create_default_darnattributes(&root)?;
+
         // Ensure global signer exists
         let signer_dir = config::global_signer_dir()?;
         let signer = signer::load_or_generate(&signer_dir)?;
@@ -136,6 +140,9 @@ impl Darn {
         // Create manifest with the provided root directory ID
         let manifest = crate::manifest::Manifest::with_root_id(root_directory_id);
         manifest.save(&darn_dir.join(MANIFEST_FILE))?;
+
+        // Create default .darnattributes file
+        crate::attributes::create_default_darnattributes(&root)?;
 
         // Ensure global signer exists
         let signer_dir = config::global_signer_dir()?;
@@ -314,9 +321,12 @@ impl Darn {
             FileState::Modified => {}
         }
 
+        // Load attribute rules for consistent file type detection
+        let attributes = AttributeRules::from_workspace_root(&self.root).ok();
+
         // Read current file content
         let current_fs_digest = content_hash::hash_file(&path)?;
-        let new_file = File::from_path(&path)?;
+        let new_file = File::from_path_with_attributes(&path, attributes.as_ref())?;
 
         // Load existing Automerge doc from sedimentree
         let mut am_doc = sedimentree::load_document(&self.subduction, entry.sedimentree_id)
@@ -403,18 +413,14 @@ impl Darn {
         for entry in manifest.iter_mut() {
             let path = entry.relative_path.clone();
 
-            let new_sed_digest = match sedimentree::compute_digest(
-                &self.subduction,
-                entry.sedimentree_id,
-            )
-            .await
-            {
-                Ok(d) => d,
-                Err(e) => {
-                    result.errors.push((path, format!("compute digest: {e}")));
-                    continue;
-                }
-            };
+            let new_sed_digest =
+                match sedimentree::compute_digest(&self.subduction, entry.sedimentree_id).await {
+                    Ok(d) => d,
+                    Err(e) => {
+                        result.errors.push((path, format!("compute digest: {e}")));
+                        continue;
+                    }
+                };
 
             tracing::debug!(
                 path = %path.display(),
@@ -430,19 +436,20 @@ impl Darn {
 
             let local_changed = entry.state(&self.root) == FileState::Modified;
 
-            let am_doc = match sedimentree::load_document(&self.subduction, entry.sedimentree_id)
-                .await
-            {
-                Ok(Some(doc)) => doc,
-                Ok(None) => {
-                    result.errors.push((path, "document not found after sync".into()));
-                    continue;
-                }
-                Err(e) => {
-                    result.errors.push((path, format!("load document: {e}")));
-                    continue;
-                }
-            };
+            let am_doc =
+                match sedimentree::load_document(&self.subduction, entry.sedimentree_id).await {
+                    Ok(Some(doc)) => doc,
+                    Ok(None) => {
+                        result
+                            .errors
+                            .push((path, "document not found after sync".into()));
+                        continue;
+                    }
+                    Err(e) => {
+                        result.errors.push((path, format!("load document: {e}")));
+                        continue;
+                    }
+                };
 
             // Parse as File
             let file = match File::from_automerge(&am_doc) {
@@ -467,7 +474,9 @@ impl Darn {
                     entry.sedimentree_digest = new_sed_digest;
                 }
                 Err(e) => {
-                    result.errors.push((path.clone(), format!("hash file: {e}")));
+                    result
+                        .errors
+                        .push((path.clone(), format!("hash file: {e}")));
                     // Still mark as updated since we wrote it
                 }
             }
@@ -480,18 +489,12 @@ impl Darn {
         }
 
         // Step 2: Discover new files from remote directory tree
-        if let Err(e) = self
-            .discover_remote_files(manifest, &mut result)
-            .await
-        {
+        if let Err(e) = self.discover_remote_files(manifest, &mut result).await {
             tracing::warn!("Error discovering remote files: {e}");
         }
 
         // Step 3: Detect and remove files deleted from remote
-        if let Err(e) = self
-            .remove_deleted_files(manifest, &mut result)
-            .await
-        {
+        if let Err(e) = self.remove_deleted_files(manifest, &mut result).await {
             tracing::warn!("Error detecting deleted files: {e}");
         }
 
@@ -505,13 +508,8 @@ impl Darn {
         result: &mut ApplyResult,
     ) -> Result<(), SedimentreeError> {
         let root_dir_id = manifest.root_directory_id();
-        self.discover_remote_files_recursive(
-            root_dir_id,
-            PathBuf::new(),
-            manifest,
-            result,
-        )
-        .await
+        self.discover_remote_files_recursive(root_dir_id, PathBuf::new(), manifest, result)
+            .await
     }
 
     /// Recursively discover files from a remote directory.
@@ -531,8 +529,7 @@ impl Darn {
         );
 
         // Load directory document
-        let Some(am_doc) = sedimentree::load_document(&self.subduction, dir_id).await?
-        else {
+        let Some(am_doc) = sedimentree::load_document(&self.subduction, dir_id).await? else {
             tracing::debug!(?dir_id, "discover_remote_files_recursive: empty directory");
             return Ok(()); // Empty directory
         };
@@ -567,21 +564,19 @@ impl Darn {
 
                     tracing::info!(name = %entry.name, "discovered new remote file");
                     // This is a new file from remote
-                    let am_doc = match sedimentree::load_document(
-                        &self.subduction,
-                        entry.sedimentree_id,
-                    )
-                    .await
-                    {
-                        Ok(Some(doc)) => doc,
-                        Ok(None) => continue,
-                        Err(e) => {
-                            result
-                                .errors
-                                .push((entry_path.clone(), format!("load file: {e}")));
-                            continue;
-                        }
-                    };
+                    let am_doc =
+                        match sedimentree::load_document(&self.subduction, entry.sedimentree_id)
+                            .await
+                        {
+                            Ok(Some(doc)) => doc,
+                            Ok(None) => continue,
+                            Err(e) => {
+                                result
+                                    .errors
+                                    .push((entry_path.clone(), format!("load file: {e}")));
+                                continue;
+                            }
+                        };
 
                     let file = match File::from_automerge(&am_doc) {
                         Ok(f) => f,
@@ -628,20 +623,18 @@ impl Darn {
                         }
                     };
 
-                    let sedimentree_digest = match sedimentree::compute_digest(
-                        &self.subduction,
-                        entry.sedimentree_id,
-                    )
-                    .await
-                    {
-                        Ok(d) => d,
-                        Err(e) => {
-                            result
-                                .errors
-                                .push((entry_path.clone(), format!("compute digest: {e}")));
-                            continue;
-                        }
-                    };
+                    let sedimentree_digest =
+                        match sedimentree::compute_digest(&self.subduction, entry.sedimentree_id)
+                            .await
+                        {
+                            Ok(d) => d,
+                            Err(e) => {
+                                result
+                                    .errors
+                                    .push((entry_path.clone(), format!("compute digest: {e}")));
+                                continue;
+                            }
+                        };
 
                     // Add to manifest
                     let tracked = Tracked::new(
@@ -701,7 +694,9 @@ impl Darn {
             let full_path = self.root.join(&relative_path);
 
             // Delete file from filesystem
-            if full_path.exists() && let Err(e) = std::fs::remove_file(&full_path) {
+            if full_path.exists()
+                && let Err(e) = std::fs::remove_file(&full_path)
+            {
                 result
                     .errors
                     .push((relative_path.clone(), format!("delete file: {e}")));
@@ -731,8 +726,7 @@ impl Darn {
         tracing::debug!(?dir_id, "Loading directory document for deletion check");
 
         // Load directory document
-        let Some(am_doc) = sedimentree::load_document(&self.subduction, dir_id).await?
-        else {
+        let Some(am_doc) = sedimentree::load_document(&self.subduction, dir_id).await? else {
             tracing::debug!(?dir_id, "No directory document found (empty)");
             return Ok(()); // Empty directory
         };
@@ -742,7 +736,11 @@ impl Darn {
             return Ok(()); // Not a directory document
         };
 
-        tracing::debug!(?dir_id, entries = dir.entries.len(), "Loaded directory with entries");
+        tracing::debug!(
+            ?dir_id,
+            entries = dir.entries.len(),
+            "Loaded directory with entries"
+        );
 
         for entry in &dir.entries {
             match entry.entry_type {
@@ -766,6 +764,11 @@ impl Darn {
     /// to the remote but aren't in our manifest yet.
     ///
     /// Returns the number of new sedimentrees synced.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SyncError` if the remote directory cannot be loaded or
+    /// if individual sedimentree syncs fail.
     pub async fn sync_missing_sedimentrees(
         &self,
         manifest: &Manifest,
@@ -778,7 +781,10 @@ impl Darn {
         // Collect IDs we already have
         let mut known_ids: HashSet<_> = manifest.iter().map(|e| e.sedimentree_id).collect();
         known_ids.insert(manifest.root_directory_id());
-        tracing::debug!(known_count = known_ids.len(), "sync_missing_sedimentrees: known IDs from manifest");
+        tracing::debug!(
+            known_count = known_ids.len(),
+            "sync_missing_sedimentrees: known IDs from manifest"
+        );
 
         // Collect all IDs from the remote directory tree
         let mut remote_ids = HashSet::new();
@@ -788,11 +794,17 @@ impl Darn {
         {
             tracing::warn!("Error collecting remote sedimentree IDs: {e}");
         }
-        tracing::debug!(remote_count = remote_ids.len(), "sync_missing_sedimentrees: remote IDs from directory tree");
+        tracing::debug!(
+            remote_count = remote_ids.len(),
+            "sync_missing_sedimentrees: remote IDs from directory tree"
+        );
 
         // Find IDs we don't have
         let missing: Vec<_> = remote_ids.difference(&known_ids).copied().collect();
-        tracing::debug!(missing_count = missing.len(), "sync_missing_sedimentrees: missing IDs");
+        tracing::debug!(
+            missing_count = missing.len(),
+            "sync_missing_sedimentrees: missing IDs"
+        );
 
         if missing.is_empty() {
             tracing::debug!("sync_missing_sedimentrees: no missing sedimentrees");
@@ -832,14 +844,16 @@ impl Darn {
         tracing::debug!(?dir_id, "collect_all_sedimentree_ids: loading directory");
 
         // Load directory document
-        let Some(am_doc) = sedimentree::load_document(&self.subduction, dir_id).await?
-        else {
+        let Some(am_doc) = sedimentree::load_document(&self.subduction, dir_id).await? else {
             tracing::debug!(?dir_id, "collect_all_sedimentree_ids: no document found");
             return Ok(()); // Empty directory
         };
 
         let Ok(dir) = Directory::from_automerge(&am_doc) else {
-            tracing::debug!(?dir_id, "collect_all_sedimentree_ids: not a directory document");
+            tracing::debug!(
+                ?dir_id,
+                "collect_all_sedimentree_ids: not a directory document"
+            );
             return Ok(()); // Not a directory document
         };
 
@@ -1027,10 +1041,8 @@ impl Darn {
         self.subduction.register(authenticated_connection).await?;
 
         // Perform full sync with all connected peers
-        let (success, stats, call_errors, io_errors) = self
-            .subduction
-            .full_sync(Some(Self::DEFAULT_TIMEOUT))
-            .await;
+        let (success, stats, call_errors, io_errors) =
+            self.subduction.full_sync(Some(Self::DEFAULT_TIMEOUT)).await;
 
         for (conn, err) in &call_errors {
             tracing::warn!("Sync error with {:?}: {err:?}", Connection::peer_id(conn));
@@ -1078,11 +1090,23 @@ impl Darn {
         // Register the authenticated connection (without auto-syncing - we handle sync manually below)
         self.subduction.register(authenticated_connection).await?;
 
-        // Collect sedimentree IDs to sync:
-        // - Root directory
-        // - All tracked files
-        let mut sedimentree_ids: Vec<_> = vec![manifest.root_directory_id()];
-        sedimentree_ids.extend(manifest.iter().map(|e| e.sedimentree_id));
+        // Collect ALL sedimentree IDs to sync (root, all directories, and all files)
+        let root_dir_id = manifest.root_directory_id();
+        let mut all_ids = std::collections::HashSet::new();
+        all_ids.insert(root_dir_id);
+
+        // Traverse directory tree to find all subdirectories
+        if let Err(e) = self
+            .collect_all_sedimentree_ids(root_dir_id, &mut all_ids)
+            .await
+        {
+            tracing::warn!("Error collecting directory tree IDs: {e}");
+        }
+
+        // Also include all file IDs from manifest (in case tree traversal missed any)
+        all_ids.extend(manifest.iter().map(|e| e.sedimentree_id));
+
+        let sedimentree_ids: Vec<_> = all_ids.into_iter().collect();
 
         // Build path lookup for progress reporting
         let path_lookup: std::collections::HashMap<_, _> = manifest
@@ -1160,11 +1184,14 @@ impl Darn {
 
         // After syncing known files, check for new files in the remote directory tree
         // and sync their sedimentrees
-        if let Ok(new_count) = self.sync_missing_sedimentrees(manifest, &peer_id).await {
-            if new_count > 0 {
-                tracing::info!("Synced {} new sedimentrees from remote directory tree", new_count);
-                summary.sedimentrees_synced += new_count;
-            }
+        if let Ok(new_count) = self.sync_missing_sedimentrees(manifest, &peer_id).await
+            && new_count > 0
+        {
+            tracing::info!(
+                "Synced {} new sedimentrees from remote directory tree",
+                new_count
+            );
+            summary.sedimentrees_synced += new_count;
         }
 
         on_progress(SyncProgressEvent::Completed(summary.clone()));
@@ -1496,18 +1523,29 @@ pub enum SyncError {
     Sync(#[from] DarnIoError),
 }
 
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Once;
+
+    /// Ensure a global signer exists before any workspace test runs.
+    ///
+    /// In CI there is no `~/.config/darn/signer/` so `Darn::init` would
+    /// fail with `InvalidKeyLength`. This one-time setup generates a
+    /// signer if none exists. It's idempotent and thread-safe.
+    static ENSURE_SIGNER: Once = Once::new();
 
     fn with_temp_home<F, R>(f: F) -> R
     where
         F: FnOnce(&Path) -> R,
     {
+        ENSURE_SIGNER.call_once(|| {
+            let signer_dir = config::global_signer_dir().expect("resolve signer dir");
+            crate::signer::load_or_generate(&signer_dir).expect("ensure signer exists");
+        });
+
         let dir = tempfile::tempdir().expect("create tempdir");
-        // Note: We can't easily override HOME in tests, so these tests
-        // will use the real global signer. Integration tests would be
-        // better for testing with isolated HOME.
         f(dir.path())
     }
 

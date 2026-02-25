@@ -29,7 +29,7 @@ use std::{
     time::Duration,
 };
 
-use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode, DebounceEventResult, Debouncer};
+use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer, notify::RecursiveMode};
 use thiserror::Error;
 use tokio::sync::mpsc;
 
@@ -116,7 +116,7 @@ impl WatchBatch {
 
     /// Total number of changes in the batch.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.created.len() + self.modified.len() + self.deleted.len() + self.renamed.len()
     }
 }
@@ -428,17 +428,18 @@ pub struct WatchProcessResult {
 impl WatchProcessResult {
     /// Check if there are any changes.
     #[must_use]
-    pub fn has_changes(&self) -> bool {
+    pub const fn has_changes(&self) -> bool {
         !self.tracked.is_empty() || !self.refreshed.is_empty() || !self.deleted.is_empty()
     }
 
     /// Total number of affected files.
     #[must_use]
-    pub fn total(&self) -> usize {
+    pub const fn total(&self) -> usize {
         self.tracked.len() + self.refreshed.len() + self.deleted.len()
     }
 }
 
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;

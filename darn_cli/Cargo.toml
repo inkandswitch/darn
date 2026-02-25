@@ -1,7 +1,7 @@
 [package]
 name = "darn_cli"
 description = "CLI for darn - CRDT-backed filesystem management"
-version = "0.2.1"
+version = "0.3.0"
 
 authors.workspace = true
 categories.workspace = true
@@ -15,6 +15,11 @@ rust-version.workspace = true
 [[bin]]
 name = "darn"
 path = "src/main.rs"
+
+[features]
+default = ["native-tls"]
+native-tls = ["darn_core/native-tls"]
+rustls = ["darn_core/rustls"]
 
 [lints]
 workspace = true

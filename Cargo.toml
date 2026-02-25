@@ -12,12 +12,12 @@ edition = "2024"
 keywords = ["automerge", "crdt", "filesystem", "local-first", "p2p"]
 license = "Apache-2.0 OR MIT"
 readme = "README.md"
-repository = "https://codeberg.org/expede/darn"
+repository = "https://github.com/inkandswitch/darn"
 rust-version = "1.90"
 
 [workspace.dependencies]
 # Local crates
-darn_core = { version = "0.2.1", path = "darn_core" }
+darn_core = { version = "0.3.0", path = "darn_core", default-features = false }
 
 automerge = "0.7.3"
 blake3 = "1.8"
@@ -27,11 +27,12 @@ eyre = "0.6"
 bs58 = { version = "0.5", features = ["check"] }
 clap = { version = "4.0", features = ["derive"] }
 cliclack = "0.3"
-console = "0.15"
+console = "0.16"
 dirs = "6.0"
 future_form = "0.2"
 futures = "0.3"
 getrandom = "0.2"
+globset = "0.4"
 hex = "0.4"
 ignore = "0.4"
 minicbor = { version = "2.1", default-features = false, features = ["alloc", "derive", "std"] }
@@ -42,14 +43,14 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 subduction_core = { version = "0.4", features = ["std", "test_utils"] }
 subduction_crypto = { version = "0.1", features = ["std"] }
-subduction_websocket = { version = "0.4", features = ["tokio_client"] }
+subduction_websocket = { version = "0.4", features = ["tokio_client_any"] }
 tempfile = "3.16"
 thiserror = "2.0"
 tokio = { version = "1.0", features = ["full"] }
 tokio-util = "0.7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tungstenite = "0.27"
+tungstenite = { version = "0.27", default-features = false, features = ["handshake", "http"] }
 walkdir = "2.5"
 
 [workspace.lints.rust]
@@ -85,3 +86,10 @@ all = { level = "deny", priority = -1 }
 cargo = { level = "deny", priority = -1 }
 multiple_crate_versions = "allow" # various transitive deps
 pedantic = { level = "deny", priority = -1 }
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+opt-level = 3
+panic = "abort"
+strip = "symbols"

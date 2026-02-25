@@ -13,6 +13,7 @@ use eyre::Result;
 use tracing_subscriber::{EnvFilter, fmt};
 
 mod commands;
+mod output;
 mod setup;
 mod theme;
 
@@ -31,32 +32,39 @@ async fn main() -> Result<()> {
 
     fmt().with_env_filter(filter).init();
 
-    // Apply Catppuccin Mocha theme for all cliclack prompts
-    theme::apply();
+    let porcelain = cli.porcelain;
+    let out = output::Output::new(porcelain);
+
+    // Apply Catppuccin Mocha theme for all cliclack prompts (skip in porcelain mode)
+    if !porcelain {
+        theme::apply();
+    }
 
     // Ensure signer exists before running commands
-    if !setup::ensure_signer()? {
+    if !setup::ensure_signer(porcelain)? {
         return Ok(());
     }
 
     match cli.command {
-        Commands::Init { path } => commands::init(&path).await,
-        Commands::Clone { root_id, path } => commands::clone_cmd(&root_id, &path).await,
-        Commands::Ignore { patterns } => commands::ignore(&patterns),
-        Commands::Unignore { patterns } => commands::unignore(&patterns),
-        Commands::Tree => commands::tree(),
-        Commands::Stat { target } => commands::stat(&target).await,
-        Commands::Sync { peer, dry_run, force } => {
-            commands::sync_cmd(peer.as_deref(), dry_run, force).await
-        }
-        Commands::Watch { interval, no_track } => commands::watch(&interval, no_track).await,
-        Commands::Info => commands::info(),
+        Commands::Init { path } => commands::init(&path, out).await,
+        Commands::Clone { root_id, path } => commands::clone_cmd(&root_id, &path, out).await,
+        Commands::Ignore { patterns } => commands::ignore(&patterns, out),
+        Commands::Unignore { patterns } => commands::unignore(&patterns, out),
+        Commands::Tree => commands::tree(out),
+        Commands::Stat { target } => commands::stat(&target, out).await,
+        Commands::Sync {
+            peer,
+            dry_run,
+            force,
+        } => commands::sync_cmd(peer.as_deref(), dry_run, force, out).await,
+        Commands::Watch { interval, no_track } => commands::watch(&interval, no_track, out).await,
+        Commands::Info => commands::info(out),
         Commands::Peer { command } => match command {
             PeerCommands::Add { name, url, peer_id } => {
-                commands::peer_add(&name, &url, peer_id.as_deref())
+                commands::peer_add(&name, &url, peer_id.as_deref(), out)
             }
-            PeerCommands::List => commands::peer_list(),
-            PeerCommands::Remove { name } => commands::peer_remove(&name),
+            PeerCommands::List => commands::peer_list(out),
+            PeerCommands::Remove { name } => commands::peer_remove(&name, out),
         },
     }
 }
@@ -69,6 +77,10 @@ struct Cli {
     /// Enable verbose output
     #[arg(short, long, global = true)]
     verbose: bool,
+
+    /// Machine-readable output (no spinners, no color, tab-separated)
+    #[arg(long, global = true)]
+    porcelain: bool,
 
     #[command(subcommand)]
     command: Commands,

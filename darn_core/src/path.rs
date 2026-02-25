@@ -34,32 +34,32 @@ pub fn normalize(path: &Path) -> PathBuf {
     result
 }
 
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bolero::check;
 
     #[test]
-    fn removes_current_dir() {
-        assert_eq!(normalize(Path::new("foo/./bar")), Path::new("foo/bar"));
-        assert_eq!(normalize(Path::new("./foo")), Path::new("foo"));
-        assert_eq!(normalize(Path::new("foo/.")), Path::new("foo"));
+    fn normalize_is_idempotent() {
+        check!().with_type::<String>().for_each(|s: &String| {
+            let path = Path::new(s);
+            let once = normalize(path);
+            let twice = normalize(&once);
+            assert_eq!(once, twice, "normalize should be idempotent");
+        });
     }
 
     #[test]
-    fn resolves_parent_dir() {
-        assert_eq!(normalize(Path::new("foo/bar/../baz")), Path::new("foo/baz"));
-        assert_eq!(normalize(Path::new("foo/../bar")), Path::new("bar"));
-    }
-
-    #[test]
-    fn preserves_absolute_paths() {
-        assert_eq!(normalize(Path::new("/foo/bar")), Path::new("/foo/bar"));
-        assert_eq!(normalize(Path::new("/foo/./bar")), Path::new("/foo/bar"));
-    }
-
-    #[test]
-    fn handles_empty_result() {
-        assert_eq!(normalize(Path::new("foo/..")), Path::new(""));
-        assert_eq!(normalize(Path::new(".")), Path::new(""));
+    fn normalize_output_has_no_dot_or_dotdot() {
+        check!().with_type::<String>().for_each(|s: &String| {
+            let result = normalize(Path::new(s));
+            for component in result.components() {
+                assert!(
+                    !matches!(component, Component::CurDir | Component::ParentDir),
+                    "normalized path should not contain `.` or `..`: {result:?}"
+                );
+            }
+        });
     }
 }

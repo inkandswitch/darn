@@ -45,7 +45,7 @@ impl WorkspaceLayout {
 
     /// Create a layout with a custom config directory (for testing).
     #[must_use]
-    pub fn with_config_dir(id: WorkspaceId, config_dir: PathBuf) -> Self {
+    pub const fn with_config_dir(id: WorkspaceId, config_dir: PathBuf) -> Self {
         Self { id, config_dir }
     }
 
@@ -255,6 +255,7 @@ pub enum LayoutError {
     InvalidLinkTarget,
 }
 
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;

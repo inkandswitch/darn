@@ -136,24 +136,28 @@ pub enum EnsureConfigError {
     Io(#[from] std::io::Error),
 }
 
+#[allow(clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;
+    use testresult::TestResult;
 
     #[test]
-    fn global_config_dir_ends_with_darn() {
-        let dir = global_config_dir().expect("home directory should exist");
+    fn global_config_dir_ends_with_darn() -> TestResult {
+        let dir = global_config_dir()?;
         assert!(dir.ends_with("darn"), "config dir should end with 'darn'");
         assert!(
             dir.to_string_lossy().contains(".config"),
             "config dir should be under .config"
         );
+
+        Ok(())
     }
 
     #[test]
-    fn global_signer_dir_is_under_config_dir() {
-        let config = global_config_dir().expect("home directory should exist");
-        let signer = global_signer_dir().expect("home directory should exist");
+    fn global_signer_dir_is_under_config_dir() -> TestResult {
+        let config = global_config_dir()?;
+        let signer = global_signer_dir()?;
         assert!(
             signer.starts_with(&config),
             "signer dir should be under config dir"
@@ -162,5 +166,7 @@ mod tests {
             signer.ends_with("signer"),
             "signer dir should end with 'signer'"
         );
+
+        Ok(())
     }
 }

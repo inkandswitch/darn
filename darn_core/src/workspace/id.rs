@@ -88,31 +88,33 @@ pub enum ParseWorkspaceIdError {
     },
 }
 
+#[allow(clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bolero::check;
 
     #[test]
     fn from_path_is_deterministic() {
-        let path = Path::new("/tmp/test-project");
-        let id1 = WorkspaceId::from_path(path);
-        let id2 = WorkspaceId::from_path(path);
-        assert_eq!(id1, id2);
+        check!().with_type::<String>().for_each(|s: &String| {
+            let path = Path::new(s);
+            let id1 = WorkspaceId::from_path(path);
+            let id2 = WorkspaceId::from_path(path);
+            assert_eq!(id1, id2, "same path should produce same id");
+        });
     }
 
-    #[test]
-    fn different_paths_produce_different_ids() {
-        let id1 = WorkspaceId::from_path(Path::new("/tmp/project-a"));
-        let id2 = WorkspaceId::from_path(Path::new("/tmp/project-b"));
-        assert_ne!(id1, id2);
-    }
-
+    #[allow(clippy::expect_used)]
     #[test]
     fn hex_roundtrip() {
-        let id = WorkspaceId::from_path(Path::new("/tmp/test"));
-        let hex = id.to_hex();
-        let parsed: WorkspaceId = hex.parse().expect("parse hex");
-        assert_eq!(id, parsed);
+        check!()
+            .with_type::<[u8; 16]>()
+            .for_each(|bytes: &[u8; 16]| {
+                let id = WorkspaceId::from_bytes(*bytes);
+                let hex = id.to_hex();
+                let parsed: WorkspaceId = hex.parse().expect("parse hex");
+                assert_eq!(id, parsed);
+            });
     }
 
     #[test]

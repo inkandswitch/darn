@@ -235,7 +235,7 @@ impl Peer {
     ///
     /// Call this after connecting via discovery mode to save the
     /// learned peer identity for future connections.
-    pub fn set_known(&mut self, peer_id: PeerId) {
+    pub const fn set_known(&mut self, peer_id: PeerId) {
         self.audience = Audience::known(peer_id);
     }
 
@@ -370,51 +370,58 @@ pub fn remove_peer(name: &PeerName) -> Result<bool, PeerError> {
     }
 }
 
+#[allow(clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bolero::check;
+    use testresult::TestResult;
 
     #[test]
-    fn valid_peer_names() {
-        assert!(PeerName::new("test").is_ok());
-        assert!(PeerName::new("my-peer").is_ok());
-        assert!(PeerName::new("peer_1").is_ok());
-        assert!(PeerName::new("Peer123").is_ok());
-        assert!(PeerName::new("a").is_ok());
+    fn peer_name_validation_consistent_with_rules() {
+        check!().with_type::<String>().for_each(|s: &String| {
+            let is_valid = !s.is_empty()
+                && s.len() <= 64
+                && s.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+
+            match PeerName::new(s) {
+                Ok(name) => {
+                    assert!(is_valid, "PeerName accepted invalid input: {s:?}");
+                    assert_eq!(name.as_str(), s);
+                }
+                Err(_) => {
+                    assert!(!is_valid, "PeerName rejected valid input: {s:?}");
+                }
+            }
+        });
     }
 
     #[test]
-    fn invalid_peer_names() {
-        assert!(PeerName::new("").is_err());
-        assert!(PeerName::new("-test").is_err());
-        assert!(PeerName::new("_test").is_err());
-        assert!(PeerName::new("test/path").is_err());
-        assert!(PeerName::new("test.name").is_err());
-        assert!(PeerName::new("a".repeat(65)).is_err());
-    }
-
-    #[test]
-    fn discover_creates_discovery_audience() {
-        let name = PeerName::new("test").expect("valid name");
+    fn discover_creates_discovery_audience() -> TestResult {
+        let name = PeerName::new("test")?;
         let peer = Peer::discover(name, "ws://localhost:9000".into());
         assert!(peer.is_discovery());
         assert!(!peer.is_known());
         assert!(peer.peer_id().is_none());
+        Ok(())
     }
 
     #[test]
-    fn known_creates_known_audience() {
-        let name = PeerName::new("test").expect("valid name");
+    fn known_creates_known_audience() -> TestResult {
+        let name = PeerName::new("test")?;
         let peer_id = PeerId::new([1u8; 32]);
         let peer = Peer::known(name, "ws://localhost:9000".into(), peer_id);
         assert!(peer.is_known());
         assert!(!peer.is_discovery());
         assert_eq!(peer.peer_id(), Some(peer_id));
+        Ok(())
     }
 
     #[test]
-    fn set_known_updates_audience() {
-        let name = PeerName::new("test").expect("valid name");
+    fn set_known_updates_audience() -> TestResult {
+        let name = PeerName::new("test")?;
         let mut peer = Peer::discover(name, "ws://localhost:9000".into());
         assert!(peer.is_discovery());
 
@@ -422,41 +429,52 @@ mod tests {
         peer.set_known(peer_id);
         assert!(peer.is_known());
         assert_eq!(peer.peer_id(), Some(peer_id));
+        Ok(())
     }
 
+    #[allow(clippy::expect_used)]
     #[test]
     fn roundtrip_json() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("test.json");
+        let dir = tempfile::tempdir().expect("create tempdir");
+        check!()
+            .with_type::<(String, String)>()
+            .for_each(|(name_str, url_str)| {
+                // Skip inputs that don't pass PeerName validation
+                let Ok(name) = PeerName::new(name_str) else {
+                    return;
+                };
 
-        let name = PeerName::new("my-peer").expect("valid name");
-        let peer = Peer::discover(name, "ws://example.com:9000".into());
-        peer.save(&path).expect("save");
+                let peer = Peer::discover(name, url_str.clone());
+                let path = dir.path().join("test.json");
+                peer.save(&path).expect("save");
 
-        let loaded = Peer::load(&path).expect("load");
-        assert_eq!(loaded.name.as_str(), peer.name.as_str());
-        assert_eq!(loaded.url, peer.url);
-        assert_eq!(loaded.added_at.as_secs(), peer.added_at.as_secs());
+                let loaded = Peer::load(&path).expect("load");
+                assert_eq!(loaded.name.as_str(), peer.name.as_str());
+                assert_eq!(loaded.url, peer.url);
+                assert_eq!(loaded.added_at.as_secs(), peer.added_at.as_secs());
+            });
     }
 
     #[test]
-    fn json_format_discovery() {
-        let name = PeerName::new("test").expect("valid name");
+    fn json_format_discovery() -> TestResult {
+        let name = PeerName::new("test")?;
         let peer = Peer::discover(name, "ws://localhost:9000".into());
-        let json = serde_json::to_string_pretty(&peer).expect("serialize");
+        let json = serde_json::to_string_pretty(&peer)?;
 
         // Should contain "discover" mode
         assert!(json.contains("\"mode\": \"discover\""));
+        Ok(())
     }
 
     #[test]
-    fn json_format_known() {
-        let name = PeerName::new("test").expect("valid name");
+    fn json_format_known() -> TestResult {
+        let name = PeerName::new("test")?;
         let peer_id = PeerId::new([1u8; 32]);
         let peer = Peer::known(name, "ws://localhost:9000".into(), peer_id);
-        let json = serde_json::to_string_pretty(&peer).expect("serialize");
+        let json = serde_json::to_string_pretty(&peer)?;
 
         // Should contain "known" mode
         assert!(json.contains("\"mode\": \"known\""));
+        Ok(())
     }
 }

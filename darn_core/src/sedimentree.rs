@@ -25,18 +25,18 @@
 
 use std::{collections::BTreeSet, convert::Infallible, path::Path};
 
-use automerge::{AutoCommit, Change, ChangeHash};
+use automerge::{Automerge, Change, ChangeHash};
 use future_form::Sendable;
-use sedimentree_fs_storage::FsStorage;
-use subduction_core::subduction::error::WriteError;
 use sedimentree_core::{
     blob::Blob, crypto::digest::Digest, id::SedimentreeId, sedimentree::Sedimentree,
 };
+use sedimentree_fs_storage::FsStorage;
+use subduction_core::subduction::error::WriteError;
 use thiserror::Error;
 
 use crate::{
-    directory::{entry::EntryType, DeserializeError, Directory, SerializeError},
-    subduction::{DarnConnection, DarnSubduction}
+    directory::{DeserializeError, Directory, SerializeError, entry::EntryType},
+    subduction::{DarnConnection, DarnSubduction},
 };
 
 /// Store all changes from an Automerge document as sedimentree commits.
@@ -50,7 +50,7 @@ use crate::{
 pub async fn store_document(
     subduction: &DarnSubduction,
     id: SedimentreeId,
-    doc: &mut AutoCommit,
+    doc: &mut Automerge,
 ) -> Result<(), SedimentreeError> {
     let changes = doc.get_changes(&[]);
     for change in &changes {
@@ -97,7 +97,7 @@ pub async fn store_change(
 pub async fn add_changes(
     subduction: &DarnSubduction,
     id: SedimentreeId,
-    doc: &mut AutoCommit,
+    doc: &mut Automerge,
     since_heads: &[ChangeHash],
 ) -> Result<usize, SedimentreeError> {
     let new_changes = doc.get_changes(since_heads);
@@ -118,7 +118,7 @@ pub async fn add_changes(
 pub async fn load_document(
     subduction: &DarnSubduction,
     id: SedimentreeId,
-) -> Result<Option<AutoCommit>, SedimentreeError> {
+) -> Result<Option<Automerge>, SedimentreeError> {
     let Some(blobs) = subduction
         .get_blobs(id)
         .await
@@ -132,9 +132,13 @@ pub async fn load_document(
     let mut blobs_vec: Vec<_> = blobs.into_iter().collect();
     blobs_vec.sort_by_key(|b| std::cmp::Reverse(b.as_slice().len()));
 
-    tracing::debug!(?id, blob_count = blobs_vec.len(), "load_document: loading blobs");
+    tracing::debug!(
+        ?id,
+        blob_count = blobs_vec.len(),
+        "load_document: loading blobs"
+    );
 
-    let mut doc = AutoCommit::new();
+    let mut doc = Automerge::new();
     for blob in blobs_vec {
         doc.load_incremental(blob.as_slice())
             .map_err(SedimentreeError::AutomergeLoad)?;
@@ -210,7 +214,7 @@ pub async fn ensure_parent_directories(
 
         let mut doc = load_document(subduction, current_id)
             .await?
-            .unwrap_or_else(AutoCommit::new);
+            .unwrap_or_else(Automerge::new);
 
         Directory::init_doc(&mut doc, &current_name).map_err(SedimentreeError::Serialize)?;
 
@@ -235,7 +239,7 @@ pub async fn ensure_parent_directories(
             .map_err(SedimentreeError::Serialize)?;
         add_changes(subduction, current_id, &mut doc, &heads_before).await?;
 
-        let mut subdir_doc = AutoCommit::new();
+        let mut subdir_doc = Automerge::new();
         Directory::init_doc(&mut subdir_doc, &name).map_err(SedimentreeError::Serialize)?;
         store_document(subduction, subdir_id, &mut subdir_doc).await?;
 
@@ -246,7 +250,7 @@ pub async fn ensure_parent_directories(
     if components.is_empty() {
         let mut doc = load_document(subduction, current_id)
             .await?
-            .unwrap_or_else(AutoCommit::new);
+            .unwrap_or_else(Automerge::new);
 
         let heads_before: Vec<_> = doc.get_heads().into_iter().collect();
         Directory::init_doc(&mut doc, "").map_err(SedimentreeError::Serialize)?;
@@ -283,7 +287,7 @@ pub async fn add_file_to_directory(
 ) -> Result<(), SedimentreeError> {
     let mut doc = load_document(subduction, parent_id)
         .await?
-        .unwrap_or_else(AutoCommit::new);
+        .unwrap_or_else(Automerge::new);
 
     let heads_before: Vec<_> = doc.get_heads().into_iter().collect();
 
@@ -327,8 +331,8 @@ pub async fn remove_file_from_directory(
     };
 
     let heads_before: Vec<_> = doc.get_heads().into_iter().collect();
-    let removed =
-        Directory::remove_entry_from_doc(&mut doc, file_name).map_err(SedimentreeError::Serialize)?;
+    let removed = Directory::remove_entry_from_doc(&mut doc, file_name)
+        .map_err(SedimentreeError::Serialize)?;
 
     if removed {
         add_changes(subduction, parent_id, &mut doc, &heads_before).await?;
@@ -381,9 +385,14 @@ pub async fn find_directory_id(
 }
 
 /// Generate a random sedimentree ID.
+///
+/// Only the first 16 bytes are randomized; the remaining 16 bytes are zero.
+/// This ensures compatibility with automerge-repo's 16-byte document IDs
+/// when converting to/from automerge URLs.
 fn generate_sedimentree_id() -> Result<SedimentreeId, SedimentreeError> {
     let mut id_bytes = [0u8; 32];
-    getrandom::getrandom(&mut id_bytes).map_err(SedimentreeError::Random)?;
+    // Only randomize the first 16 bytes for automerge-repo compatibility
+    getrandom::getrandom(&mut id_bytes[..16]).map_err(SedimentreeError::Random)?;
     Ok(SedimentreeId::new(id_bytes))
 }
 

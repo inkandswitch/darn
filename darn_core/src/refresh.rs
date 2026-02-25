@@ -1,6 +1,6 @@
 //! Refresh error types and Automerge content update helpers.
 
-use automerge::{transaction::Transactable, AutoCommit, ObjType, ReadDoc, ROOT};
+use automerge::{Automerge, AutomergeError, ObjType, ROOT, ReadDoc, transaction::Transactable};
 use thiserror::Error;
 
 use crate::file::content::Content;
@@ -18,13 +18,18 @@ use crate::sedimentree::SedimentreeError;
 /// Returns an error if:
 /// - The document schema is invalid (content field missing or wrong type)
 /// - An Automerge operation fails
+///
+/// # Panics
+///
+/// Panics if the internal content-info state is inconsistent (should not
+/// happen in practice since the `Text` branch always populates it).
 pub fn update_automerge_content(
-    doc: &mut AutoCommit,
+    doc: &mut Automerge,
     new_content: Content,
 ) -> Result<(), RefreshError> {
-    match new_content {
-        Content::Text(text) => {
-            // Get the content text object
+    // For text, we need to get the content_id first (read-only)
+    let content_info = match &new_content {
+        Content::Text(_) => {
             let Some((automerge::Value::Object(ObjType::Text), content_id)) =
                 doc.get(ROOT, "content")?
             else {
@@ -32,17 +37,29 @@ pub fn update_automerge_content(
                     "content must be Text object".into(),
                 ));
             };
-
-            // Replace all text content
             let old_len = doc.text(&content_id)?.chars().count();
-            let old_len_isize = isize::try_from(old_len).unwrap_or(isize::MAX);
-            doc.splice_text(&content_id, 0, old_len_isize, &text)?;
+            Some((content_id, old_len))
         }
-        Content::Bytes(bytes) => {
-            // Replace bytes directly (LWW, no clone needed)
-            doc.put(ROOT, "content", automerge::ScalarValue::Bytes(bytes))?;
+        Content::Bytes(_) => None,
+    };
+
+    doc.transact::<_, _, AutomergeError>(|tx| {
+        match new_content {
+            Content::Text(text) => {
+                // content_info is always Some when new_content is Text (set in the match above)
+                #[allow(clippy::expect_used)]
+                let (content_id, old_len) = content_info.expect("content_info set for text");
+                let old_len_isize = isize::try_from(old_len).unwrap_or(isize::MAX);
+                tx.splice_text(&content_id, 0, old_len_isize, &text)?;
+            }
+            Content::Bytes(bytes) => {
+                tx.put(ROOT, "content", automerge::ScalarValue::Bytes(bytes))?;
+            }
         }
-    }
+        Ok(())
+    })
+    .map_err(|f| f.error)?;
+
     Ok(())
 }
 
@@ -70,32 +87,44 @@ pub enum RefreshError {
     InvalidDocument(String),
 }
 
+#[allow(clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::file::File;
+    use bolero::check;
 
+    #[allow(clippy::expect_used)]
     #[test]
-    fn update_text_content() {
-        let doc = File::text("test.txt", "original content");
-        let mut am_doc = doc.to_automerge().expect("to_automerge");
+    fn update_text_content_roundtrip() {
+        check!()
+            .with_type::<(String, String)>()
+            .for_each(|(original, updated)| {
+                let doc = File::text("test.txt", original);
+                let mut am_doc = doc.to_automerge().expect("to_automerge");
 
-        let new_content = Content::Text("updated content".to_string());
-        update_automerge_content(&mut am_doc, new_content).expect("update content");
+                let new_content = Content::Text(updated.clone());
+                update_automerge_content(&mut am_doc, new_content).expect("update");
 
-        let loaded = File::from_automerge(&am_doc).expect("from_automerge");
-        assert_eq!(loaded.content, Content::Text("updated content".to_string()));
+                let loaded = File::from_automerge(&am_doc).expect("from_automerge");
+                assert_eq!(loaded.content, Content::Text(updated.clone()));
+            });
     }
 
+    #[allow(clippy::expect_used)]
     #[test]
-    fn update_binary_content() {
-        let doc = File::binary("test.bin", vec![1, 2, 3]);
-        let mut am_doc = doc.to_automerge().expect("to_automerge");
+    fn update_binary_content_roundtrip() {
+        check!()
+            .with_type::<(Vec<u8>, Vec<u8>)>()
+            .for_each(|(original, updated)| {
+                let doc = File::binary("test.bin", original.clone());
+                let mut am_doc = doc.to_automerge().expect("to_automerge");
 
-        let new_content = Content::Bytes(vec![4, 5, 6, 7]);
-        update_automerge_content(&mut am_doc, new_content).expect("update content");
+                let new_content = Content::Bytes(updated.clone());
+                update_automerge_content(&mut am_doc, new_content).expect("update");
 
-        let loaded = File::from_automerge(&am_doc).expect("from_automerge");
-        assert_eq!(loaded.content, Content::Bytes(vec![4, 5, 6, 7]));
+                let loaded = File::from_automerge(&am_doc).expect("from_automerge");
+                assert_eq!(loaded.content, Content::Bytes(updated.clone()));
+            });
     }
 }

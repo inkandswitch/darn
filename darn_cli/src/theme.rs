@@ -52,35 +52,35 @@ const fn ansi256_from_rgb(r: u8, g: u8, b: u8) -> u8 {
 pub(crate) struct CatppuccinMocha;
 
 impl CatppuccinMocha {
-    fn mauve() -> Style {
+    const fn mauve() -> Style {
         style_from_rgb(palette::MAUVE)
     }
 
-    fn green() -> Style {
+    const fn green() -> Style {
         style_from_rgb(palette::GREEN)
     }
 
-    fn yellow() -> Style {
+    const fn yellow() -> Style {
         style_from_rgb(palette::YELLOW)
     }
 
-    fn red() -> Style {
+    const fn red() -> Style {
         style_from_rgb(palette::RED)
     }
 
-    fn peach() -> Style {
+    const fn peach() -> Style {
         style_from_rgb(palette::PEACH)
     }
 
-    fn blue() -> Style {
+    const fn blue() -> Style {
         style_from_rgb(palette::BLUE)
     }
 
-    fn text() -> Style {
+    const fn text() -> Style {
         style_from_rgb(palette::TEXT)
     }
 
-    fn overlay1() -> Style {
+    const fn overlay1() -> Style {
         style_from_rgb(palette::OVERLAY1)
     }
 }

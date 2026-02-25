@@ -221,10 +221,11 @@ pub enum SwapError {
     CreateProjectLink(io::Error),
 }
 
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace::{layout::ActiveTree, WorkspaceId};
+    use crate::workspace::{WorkspaceId, layout::ActiveTree};
     use std::collections::HashSet;
 
     fn setup_test_workspace() -> (tempfile::TempDir, WorkspaceLayout) {

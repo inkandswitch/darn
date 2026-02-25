@@ -1,0 +1,45 @@
+name: Code Quality Checks
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  quality:
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        cache: true
+
+    - name: Install OpenSSL dev headers
+      if: runner.os == 'Linux'
+      run: sudo apt-get update && sudo apt-get install -y libssl-dev
+
+    - name: Build workspace
+      run: cargo build --workspace --verbose
+
+    - name: Check workspace
+      run: cargo check --workspace --verbose
+
+    - name: Install Nightly Toolchain
+      run: rustup toolchain install nightly --component rustfmt
+
+    - name: Formatting
+      run: cargo +nightly fmt --all -- --check
+
+    - name: Clippy
+      run: cargo clippy --workspace --all-targets -- -D warnings

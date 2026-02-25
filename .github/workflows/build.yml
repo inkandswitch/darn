@@ -1,0 +1,205 @@
+name: Build Artifacts
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.extract.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from darn_cli/Cargo.toml
+        id: extract
+        run: |
+          version=$(grep '^version' darn_cli/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build-cli:
+    needs: version
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact-name: darn-linux-x86_64
+            cargo-flags: ""
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact-name: darn-linux-x86_64-musl
+            cargo-flags: "--no-default-features --features rustls"
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact-name: darn-linux-aarch64
+            cargo-flags: ""
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            artifact-name: darn-linux-aarch64-musl
+            cargo-flags: "--no-default-features --features rustls"
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact-name: darn-macos-aarch64
+            cargo-flags: ""
+
+    runs-on: ${{ matrix.os }}
+
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+          cache: true
+
+      - name: Install musl tools
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Install OpenSSL dev headers
+        if: contains(matrix.target, 'gnu')
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+
+      - name: Build CLI
+        run: cargo build --release --package darn_cli --target ${{ matrix.target }} ${{ matrix.cargo-flags }}
+
+      - name: Rename binary
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/darn dist/${{ matrix.artifact-name }}-${{ env.VERSION }}
+
+      - name: Upload CLI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}-${{ env.VERSION }}
+          path: dist/${{ matrix.artifact-name }}-${{ env.VERSION }}
+          retention-days: 90
+
+  build-nix:
+    needs: version
+    runs-on: ubuntu-latest
+
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v21
+
+      - name: Setup Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@v13
+
+      - name: Setup Cachix
+        uses: cachix/cachix-action@v15
+        if: ${{ !github.event.pull_request.head.repo.fork }}
+        with:
+          name: inkandswitch
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Build via Nix
+        run: nix build
+
+      - name: Upload Nix artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: darn-nix-${{ env.VERSION }}
+          path: result/bin/darn
+          retention-days: 90
+
+  release:
+    if: github.ref == 'refs/heads/main'
+    needs: [version, build-cli, build-nix]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+
+          for name in \
+            darn-linux-x86_64 \
+            darn-linux-x86_64-musl \
+            darn-linux-aarch64 \
+            darn-linux-aarch64-musl \
+            darn-macos-aarch64 \
+          ; do
+            dir="artifacts/${name}-${VERSION}"
+            if [ ! -d "$dir" ]; then
+              echo "::error::Expected artifact directory missing: $dir"
+              exit 1
+            fi
+            find "$dir" -type f | while read -r file; do
+              cp "$file" "release/$(basename "$file")"
+              chmod +x "release/$(basename "$file")"
+            done
+          done
+
+          ls -lh release/
+
+      - name: Determine release tag
+        id: tag
+        run: |
+          date=$(date +%Y-%m-%d)
+          tag="v${VERSION}-nightly.${date}"
+
+          if gh release view "$tag" &>/dev/null; then
+            gh release delete "$tag" --yes --cleanup-tag
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "date=$date" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create GitHub Release
+        run: |
+          gh release create "${{ steps.tag.outputs.tag }}" \
+            --title "v${VERSION} (nightly ${{ steps.tag.outputs.date }})" \
+            --prerelease \
+            --notes "$(cat <<EOF
+          ## darn v${VERSION} — Nightly Build
+
+          **Date:** ${{ steps.tag.outputs.date }}
+          **Commit:** [\`${GITHUB_SHA::8}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA})
+
+          ### CLI Binaries
+
+          | Platform | File |
+          |----------|------|
+          | Linux x86_64 | \`darn-linux-x86_64-${VERSION}\` |
+          | Linux x86_64 (static) | \`darn-linux-x86_64-musl-${VERSION}\` |
+          | Linux aarch64 | \`darn-linux-aarch64-${VERSION}\` |
+          | Linux aarch64 (static) | \`darn-linux-aarch64-musl-${VERSION}\` |
+          | macOS aarch64 (Apple Silicon) | \`darn-macos-aarch64-${VERSION}\` |
+          EOF
+          )" \
+            release/*
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

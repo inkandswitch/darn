@@ -2,7 +2,7 @@
 //!
 //! Used for human-readable JSON serialization of `SedimentreeId`, `Digest`, `PeerId`, etc.
 
-use serde::{de, Deserialize, Deserializer, Serializer};
+use serde::{Deserialize, Deserializer, Serializer, de};
 
 /// Serialize a 32-byte array as base58.
 ///
@@ -146,7 +146,7 @@ pub mod synced_digests {
     use std::collections::BTreeMap;
 
     use sedimentree_core::{crypto::digest::Digest, id::SedimentreeId, sedimentree::Sedimentree};
-    use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
     #[derive(Serialize, Deserialize)]
     struct Entry {
@@ -211,7 +211,7 @@ pub mod synced_digests {
 
 /// Serde module for `Audience` enum (Known or Discover).
 pub mod audience {
-    use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
     use subduction_core::connection::handshake::{Audience, DiscoveryId};
     use subduction_core::peer::id::PeerId;
 
