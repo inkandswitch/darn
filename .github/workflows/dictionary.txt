@@ -1,3 +1,4 @@
+aarch
 aarch64
 async
 Automerge
@@ -18,6 +19,7 @@ Ctrl
 darn
 darnignore
 Dropbox
+Homebrew
 Ed25519
 enum
 eplication
@@ -41,6 +43,7 @@ NixOS
 nocapture
 P2P
 Patchwork
+Prebuilt
 PeerId
 porcelain
 README
