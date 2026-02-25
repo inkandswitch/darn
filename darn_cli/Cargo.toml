@@ -1,7 +1,7 @@
 [package]
 name = "darn_cli"
 description = "CLI for darn - CRDT-backed filesystem management"
-version = "0.3.0"
+version = "0.3.1"
 
 authors.workspace = true
 categories.workspace = true
