@@ -31,27 +31,52 @@ A CLI for managing CRDT-backed files with automatic conflict resolution and peer
 # Initialize a workspace
 darn init
 
-# Track some files
-darn track README.md src/*.rs
+# Add a peer
+darn peer add relay ws://localhost:9000
 
 # Check status
 darn tree
 
 # Sync with peers
 darn sync
+
+# Watch for changes and auto-sync
+darn watch
 ```
 
 See [`darn_cli/README.md`] for full CLI documentation.
 
 ## Installation
 
-```bash
-# From source
-cargo install --path darn_cli
+### Homebrew
 
-# With Nix
-nix develop
-cargo build --release
+```bash
+brew tap inkandswitch/darn https://github.com/inkandswitch/darn
+brew install darn
+```
+
+### Prebuilt Binaries
+
+Download from [GitHub Releases]. Binaries are available for:
+
+| Platform               | Binary                    |
+|------------------------|---------------------------|
+| macOS (Apple Silicon)  | `darn-macos-aarch64`      |
+| Linux x86_64           | `darn-linux-x86_64`       |
+| Linux x86_64 (static)  | `darn-linux-x86_64-musl`  |
+| Linux aarch64          | `darn-linux-aarch64`      |
+| Linux aarch64 (static) | `darn-linux-aarch64-musl` |
+
+### From Source
+
+```bash
+cargo install --path darn_cli
+```
+
+### Nix
+
+```bash
+nix build   # or: nix develop
 ```
 
 ## Crates
@@ -97,6 +122,7 @@ Apache-2.0 OR MIT
 <!-- Links -->
 
 [Automerge]: https://automerge.org/
+[GitHub Releases]: https://github.com/inkandswitch/darn/releases
 [HACKING.md]: HACKING.md
 [Subduction]: https://github.com/inkandswitch/subduction
 [`darn_cli`]: darn_cli/

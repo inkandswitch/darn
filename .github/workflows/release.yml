@@ -1,0 +1,232 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.*"
+      - "!v*-nightly*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.extract.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: extract
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build-cli:
+    needs: version
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact-name: darn-linux-x86_64
+            cargo-flags: ""
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact-name: darn-linux-x86_64-musl
+            cargo-flags: "--no-default-features --features rustls"
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact-name: darn-linux-aarch64
+            cargo-flags: ""
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            artifact-name: darn-linux-aarch64-musl
+            cargo-flags: "--no-default-features --features rustls"
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact-name: darn-macos-aarch64
+            cargo-flags: ""
+
+    runs-on: ${{ matrix.os }}
+
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+          cache: true
+
+      - name: Install musl tools
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Install OpenSSL dev headers
+        if: contains(matrix.target, 'gnu')
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+
+      - name: Build CLI
+        run: cargo build --release --package darn_cli --target ${{ matrix.target }} ${{ matrix.cargo-flags }}
+
+      - name: Rename binary
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/darn dist/${{ matrix.artifact-name }}-${{ env.VERSION }}
+
+      - name: Upload CLI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}-${{ env.VERSION }}
+          path: dist/${{ matrix.artifact-name }}-${{ env.VERSION }}
+          retention-days: 90
+
+  release:
+    needs: [version, build-cli]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+
+          for name in \
+            darn-linux-x86_64 \
+            darn-linux-x86_64-musl \
+            darn-linux-aarch64 \
+            darn-linux-aarch64-musl \
+            darn-macos-aarch64 \
+          ; do
+            dir="artifacts/${name}-${VERSION}"
+            if [ ! -d "$dir" ]; then
+              echo "::error::Expected artifact directory missing: $dir"
+              exit 1
+            fi
+            find "$dir" -type f | while read -r file; do
+              cp "$file" "release/$(basename "$file")"
+              chmod +x "release/$(basename "$file")"
+            done
+          done
+
+          ls -lh release/
+
+      - name: Upload binaries to release
+        run: |
+          gh release upload "v${VERSION}" release/* --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute SHA256 checksums
+        id: sha
+        run: |
+          cd release
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+          gh release upload "v${VERSION}" SHA256SUMS --clobber
+
+          for file in *; do
+            key=$(echo "$file" | tr '.-' '_')
+            sha=$(sha256sum "$file" | cut -d' ' -f1)
+            echo "${key}=${sha}" >> "$GITHUB_OUTPUT"
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  update-formula:
+    needs: [version, release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Download SHA256SUMS
+        run: |
+          gh release download "v${VERSION}" --pattern SHA256SUMS --dir /tmp
+          cat /tmp/SHA256SUMS
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update formula
+        run: |
+          macos_arm_sha=$(grep "darn-macos-aarch64-" /tmp/SHA256SUMS | cut -d' ' -f1)
+          linux_x64_musl_sha=$(grep "darn-linux-x86_64-musl-" /tmp/SHA256SUMS | cut -d' ' -f1)
+          linux_arm_musl_sha=$(grep "darn-linux-aarch64-musl-" /tmp/SHA256SUMS | cut -d' ' -f1)
+
+          echo "macOS ARM:       $macos_arm_sha"
+          echo "Linux x64 musl:  $linux_x64_musl_sha"
+          echo "Linux ARM musl:  $linux_arm_musl_sha"
+
+          # Update version
+          sed -i "s/^  version \".*\"/  version \"${VERSION}\"/" Formula/darn.rb
+
+          # Update macOS ARM SHA
+          # Match the sha256 line inside the on_arm block (first sha256 in file)
+          python3 -c "
+          import re, sys
+
+          with open('Formula/darn.rb') as f:
+              content = f.read()
+
+          # Replace SHA256 values by their surrounding context
+          def replace_sha(content, url_pattern, new_sha):
+              # Find url line, then replace the next sha256 line
+              lines = content.split('\n')
+              for i, line in enumerate(lines):
+                  if url_pattern in line:
+                      for j in range(i+1, min(i+3, len(lines))):
+                          if 'sha256' in lines[j]:
+                              lines[j] = re.sub(r'sha256 \"[a-f0-9]+\"', f'sha256 \"{new_sha}\"', lines[j])
+                              break
+                      break
+              return '\n'.join(lines)
+
+          content = replace_sha(content, 'darn-macos-aarch64', '$macos_arm_sha')
+          content = replace_sha(content, 'darn-linux-aarch64-musl', '$linux_arm_musl_sha')
+          content = replace_sha(content, 'darn-linux-x86_64-musl', '$linux_x64_musl_sha')
+
+          with open('Formula/darn.rb', 'w') as f:
+              f.write(content)
+          "
+
+      - name: Create PR for formula update
+        run: |
+          branch="formula/v${VERSION}"
+          git checkout -b "$branch"
+          git add Formula/darn.rb
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Update Homebrew formula to v${VERSION}"
+          git push origin "$branch" --force
+          gh pr create \
+            --title "Update Homebrew formula to v${VERSION}" \
+            --body "Automated PR to update \`Formula/darn.rb\` with new version and SHA256 checksums for v${VERSION}." \
+            --base main \
+            --head "$branch" || echo "PR already exists"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
