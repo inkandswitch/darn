@@ -29,7 +29,7 @@ clap = { version = "4.0", features = ["derive"] }
 cliclack = "0.3"
 console = "0.16"
 dirs = "6.0"
-future_form = "0.2"
+future_form = "0.3"
 futures = "0.3"
 getrandom = "0.2"
 globset = "0.4"
@@ -86,6 +86,13 @@ all = { level = "deny", priority = -1 }
 cargo = { level = "deny", priority = -1 }
 multiple_crate_versions = "allow" # various transitive deps
 pedantic = { level = "deny", priority = -1 }
+
+[patch.crates-io]
+sedimentree_core = { git = "https://github.com/inkandswitch/subduction.git", branch = "main" }
+sedimentree_fs_storage = { git = "https://github.com/inkandswitch/subduction.git", branch = "main" }
+subduction_core = { git = "https://github.com/inkandswitch/subduction.git", branch = "main" }
+subduction_crypto = { git = "https://github.com/inkandswitch/subduction.git", branch = "main" }
+subduction_websocket = { git = "https://github.com/inkandswitch/subduction.git", branch = "main" }
 
 [profile.release]
 codegen-units = 1

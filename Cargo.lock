@@ -233,9 +233,9 @@ dependencies = [
 
 [[package]]
 name = "block-buffer"
-version = "0.11.0"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96eb4cdd6cf1b31d671e9efe75c5d1ec614776856cefbe109ca373554a6d514f"
+checksum = "cdd35008169921d80bc60d3d0ab416eecb028c4cd653352907921d95084790be"
 dependencies = [
  "hybrid-array",
 ]
@@ -593,9 +593,9 @@ dependencies = [
 
 [[package]]
 name = "crypto-common"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "211f05e03c7d03754740fd9e585de910a095d6b99f8bcfffdef8319fa02a8331"
+checksum = "77727bb15fa921304124b128af125e7e3b968275d1b108b379190264f4423710"
 dependencies = [
  "hybrid-array",
 ]
@@ -714,13 +714,13 @@ dependencies = [
 
 [[package]]
 name = "digest"
-version = "0.11.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8bf3682cdec91817be507e4aa104314898b95b84d74f3d43882210101a545b6"
+checksum = "285743a676ccb6b3e116bc14cc69319b957867930ae9c4822f8e0f54509d7243"
 dependencies = [
- "block-buffer 0.11.0",
+ "block-buffer 0.12.0",
  "const-oid 0.10.2",
- "crypto-common 0.2.0",
+ "crypto-common 0.2.1",
 ]
 
 [[package]]
@@ -888,9 +888,9 @@ dependencies = [
 
 [[package]]
 name = "future_form"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4159f8f5bb6df8db8bbe94103a577e8275ea0529d8560f0541670e9de0e13d9"
+checksum = "2c0f8f7ec5a203efc9c9d1fe3fb01b0b3c7f59347ed633f05d0f825c9b4eeb8c"
 dependencies = [
  "future_form_macros",
  "futures",
@@ -898,9 +898,9 @@ dependencies = [
 
 [[package]]
 name = "future_form_macros"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb36d9328dd9609d00322d77d8a8dd51f404328057e374a39d5fbc4ec14745b7"
+checksum = "1049a385632cc6b051ae46e4b48d4e89f2b738339cb9ba65bedda7f559ec7da7"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1909,9 +1909,8 @@ dependencies = [
 
 [[package]]
 name = "sedimentree_core"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "405e4f89fde67967de7ea0df4d959263b618a2dfc46c4c30e8c5ecbc4551021d"
+version = "0.4.1"
+source = "git+https://github.com/inkandswitch/subduction.git?branch=main#210786ff92a9ac0e0e091f1b9a0f7721694b6777"
 dependencies = [
  "async-lock",
  "blake3",
@@ -1930,8 +1929,7 @@ dependencies = [
 [[package]]
 name = "sedimentree_fs_storage"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b358b169dbca6b4e934c2b7564c693e5eea16d14b57002c8cefde74f356916a8"
+source = "git+https://github.com/inkandswitch/subduction.git?branch=main#210786ff92a9ac0e0e091f1b9a0f7721694b6777"
 dependencies = [
  "async-lock",
  "future_form",
@@ -2023,7 +2021,7 @@ checksum = "7c5f3b1e2dc8aad28310d8410bd4d7e180eca65fca176c52ab00d364475d0024"
 dependencies = [
  "cfg-if",
  "cpufeatures",
- "digest 0.11.0",
+ "digest 0.11.1",
 ]
 
 [[package]]
@@ -2129,8 +2127,7 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 [[package]]
 name = "subduction_core"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e9c8a9651c3dd36431fcbf771c2857ff41b38f68a4a25bb76a2a831c874be22"
+source = "git+https://github.com/inkandswitch/subduction.git?branch=main#210786ff92a9ac0e0e091f1b9a0f7721694b6777"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -2150,9 +2147,8 @@ dependencies = [
 
 [[package]]
 name = "subduction_crypto"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d19e735a2c2b03d22cdb759800a2a22fe530e84b9cd6a9ccca51dc13332fcda"
+version = "0.1.1"
+source = "git+https://github.com/inkandswitch/subduction.git?branch=main#210786ff92a9ac0e0e091f1b9a0f7721694b6777"
 dependencies = [
  "ed25519-dalek",
  "future_form",
@@ -2165,9 +2161,8 @@ dependencies = [
 
 [[package]]
 name = "subduction_websocket"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3321684fa8acfbf47582f1e25f34e426136a9927255cc0f83fb58491e746295"
+version = "0.4.1"
+source = "git+https://github.com/inkandswitch/subduction.git?branch=main#210786ff92a9ac0e0e091f1b9a0f7721694b6777"
 dependencies = [
  "async-channel",
  "async-lock",
