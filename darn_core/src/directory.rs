@@ -524,10 +524,12 @@ pub enum DeserializeError {
 }
 
 #[allow(clippy::panic)]
+#[allow(clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use bolero::check;
     use testresult::TestResult;
 
     /// Generate a random 16-byte ID (zero-padded to 32) matching our convention
@@ -612,64 +614,68 @@ mod tests {
         assert!(removed.is_none());
     }
 
+    #[allow(clippy::expect_used)]
     #[test]
-    fn automerge_roundtrip_empty() -> TestResult {
-        let dir = Directory::new("empty");
+    fn directory_automerge_roundtrip() {
+        check!()
+            .with_type::<(String, Vec<(String, bool, [u8; 16])>)>()
+            .for_each(|(name, entries)| {
+                let mut dir = Directory::new(name);
+                for (entry_name, is_folder, id_bytes) in entries {
+                    // Pad 16 bytes to 32 (our automerge-repo convention)
+                    let mut full = [0u8; 32];
+                    full[..16].copy_from_slice(id_bytes);
+                    let id = SedimentreeId::new(full);
 
-        let am = dir.to_automerge()?;
-        let loaded = Directory::from_automerge(&am)?;
+                    if *is_folder {
+                        dir.add_folder(entry_name, id);
+                    } else {
+                        dir.add_file(entry_name, id);
+                    }
+                }
 
-        assert_eq!(loaded.name, "empty");
-        assert!(loaded.is_empty());
-        Ok(())
+                let am = dir.to_automerge().expect("to_automerge");
+                let loaded = Directory::from_automerge(&am).expect("from_automerge");
+
+                assert_eq!(loaded.name, dir.name);
+                assert_eq!(loaded.len(), dir.len());
+
+                for entry in &dir.entries {
+                    let found = loaded.get(&entry.name).expect("entry should exist");
+                    assert_eq!(found.entry_type, entry.entry_type);
+                    assert_eq!(found.sedimentree_id, entry.sedimentree_id);
+                }
+            });
     }
 
+    #[allow(clippy::expect_used)]
     #[test]
-    fn automerge_roundtrip_with_entries() -> TestResult {
-        let mut dir = Directory::root();
-        let file_id = random_id()?;
-        let folder_id = random_id()?;
-
-        dir.add_file("README.md", file_id);
-        dir.add_folder("src", folder_id);
-
-        let am = dir.to_automerge()?;
-        let loaded = Directory::from_automerge(&am)?;
-
-        assert_eq!(loaded.name, "");
-        assert_eq!(loaded.len(), 2);
-
-        let readme = loaded.get("README.md").ok_or("README.md not found")?;
-        assert_eq!(readme.entry_type, EntryType::File);
-        assert_eq!(readme.sedimentree_id, file_id);
-
-        let src = loaded.get("src").ok_or("src not found")?;
-        assert_eq!(src.entry_type, EntryType::Folder);
-        assert_eq!(src.sedimentree_id, folder_id);
-        Ok(())
+    fn bs58check_roundtrip() {
+        check!()
+            .with_type::<[u8; 16]>()
+            .for_each(|payload: &[u8; 16]| {
+                let encoded = bs58check_encode(payload);
+                let decoded = bs58check_decode(&encoded).expect("decode");
+                assert_eq!(&decoded, payload);
+            });
     }
 
+    #[allow(clippy::expect_used)]
     #[test]
-    fn bs58check_roundtrip() -> TestResult {
-        let mut payload = [0u8; 16];
-        getrandom::getrandom(&mut payload)?;
+    fn sedimentree_url_roundtrip() {
+        check!()
+            .with_type::<[u8; 16]>()
+            .for_each(|id_bytes: &[u8; 16]| {
+                let mut full = [0u8; 32];
+                full[..16].copy_from_slice(id_bytes);
+                let id = SedimentreeId::new(full);
 
-        let encoded = bs58check_encode(&payload);
-        let decoded = bs58check_decode(&encoded)?;
-        assert_eq!(decoded, payload);
-        Ok(())
-    }
+                let url = sedimentree_id_to_url(id);
+                assert!(url.starts_with("automerge:"));
 
-    #[test]
-    fn sedimentree_url_roundtrip() -> TestResult {
-        let id = random_id()?;
-        let url = sedimentree_id_to_url(id);
-
-        assert!(url.starts_with("automerge:"));
-
-        let recovered = url_to_sedimentree_id(&url)?;
-        assert_eq!(recovered, id);
-        Ok(())
+                let recovered = url_to_sedimentree_id(&url).expect("parse url");
+                assert_eq!(recovered, id);
+            });
     }
 
     #[test]

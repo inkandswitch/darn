@@ -1527,15 +1527,25 @@ pub enum SyncError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Once;
+
+    /// Ensure a global signer exists before any workspace test runs.
+    ///
+    /// In CI there is no `~/.config/darn/signer/` so `Darn::init` would
+    /// fail with `InvalidKeyLength`. This one-time setup generates a
+    /// signer if none exists. It's idempotent and thread-safe.
+    static ENSURE_SIGNER: Once = Once::new();
 
     fn with_temp_home<F, R>(f: F) -> R
     where
         F: FnOnce(&Path) -> R,
     {
+        ENSURE_SIGNER.call_once(|| {
+            let signer_dir = config::global_signer_dir().expect("resolve signer dir");
+            crate::signer::load_or_generate(&signer_dir).expect("ensure signer exists");
+        });
+
         let dir = tempfile::tempdir().expect("create tempdir");
-        // Note: We can't easily override HOME in tests, so these tests
-        // will use the real global signer. Integration tests would be
-        // better for testing with isolated HOME.
         f(dir.path())
     }
 

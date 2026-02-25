@@ -27,7 +27,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use automerge::{Automerge, AutomergeError, ObjType, ROOT, ReadDoc, transaction::Transactable};
+use automerge::{transaction::Transactable, Automerge, AutomergeError, ObjType, ReadDoc, ROOT};
 use thiserror::Error;
 
 use crate::attributes::AttributeRules;
@@ -512,163 +512,72 @@ pub enum DeserializeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bolero::check;
     use testresult::TestResult;
 
+    #[allow(clippy::expect_used)]
     #[test]
-    fn text_roundtrip() -> TestResult {
-        let doc = File::text("hello.txt", "Hello, world!");
+    fn text_automerge_roundtrip() {
+        check!().with_type::<String>().for_each(|text: &String| {
+            let doc = File::text("test.txt", text);
+            let am = doc.to_automerge().expect("to_automerge");
+            let loaded = File::from_automerge(&am).expect("from_automerge");
 
-        let am = doc.to_automerge()?;
-        let loaded = File::from_automerge(&am)?;
-
-        assert_eq!(doc.name, loaded.name);
-        assert_eq!(doc.content, loaded.content);
-        Ok(())
+            assert_eq!(doc.name, loaded.name);
+            assert_eq!(doc.content, loaded.content);
+        });
     }
 
+    #[allow(clippy::expect_used)]
     #[test]
-    fn binary_roundtrip() -> TestResult {
-        let doc = File::binary("image.png", vec![0x89, 0x50, 0x4E, 0x47]);
+    fn binary_automerge_roundtrip() {
+        check!().with_type::<Vec<u8>>().for_each(|bytes: &Vec<u8>| {
+            let doc = File::binary("test.bin", bytes.clone());
+            let am = doc.to_automerge().expect("to_automerge");
+            let loaded = File::from_automerge(&am).expect("from_automerge");
 
-        let am = doc.to_automerge()?;
-        let loaded = File::from_automerge(&am)?;
+            assert_eq!(doc.name, loaded.name);
+            assert_eq!(doc.content, loaded.content);
+        });
+    }
 
-        assert_eq!(doc.name, loaded.name);
-        assert_eq!(doc.content, loaded.content);
-        Ok(())
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn permissions_automerge_roundtrip() {
+        check!().with_type::<u16>().for_each(|&bits| {
+            let mode = u32::from(bits) & 0o777;
+            let doc = File::text("test.sh", "#!/bin/sh").with_permissions(mode);
+            let am = doc.to_automerge().expect("to_automerge");
+            let loaded = File::from_automerge(&am).expect("from_automerge");
+
+            assert_eq!(loaded.metadata.mode(), mode);
+        });
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn filesystem_roundtrip() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        check!().with_type::<Vec<u8>>().for_each(|bytes: &Vec<u8>| {
+            let original_path = dir.path().join("original.bin");
+            let output_path = dir.path().join("copy.bin");
+            std::fs::write(&original_path, bytes).expect("write");
+
+            let doc = File::from_path(&original_path).expect("from_path");
+            doc.write_to_path(&output_path).expect("write_to_path");
+
+            let written = std::fs::read(&output_path).expect("read back");
+            assert_eq!(
+                &written, bytes,
+                "content should survive filesystem roundtrip"
+            );
+        });
     }
 
     #[test]
     fn with_permissions_builder() {
         let doc = File::text("test.txt", "content").with_permissions(0o755);
         assert_eq!(doc.metadata.mode(), 0o755);
-    }
-
-    #[test]
-    fn from_path_text() -> TestResult {
-        let dir = tempfile::tempdir()?;
-        let file_path = dir.path().join("test.txt");
-        std::fs::write(&file_path, "Hello, world!")?;
-
-        let doc = File::from_path(&file_path)?;
-
-        assert_eq!(doc.name.as_str(), "test.txt");
-        assert_eq!(
-            doc.content,
-            content::Content::Text("Hello, world!".to_string())
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn from_path_binary() -> TestResult {
-        let dir = tempfile::tempdir()?;
-        let file_path = dir.path().join("data.bin");
-        let binary_data = vec![0x00, 0xFF, 0x80, 0x7F];
-        std::fs::write(&file_path, &binary_data)?;
-
-        let doc = File::from_path(&file_path)?;
-
-        assert_eq!(doc.name.as_str(), "data.bin");
-        assert_eq!(doc.content, content::Content::Bytes(binary_data));
-        Ok(())
-    }
-
-    #[test]
-    fn write_to_path_text() -> TestResult {
-        let dir = tempfile::tempdir()?;
-        let file_path = dir.path().join("output.txt");
-
-        let doc = File::text("output.txt", "Written content");
-        doc.write_to_path(&file_path)?;
-
-        let content = std::fs::read_to_string(&file_path)?;
-        assert_eq!(content, "Written content");
-        Ok(())
-    }
-
-    #[test]
-    fn write_to_path_binary() -> TestResult {
-        let dir = tempfile::tempdir()?;
-        let file_path = dir.path().join("output.bin");
-        let binary_data = vec![0xDE, 0xAD, 0xBE, 0xEF];
-
-        let doc = File::binary("output.bin", binary_data.clone());
-        doc.write_to_path(&file_path)?;
-
-        let content = std::fs::read(&file_path)?;
-        assert_eq!(content, binary_data);
-        Ok(())
-    }
-
-    #[test]
-    fn roundtrip_via_filesystem() -> TestResult {
-        let dir = tempfile::tempdir()?;
-        let original_path = dir.path().join("original.rs");
-        let output_path = dir.path().join("copy.rs");
-
-        let original_content = "fn main() {\n    println!(\"Hello!\");\n}\n";
-        std::fs::write(&original_path, original_content)?;
-
-        let doc = File::from_path(&original_path)?;
-        doc.write_to_path(&output_path)?;
-
-        let written_content = std::fs::read_to_string(&output_path)?;
-        assert_eq!(written_content, original_content);
-        Ok(())
-    }
-
-    #[test]
-    fn permissions_preserved_in_automerge() -> TestResult {
-        let doc = File::text("script.sh", "#!/bin/bash\necho hi").with_permissions(0o755);
-
-        let am = doc.to_automerge()?;
-        let loaded = File::from_automerge(&am)?;
-
-        assert_eq!(loaded.metadata.mode(), 0o755);
-        Ok(())
-    }
-
-    #[test]
-    fn empty_content_roundtrip() -> TestResult {
-        let text_doc = File::text("empty.txt", "");
-        let am = text_doc.to_automerge()?;
-        let loaded = File::from_automerge(&am)?;
-        assert_eq!(loaded.content, content::Content::Text(String::new()));
-
-        let binary_doc = File::binary("empty.bin", Vec::new());
-        let am = binary_doc.to_automerge()?;
-        let loaded = File::from_automerge(&am)?;
-        assert_eq!(loaded.content, content::Content::Bytes(Vec::new()));
-        Ok(())
-    }
-
-    #[test]
-    fn unicode_content_preserved() -> TestResult {
-        let content = "Hello, 世界! 🦀 Ñoño";
-        let doc = File::text("unicode.txt", content);
-
-        let am = doc.to_automerge()?;
-        let loaded = File::from_automerge(&am)?;
-
-        assert_eq!(loaded.content, content::Content::Text(content.to_string()));
-        Ok(())
-    }
-
-    #[test]
-    fn large_content_roundtrip() -> TestResult {
-        use std::fmt::Write;
-        let mut content = String::new();
-        for i in 0..10_000 {
-            writeln!(content, "Line {i}")?;
-        }
-        let doc = File::text("large.txt", &content);
-
-        let am = doc.to_automerge()?;
-        let loaded = File::from_automerge(&am)?;
-
-        assert_eq!(loaded.content, content::Content::Text(content));
-        Ok(())
     }
 
     #[test]

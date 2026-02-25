@@ -1,6 +1,6 @@
 //! Refresh error types and Automerge content update helpers.
 
-use automerge::{Automerge, AutomergeError, ObjType, ROOT, ReadDoc, transaction::Transactable};
+use automerge::{transaction::Transactable, Automerge, AutomergeError, ObjType, ReadDoc, ROOT};
 use thiserror::Error;
 
 use crate::file::content::Content;
@@ -92,33 +92,39 @@ pub enum RefreshError {
 mod tests {
     use super::*;
     use crate::file::File;
-    use testresult::TestResult;
+    use bolero::check;
 
+    #[allow(clippy::expect_used)]
     #[test]
-    fn update_text_content() -> TestResult {
-        let doc = File::text("test.txt", "original content");
-        let mut am_doc = doc.to_automerge()?;
+    fn update_text_content_roundtrip() {
+        check!()
+            .with_type::<(String, String)>()
+            .for_each(|(original, updated)| {
+                let doc = File::text("test.txt", original);
+                let mut am_doc = doc.to_automerge().expect("to_automerge");
 
-        let new_content = Content::Text("updated content".to_string());
-        update_automerge_content(&mut am_doc, new_content)?;
+                let new_content = Content::Text(updated.clone());
+                update_automerge_content(&mut am_doc, new_content).expect("update");
 
-        let loaded = File::from_automerge(&am_doc)?;
-        assert_eq!(loaded.content, Content::Text("updated content".to_string()));
-
-        Ok(())
+                let loaded = File::from_automerge(&am_doc).expect("from_automerge");
+                assert_eq!(loaded.content, Content::Text(updated.clone()));
+            });
     }
 
+    #[allow(clippy::expect_used)]
     #[test]
-    fn update_binary_content() -> TestResult {
-        let doc = File::binary("test.bin", vec![1, 2, 3]);
-        let mut am_doc = doc.to_automerge()?;
+    fn update_binary_content_roundtrip() {
+        check!()
+            .with_type::<(Vec<u8>, Vec<u8>)>()
+            .for_each(|(original, updated)| {
+                let doc = File::binary("test.bin", original.clone());
+                let mut am_doc = doc.to_automerge().expect("to_automerge");
 
-        let new_content = Content::Bytes(vec![4, 5, 6, 7]);
-        update_automerge_content(&mut am_doc, new_content)?;
+                let new_content = Content::Bytes(updated.clone());
+                update_automerge_content(&mut am_doc, new_content).expect("update");
 
-        let loaded = File::from_automerge(&am_doc)?;
-        assert_eq!(loaded.content, Content::Bytes(vec![4, 5, 6, 7]));
-
-        Ok(())
+                let loaded = File::from_automerge(&am_doc).expect("from_automerge");
+                assert_eq!(loaded.content, Content::Bytes(updated.clone()));
+            });
     }
 }

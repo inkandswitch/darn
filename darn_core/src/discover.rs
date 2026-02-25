@@ -518,34 +518,29 @@ where
     (final_results, final_errors, cancel.is_cancelled())
 }
 
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+#[allow(clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bolero::check;
 
     #[test]
-    fn sharded_cache_insert_and_get() {
-        let cache = ShardedDirCache::new();
-        let path = PathBuf::from("src/foo/bar");
-        let id = SedimentreeId::new([42; 32]);
+    fn sharded_cache_insert_then_get() {
+        check!()
+            .with_type::<Vec<(String, [u8; 32])>>()
+            .for_each(|entries: &Vec<(String, [u8; 32])>| {
+                let cache = ShardedDirCache::new();
 
-        assert!(cache.get(&path).is_none());
-
-        cache.insert(path.clone(), id);
-
-        assert_eq!(cache.get(&path), Some(id));
-    }
-
-    #[test]
-    fn sharded_cache_different_paths_different_shards() {
-        let cache = ShardedDirCache::new();
-
-        // Insert many paths to exercise multiple shards
-        for i in 0..100_u8 {
-            let path = PathBuf::from(format!("dir{i}/file.txt"));
-            let id = SedimentreeId::new([i; 32]);
-            cache.insert(path.clone(), id);
-            assert_eq!(cache.get(&path), Some(id));
-        }
+                for (path_str, id_bytes) in entries {
+                    let path = PathBuf::from(path_str);
+                    let id = SedimentreeId::new(*id_bytes);
+                    cache.insert(path.clone(), id);
+                    assert_eq!(
+                        cache.get(&path),
+                        Some(id),
+                        "get after insert should return the value"
+                    );
+                }
+            });
     }
 }

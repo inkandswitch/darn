@@ -374,25 +374,28 @@ pub fn remove_peer(name: &PeerName) -> Result<bool, PeerError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bolero::check;
     use testresult::TestResult;
 
     #[test]
-    fn valid_peer_names() {
-        assert!(PeerName::new("test").is_ok());
-        assert!(PeerName::new("my-peer").is_ok());
-        assert!(PeerName::new("peer_1").is_ok());
-        assert!(PeerName::new("Peer123").is_ok());
-        assert!(PeerName::new("a").is_ok());
-    }
+    fn peer_name_validation_consistent_with_rules() {
+        check!().with_type::<String>().for_each(|s: &String| {
+            let is_valid = !s.is_empty()
+                && s.len() <= 64
+                && s.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
 
-    #[test]
-    fn invalid_peer_names() {
-        assert!(PeerName::new("").is_err());
-        assert!(PeerName::new("-test").is_err());
-        assert!(PeerName::new("_test").is_err());
-        assert!(PeerName::new("test/path").is_err());
-        assert!(PeerName::new("test.name").is_err());
-        assert!(PeerName::new("a".repeat(65)).is_err());
+            match PeerName::new(s) {
+                Ok(name) => {
+                    assert!(is_valid, "PeerName accepted invalid input: {s:?}");
+                    assert_eq!(name.as_str(), s);
+                }
+                Err(_) => {
+                    assert!(!is_valid, "PeerName rejected valid input: {s:?}");
+                }
+            }
+        });
     }
 
     #[test]
@@ -429,20 +432,27 @@ mod tests {
         Ok(())
     }
 
+    #[allow(clippy::expect_used)]
     #[test]
-    fn roundtrip_json() -> TestResult {
-        let dir = tempfile::tempdir()?;
-        let path = dir.path().join("test.json");
+    fn roundtrip_json() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        check!()
+            .with_type::<(String, String)>()
+            .for_each(|(name_str, url_str)| {
+                // Skip inputs that don't pass PeerName validation
+                let Ok(name) = PeerName::new(name_str) else {
+                    return;
+                };
 
-        let name = PeerName::new("my-peer")?;
-        let peer = Peer::discover(name, "ws://example.com:9000".into());
-        peer.save(&path)?;
+                let peer = Peer::discover(name, url_str.clone());
+                let path = dir.path().join("test.json");
+                peer.save(&path).expect("save");
 
-        let loaded = Peer::load(&path)?;
-        assert_eq!(loaded.name.as_str(), peer.name.as_str());
-        assert_eq!(loaded.url, peer.url);
-        assert_eq!(loaded.added_at.as_secs(), peer.added_at.as_secs());
-        Ok(())
+                let loaded = Peer::load(&path).expect("load");
+                assert_eq!(loaded.name.as_str(), peer.name.as_str());
+                assert_eq!(loaded.url, peer.url);
+                assert_eq!(loaded.added_at.as_secs(), peer.added_at.as_secs());
+            });
     }
 
     #[test]

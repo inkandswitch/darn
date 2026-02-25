@@ -177,10 +177,11 @@ pub enum RegistryError {
     Parse(serde_json::Error),
 }
 
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+#[allow(clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;
+    use testresult::TestResult;
 
     fn test_entry(path: &str) -> WorkspaceEntry {
         WorkspaceEntry {
@@ -191,27 +192,29 @@ mod tests {
     }
 
     #[test]
-    fn register_and_lookup() {
+    fn register_and_lookup() -> TestResult {
         let mut registry = WorkspaceRegistry::default();
         let id = WorkspaceId::from_path(Path::new("/tmp/test"));
         let entry = test_entry("/tmp/test");
 
         registry.register(id, entry.clone());
 
-        let found = registry.get(id).expect("should find registered workspace");
+        let found = registry.get(id).ok_or("should find registered workspace")?;
         assert_eq!(found.original_path, entry.original_path);
+        Ok(())
     }
 
     #[test]
-    fn find_by_path() {
+    fn find_by_path() -> TestResult {
         let mut registry = WorkspaceRegistry::default();
         let id = WorkspaceId::from_path(Path::new("/tmp/myproject"));
         registry.register(id, test_entry("/tmp/myproject"));
 
         let (found_id, _) = registry
             .find_by_path(Path::new("/tmp/myproject"))
-            .expect("should find by path");
+            .ok_or("should find by path")?;
         assert_eq!(found_id, id);
+        Ok(())
     }
 
     #[test]
@@ -225,17 +228,37 @@ mod tests {
         assert!(!registry.contains(id));
     }
 
+    #[allow(clippy::expect_used)]
     #[test]
     fn save_and_load_roundtrip() {
+        use bolero::check;
+
         let dir = tempfile::tempdir().expect("create tempdir");
         let registry_path = dir.path().join("workspaces.json");
 
-        let mut registry = WorkspaceRegistry::default();
-        let id = WorkspaceId::from_path(Path::new("/tmp/project"));
-        registry.register(id, test_entry("/tmp/project"));
-        registry.save_to(&registry_path).expect("save");
+        check!().with_type::<Vec<(String, String)>>().for_each(
+            |entries: &Vec<(String, String)>| {
+                let mut registry = WorkspaceRegistry::default();
+                let mut ids = Vec::new();
 
-        let loaded = WorkspaceRegistry::load_from(&registry_path).expect("load");
-        assert!(loaded.contains(id));
+                for (path_str, name) in entries {
+                    let id = WorkspaceId::from_path(Path::new(path_str));
+                    let entry = WorkspaceEntry {
+                        original_path: PathBuf::from(path_str),
+                        name: name.clone(),
+                        created_at: 1_234_567_890,
+                    };
+                    registry.register(id, entry);
+                    ids.push(id);
+                }
+
+                registry.save_to(&registry_path).expect("save");
+                let loaded = WorkspaceRegistry::load_from(&registry_path).expect("load");
+
+                for id in &ids {
+                    assert!(loaded.contains(*id), "missing workspace after roundtrip");
+                }
+            },
+        );
     }
 }

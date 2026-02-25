@@ -319,50 +319,48 @@ mod tests {
         assert!(removed.is_none());
     }
 
+    #[allow(clippy::expect_used)]
     #[test]
-    fn roundtrip_via_json() -> TestResult {
-        let mut manifest = Manifest::new();
-        let id1 = random_id()?;
-        let id2 = random_id()?;
+    fn roundtrip_via_json() {
+        use bolero::check;
 
-        manifest.track(Tracked::new(
-            id1,
-            PathBuf::from("a.txt"),
-            FileType::Text,
-            dummy_fs_digest(),
-            dummy_sedimentree_digest(),
-        ));
-        manifest.track(Tracked::new(
-            id2,
-            PathBuf::from("b/c.bin"),
-            FileType::Binary,
-            dummy_fs_digest(),
-            dummy_sedimentree_digest(),
-        ));
+        check!()
+            .with_type::<Vec<([u8; 32], String, bool)>>()
+            .for_each(|entries: &Vec<([u8; 32], String, bool)>| {
+                let mut manifest = Manifest::new();
 
-        let json = serde_json::to_string(&manifest)?;
-        let decoded: Manifest = serde_json::from_str(&json)?;
+                for (id_bytes, path_str, is_text) in entries {
+                    let id = SedimentreeId::new(*id_bytes);
+                    let file_type = if *is_text {
+                        FileType::Text
+                    } else {
+                        FileType::Binary
+                    };
+                    manifest.track(Tracked::new(
+                        id,
+                        PathBuf::from(path_str),
+                        file_type,
+                        dummy_fs_digest(),
+                        dummy_sedimentree_digest(),
+                    ));
+                }
 
-        assert_eq!(decoded.len(), 2);
-        assert!(decoded.get_by_path(Path::new("a.txt")).is_some());
-        assert!(decoded.get_by_path(Path::new("b/c.bin")).is_some());
+                let json = serde_json::to_string(&manifest).expect("serialize");
+                let decoded: Manifest = serde_json::from_str(&json).expect("deserialize");
 
-        // Verify content kinds are preserved
-        assert!(
-            decoded
-                .get_by_path(Path::new("a.txt"))
-                .ok_or("a.txt not found")?
-                .file_type
-                .is_text()
-        );
-        assert!(
-            decoded
-                .get_by_path(Path::new("b/c.bin"))
-                .ok_or("b/c.bin not found")?
-                .file_type
-                .is_binary()
-        );
-        Ok(())
+                assert_eq!(decoded.len(), manifest.len());
+                for entry in manifest.iter() {
+                    let found = decoded.get_by_path(&entry.relative_path);
+                    assert!(
+                        found.is_some(),
+                        "missing path after roundtrip: {:?}",
+                        entry.relative_path
+                    );
+                    let found = found.expect("checked above");
+                    assert_eq!(found.file_type, entry.file_type);
+                    assert_eq!(found.sedimentree_id, entry.sedimentree_id);
+                }
+            });
     }
 
     #[test]
@@ -425,27 +423,6 @@ mod tests {
 
         let paths: Vec<_> = manifest.iter().map(|e| &e.relative_path).collect();
         assert_eq!(paths.len(), 3);
-        Ok(())
-    }
-
-    #[test]
-    fn base58_roundtrip() -> TestResult {
-        // Convert hex to base58 for verification
-        let hex_ids = [
-            "77108ce3e3dbda91e98a2000e616ab6d7df57f538ab9a6853471d05641dcf1ac",
-            "8cfb27ca00f59521502b86cf340d39e3638531a3da8e43587d61a8bab97c2172",
-        ];
-
-        for hex in hex_ids {
-            let bytes: Vec<u8> = (0..hex.len())
-                .step_by(2)
-                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16))
-                .collect::<Result<_, _>>()?;
-            let b58 = bs58::encode(&bytes).into_string();
-            eprintln!("Hex: {hex}");
-            eprintln!("B58: {b58}");
-            eprintln!();
-        }
         Ok(())
     }
 
