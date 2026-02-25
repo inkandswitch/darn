@@ -589,8 +589,8 @@ pub(crate) fn tree(out: Output) -> eyre::Result<()> {
     let total = entries.len();
     let clean = total - modified - missing;
 
+    #[allow(clippy::expect_used)] // Writing to String is infallible
     let summary = {
-        #[allow(clippy::expect_used)] // Writing to String is infallible
         let mut s = format!("{total} tracked: {clean} clean");
         if modified > 0 {
             write!(
@@ -602,13 +602,8 @@ pub(crate) fn tree(out: Output) -> eyre::Result<()> {
             .expect("write to string");
         }
         if missing > 0 {
-            write!(
-                s,
-                ", {} {}",
-                red.apply_to(missing),
-                red.apply_to("missing")
-            )
-            .expect("write to string");
+            write!(s, ", {} {}", red.apply_to(missing), red.apply_to("missing"))
+                .expect("write to string");
         }
         s
     };
@@ -1336,8 +1331,7 @@ fn display_peer_dry_run_status(
             write!(content, "Status:    all {total} file(s) synced").expect("write to string");
         } else if unsynced.len() == total {
             let count = unsynced.len();
-            write!(content, "Status:    {count} file(s) never synced")
-                .expect("write to string");
+            write!(content, "Status:    {count} file(s) never synced").expect("write to string");
         } else {
             let count = unsynced.len();
             writeln!(content, "Status:    {count} of {total} file(s) unsynced")
@@ -1347,8 +1341,7 @@ fn display_peer_dry_run_status(
             }
             if unsynced.len() > 5 {
                 let remaining = unsynced.len() - 5;
-                write!(content, "           ... and {remaining} more")
-                    .expect("write to string");
+                write!(content, "           ... and {remaining} more").expect("write to string");
             } else {
                 content.pop();
             }
@@ -2061,66 +2054,74 @@ pub(crate) fn info(out: Output) -> eyre::Result<()> {
     };
 
     if out.is_porcelain() {
-        println!("config_dir\t{}", config_dir.display());
-        println!("peer_id\t{peer_id_str}");
-
-        // Peers
-        if let Ok(peers) = darn_core::peer::list_peers() {
-            for peer in &peers {
-                let mode = if peer.is_known() { "known" } else { "discover" };
-                let peer_id_display = if let Some(id) = peer.peer_id() {
-                    bs58::encode(id.as_bytes()).into_string()
-                } else {
-                    "discovery".to_string()
-                };
-                println!(
-                    "peer\t{}\t{}\t{mode}\t{peer_id_display}",
-                    peer.name, peer.url
-                );
-            }
-        }
-
-        // Workspace
-        if let Ok(darn) = Darn::open_without_subduction(Path::new(".")) {
-            let manifest = darn.load_manifest();
-            let root_id_str = manifest
-                .as_ref()
-                .map(|m| sedimentree_id_to_url(m.root_directory_id()))
-                .unwrap_or_else(|_| "(error)".to_string());
-            let file_count = manifest.as_ref().map(|m| m.len()).unwrap_or(0);
-
-            println!("workspace_root\t{}", darn.root().display());
-            println!("root_dir_id\t{root_id_str}");
-            println!("tracked_files\t{file_count}");
-
-            if let Ok(manifest) = manifest {
-                for entry in manifest.iter() {
-                    let state = entry.state(darn.root());
-                    let state_str = match state {
-                        FileState::Clean => "clean",
-                        FileState::Modified => "modified",
-                        FileState::Missing => "missing",
-                    };
-                    let type_str = if entry.file_type.is_text() {
-                        "text"
-                    } else {
-                        "binary"
-                    };
-                    let url = sedimentree_id_to_url(entry.sedimentree_id);
-                    println!(
-                        "file\t{}\t{type_str}\t{state_str}\t{url}",
-                        entry.relative_path.display()
-                    );
-                }
-            }
-        } else {
-            println!("workspace\tnone");
-        }
-
+        info_porcelain(&config_dir, &peer_id_str);
         return Ok(());
     }
 
-    // Human mode
+    info_human(out, &config_dir, &peer_id_str)
+}
+
+/// Porcelain output for `darn info`.
+fn info_porcelain(config_dir: &Path, peer_id_str: &str) {
+    println!("config_dir\t{}", config_dir.display());
+    println!("peer_id\t{peer_id_str}");
+
+    // Peers
+    if let Ok(peers) = darn_core::peer::list_peers() {
+        for peer in &peers {
+            let mode = if peer.is_known() { "known" } else { "discover" };
+            let peer_id_display = if let Some(id) = peer.peer_id() {
+                bs58::encode(id.as_bytes()).into_string()
+            } else {
+                "discovery".to_string()
+            };
+            println!(
+                "peer\t{}\t{}\t{mode}\t{peer_id_display}",
+                peer.name, peer.url
+            );
+        }
+    }
+
+    // Workspace
+    if let Ok(darn) = Darn::open_without_subduction(Path::new(".")) {
+        let manifest = darn.load_manifest();
+        let root_id_str = manifest.as_ref().map_or_else(
+            |_| "(error)".to_string(),
+            |m| sedimentree_id_to_url(m.root_directory_id()),
+        );
+        let file_count = manifest.as_ref().map(Manifest::len).unwrap_or(0);
+
+        println!("workspace_root\t{}", darn.root().display());
+        println!("root_dir_id\t{root_id_str}");
+        println!("tracked_files\t{file_count}");
+
+        if let Ok(manifest) = manifest {
+            for entry in manifest.iter() {
+                let state = entry.state(darn.root());
+                let state_str = match state {
+                    FileState::Clean => "clean",
+                    FileState::Modified => "modified",
+                    FileState::Missing => "missing",
+                };
+                let type_str = if entry.file_type.is_text() {
+                    "text"
+                } else {
+                    "binary"
+                };
+                let url = sedimentree_id_to_url(entry.sedimentree_id);
+                println!(
+                    "file\t{}\t{type_str}\t{state_str}\t{url}",
+                    entry.relative_path.display()
+                );
+            }
+        }
+    } else {
+        println!("workspace\tnone");
+    }
+}
+
+/// Human-friendly output for `darn info`.
+fn info_human(out: Output, config_dir: &Path, peer_id_str: &str) -> eyre::Result<()> {
     let dim = Style::new().dim();
 
     out.intro("darn info")?;
@@ -2138,7 +2139,7 @@ pub(crate) fn info(out: Output) -> eyre::Result<()> {
         "Config",
         truncate_path(&config_dir.display().to_string(), 60),
         "Peer ID",
-        &peer_id_str
+        peer_id_str
     );
     cliclack::note("Global Configuration", global_table)?;
 
@@ -2161,7 +2162,7 @@ pub(crate) fn info(out: Output) -> eyre::Result<()> {
                 let mode = if peer.is_known() { "known" } else { "discover" };
                 table.push_str(&format!(
                     "│ {:<14} │ {:<38} │ {:^8} │\n",
-                    truncate_str(&peer.name.to_string(), 14),
+                    truncate_str(peer.name.as_ref(), 14),
                     truncate_str(&peer.url, 38),
                     mode
                 ));
@@ -2176,15 +2177,23 @@ pub(crate) fn info(out: Output) -> eyre::Result<()> {
     };
     cliclack::note("Configured Peers", peers_content)?;
 
-    // Workspace
+    info_human_workspace(&dim)?;
+
+    out.outro("")?;
+
+    Ok(())
+}
+
+/// Display workspace info in human-friendly mode.
+fn info_human_workspace(dim: &Style) -> eyre::Result<()> {
     match Darn::open_without_subduction(Path::new(".")) {
         Ok(darn) => {
             let manifest = darn.load_manifest();
-            let root_id_str = manifest
-                .as_ref()
-                .map(|m| sedimentree_id_to_url(m.root_directory_id()))
-                .unwrap_or_else(|_| "(error)".to_string());
-            let file_count = manifest.as_ref().map(|m| m.len()).unwrap_or(0);
+            let root_id_str = manifest.as_ref().map_or_else(
+                |_| "(error)".to_string(),
+                |m| sedimentree_id_to_url(m.root_directory_id()),
+            );
+            let file_count = manifest.as_ref().map(Manifest::len).unwrap_or(0);
 
             let workspace_table = format!(
                 "\
@@ -2207,52 +2216,50 @@ pub(crate) fn info(out: Output) -> eyre::Result<()> {
             cliclack::note("Workspace", workspace_table)?;
 
             // Show tracked files if any
-            if let Ok(manifest) = manifest {
-                if !manifest.is_empty() {
-                    let mut files_table = String::new();
-                    files_table.push_str(
-                        "┌──────────────────────────────────────────┬────────┬─────────────────────┐\n",
-                    );
-                    files_table.push_str(&format!(
-                        "│ {:^40} │ {:^6} │ {:^19} │\n",
-                        "Path", "Type", "State"
-                    ));
-                    files_table.push_str(
-                        "├──────────────────────────────────────────┼────────┼─────────────────────┤\n",
-                    );
+            if let Ok(manifest) = manifest
+                && !manifest.is_empty()
+            {
+                let mut files_table = String::new();
+                files_table.push_str(
+                    "┌──────────────────────────────────────────┬────────┬─────────────────────┐\n",
+                );
+                files_table.push_str(&format!(
+                    "│ {:^40} │ {:^6} │ {:^19} │\n",
+                    "Path", "Type", "State"
+                ));
+                files_table.push_str(
+                    "├──────────────────────────────────────────┼────────┼─────────────────────┤\n",
+                );
 
-                    for entry in manifest.iter() {
-                        let state = entry.state(darn.root());
-                        let state_str = match state {
-                            FileState::Clean => "clean",
-                            FileState::Modified => "modified",
-                            FileState::Missing => "missing",
-                        };
-                        let type_str = if entry.file_type.is_text() {
-                            "text"
-                        } else {
-                            "binary"
-                        };
-                        files_table.push_str(&format!(
-                            "│ {:<40} │ {:^6} │ {:^19} │\n",
-                            truncate_str(&entry.relative_path.display().to_string(), 40),
-                            type_str,
-                            state_str
-                        ));
-                    }
-                    files_table.push_str(
-                        "└──────────────────────────────────────────┴────────┴─────────────────────┘",
-                    );
-                    cliclack::note("Tracked Files", files_table)?;
+                for entry in manifest.iter() {
+                    let state = entry.state(darn.root());
+                    let state_str = match state {
+                        FileState::Clean => "clean",
+                        FileState::Modified => "modified",
+                        FileState::Missing => "missing",
+                    };
+                    let type_str = if entry.file_type.is_text() {
+                        "text"
+                    } else {
+                        "binary"
+                    };
+                    files_table.push_str(&format!(
+                        "│ {:<40} │ {:^6} │ {:^19} │\n",
+                        truncate_str(&entry.relative_path.display().to_string(), 40),
+                        type_str,
+                        state_str
+                    ));
                 }
+                files_table.push_str(
+                    "└──────────────────────────────────────────┴────────┴─────────────────────┘",
+                );
+                cliclack::note("Tracked Files", files_table)?;
             }
         }
         Err(_) => {
             cliclack::note("Workspace", dim.apply_to("(not in a darn workspace)"))?;
         }
     }
-
-    out.outro("")?;
 
     Ok(())
 }
