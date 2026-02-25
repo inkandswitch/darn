@@ -526,9 +526,8 @@ mod tests {
 
     #[test]
     fn sharded_cache_insert_then_get() {
-        check!()
-            .with_type::<Vec<(String, [u8; 32])>>()
-            .for_each(|entries: &Vec<(String, [u8; 32])>| {
+        check!().with_type::<Vec<(String, [u8; 32])>>().for_each(
+            |entries: &Vec<(String, [u8; 32])>| {
                 let cache = ShardedDirCache::new();
 
                 for (path_str, id_bytes) in entries {
@@ -541,6 +540,7 @@ mod tests {
                         "get after insert should return the value"
                     );
                 }
-            });
+            },
+        );
     }
 }
