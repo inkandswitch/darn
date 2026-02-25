@@ -49,7 +49,9 @@
           ];
         };
 
-        nightly-rustfmt = pkgs.rust-bin.nightly.latest.rustfmt;
+        nightly-rustfmt = pkgs.rust-bin.nightly."2026-02-23".default.override {
+          extensions = ["rustfmt"];
+        };
 
         format-pkgs = with pkgs; [
           alejandra
@@ -85,7 +87,7 @@
         packages = {
           darn = pkgs.rustPlatform.buildRustPackage {
             pname = "darn";
-            version = "0.1.0";
+            version = "0.3.0";
             meta = {
               description = "Distributed Automerge Resource Navigator";
               longDescription = ''
@@ -94,7 +96,7 @@
                 Enables local-first, collaborative file management with
                 automatic conflict resolution and peer-to-peer synchronization.
               '';
-              homepage = "https://github.com/expede/darn";
+              homepage = "https://github.com/inkandswitch/darn";
               license = [
                 pkgs.lib.licenses.mit
                 pkgs.lib.licenses.asl20
@@ -152,6 +154,7 @@
               unset SOURCE_DATE_EPOCH
               export WORKSPACE_ROOT="$(pwd)"
               export RUSTFMT="${nightly-rustfmt}/bin/rustfmt"
+              export DYLD_LIBRARY_PATH="${nightly-rustfmt}/lib''${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
               menu
             ''
             + pkgs.lib.optionalString pkgs.stdenv.isLinux ''

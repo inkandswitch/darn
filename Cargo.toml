@@ -12,12 +12,12 @@ edition = "2024"
 keywords = ["automerge", "crdt", "filesystem", "local-first", "p2p"]
 license = "Apache-2.0 OR MIT"
 readme = "README.md"
-repository = "https://codeberg.org/expede/darn"
+repository = "https://github.com/inkandswitch/darn"
 rust-version = "1.90"
 
 [workspace.dependencies]
 # Local crates
-darn_core = { version = "0.2.1", path = "darn_core" }
+darn_core = { version = "0.3.0", path = "darn_core" }
 
 automerge = "0.7.3"
 blake3 = "1.8"
