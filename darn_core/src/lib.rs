@@ -24,7 +24,8 @@ use sedimentree_core::id::SedimentreeId;
 #[must_use]
 pub fn generate_sedimentree_id() -> SedimentreeId {
     let mut bytes = [0u8; 32];
-    getrandom::getrandom(&mut bytes[..16]).expect("getrandom failed");
+    #[allow(clippy::expect_used)]
+    getrandom::getrandom(&mut bytes[..16]).expect("system RNG unavailable");
     // Leave bytes 16..32 as zeros
     SedimentreeId::new(bytes)
 }

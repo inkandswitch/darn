@@ -235,7 +235,7 @@ impl Peer {
     ///
     /// Call this after connecting via discovery mode to save the
     /// learned peer identity for future connections.
-    pub fn set_known(&mut self, peer_id: PeerId) {
+    pub const fn set_known(&mut self, peer_id: PeerId) {
         self.audience = Audience::known(peer_id);
     }
 

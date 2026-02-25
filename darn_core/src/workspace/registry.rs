@@ -96,7 +96,7 @@ impl WorkspaceRegistry {
 
         // Write atomically via temp file
         let temp_path = path.with_extension("json.tmp");
-        let contents = serde_json::to_string_pretty(self).map_err(|e| RegistryError::Parse(e))?;
+        let contents = serde_json::to_string_pretty(self).map_err(RegistryError::Parse)?;
         fs::write(&temp_path, contents).map_err(RegistryError::Write)?;
         fs::rename(&temp_path, path).map_err(RegistryError::Write)?;
 
@@ -185,8 +185,8 @@ mod tests {
     fn test_entry(path: &str) -> WorkspaceEntry {
         WorkspaceEntry {
             original_path: PathBuf::from(path),
-            name: path.split('/').last().unwrap_or("test").to_string(),
-            created_at: 1234567890,
+            name: path.split('/').next_back().unwrap_or("test").to_string(),
+            created_at: 1_234_567_890,
         }
     }
 

@@ -764,6 +764,11 @@ impl Darn {
     /// to the remote but aren't in our manifest yet.
     ///
     /// Returns the number of new sedimentrees synced.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SyncError` if the remote directory cannot be loaded or
+    /// if individual sedimentree syncs fail.
     pub async fn sync_missing_sedimentrees(
         &self,
         manifest: &Manifest,
@@ -1179,14 +1184,14 @@ impl Darn {
 
         // After syncing known files, check for new files in the remote directory tree
         // and sync their sedimentrees
-        if let Ok(new_count) = self.sync_missing_sedimentrees(manifest, &peer_id).await {
-            if new_count > 0 {
-                tracing::info!(
-                    "Synced {} new sedimentrees from remote directory tree",
-                    new_count
-                );
-                summary.sedimentrees_synced += new_count;
-            }
+        if let Ok(new_count) = self.sync_missing_sedimentrees(manifest, &peer_id).await
+            && new_count > 0
+        {
+            tracing::info!(
+                "Synced {} new sedimentrees from remote directory tree",
+                new_count
+            );
+            summary.sedimentrees_synced += new_count;
         }
 
         on_progress(SyncProgressEvent::Completed(summary.clone()));

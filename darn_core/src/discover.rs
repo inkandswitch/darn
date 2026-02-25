@@ -100,9 +100,11 @@ impl ShardedDirCache {
     }
 
     /// Get the shard for a given path.
+    #[allow(clippy::indexing_slicing)] // modulo NUM_SHARDS guarantees bounds
     fn shard_for(&self, path: &Path) -> &Mutex<HashMap<PathBuf, SedimentreeId>> {
         let mut hasher = DefaultHasher::new();
         path.hash(&mut hasher);
+        #[allow(clippy::cast_possible_truncation)] // truncation is fine; only used for shard index
         let index = (hasher.finish() as usize) % NUM_SHARDS;
         &self.shards[index]
     }
@@ -301,6 +303,8 @@ async fn ensure_parent_directories_cached(
         return Ok(root_id);
     }
 
+    // SAFETY: checked `is_none()` and `== Some("")` above
+    #[allow(clippy::expect_used)]
     let parent_path = parent.expect("checked above");
 
     // Check cache first
@@ -321,6 +325,7 @@ async fn ensure_parent_directories_cached(
 /// Generate a random `SedimentreeId` compatible with automerge-repo.
 ///
 /// Uses 16 random bytes (zero-padded to 32) for automerge URL compatibility.
+#[allow(clippy::result_large_err)] // SedimentreeError is large but only used internally
 fn generate_sedimentree_id() -> Result<SedimentreeId, FileProcessError> {
     let mut id_bytes = [0u8; 32];
     // Only fill first 16 bytes; rest stays zero for automerge-repo compatibility
@@ -402,7 +407,7 @@ where
 
     // Process in parallel
     let concurrency = std::thread::available_parallelism()
-        .map(|n| n.get())
+        .map(std::num::NonZero::get)
         .unwrap_or(4);
 
     let dir_cache = ShardedDirCache::new();
@@ -461,10 +466,10 @@ where
                     Err(e) => {
                         tracing::warn!("Failed to process {}: {e}", path.display());
                         // Still update last_completed for failed files
-                        if let Ok(mut lc) = last_completed.lock() {
-                            if let Ok(rel) = path.strip_prefix(root) {
-                                *lc = Some(rel.to_path_buf());
-                            }
+                        if let Ok(mut lc) = last_completed.lock()
+                            && let Ok(rel) = path.strip_prefix(root)
+                        {
+                            *lc = Some(rel.to_path_buf());
                         }
                         if let Ok(mut errs) = errors.lock() {
                             errs.push((path, e.to_string()));
@@ -536,9 +541,9 @@ mod tests {
         let cache = ShardedDirCache::new();
 
         // Insert many paths to exercise multiple shards
-        for i in 0..100 {
+        for i in 0..100_u8 {
             let path = PathBuf::from(format!("dir{i}/file.txt"));
-            let id = SedimentreeId::new([i as u8; 32]);
+            let id = SedimentreeId::new([i; 32]);
             cache.insert(path.clone(), id);
             assert_eq!(cache.get(&path), Some(id));
         }

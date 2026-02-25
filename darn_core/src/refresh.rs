@@ -1,6 +1,6 @@
 //! Refresh error types and Automerge content update helpers.
 
-use automerge::{Automerge, AutomergeError, ObjType, ROOT, ReadDoc, transaction::Transactable};
+use automerge::{transaction::Transactable, Automerge, AutomergeError, ObjType, ReadDoc, ROOT};
 use thiserror::Error;
 
 use crate::file::content::Content;
@@ -41,6 +41,8 @@ pub fn update_automerge_content(
     doc.transact::<_, _, AutomergeError>(|tx| {
         match new_content {
             Content::Text(text) => {
+                // content_info is always Some when new_content is Text (set in the match above)
+                #[allow(clippy::expect_used)]
                 let (content_id, old_len) = content_info.expect("content_info set for text");
                 let old_len_isize = isize::try_from(old_len).unwrap_or(isize::MAX);
                 tx.splice_text(&content_id, 0, old_len_isize, &text)?;

@@ -20,7 +20,7 @@ pub struct FileSystemContent(Vec<u8>);
 impl FileSystemContent {
     /// Creates new file system content from bytes.
     #[must_use]
-    pub fn new(bytes: Vec<u8>) -> Self {
+    pub const fn new(bytes: Vec<u8>) -> Self {
         Self(bytes)
     }
 

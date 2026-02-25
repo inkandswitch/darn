@@ -27,7 +27,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use automerge::{Automerge, AutomergeError, ObjType, ROOT, ReadDoc, transaction::Transactable};
+use automerge::{transaction::Transactable, Automerge, AutomergeError, ObjType, ReadDoc, ROOT};
 use thiserror::Error;
 
 use crate::attributes::AttributeRules;
@@ -271,6 +271,8 @@ impl File {
         };
 
         // Read permissions from _darn_mode (new) or metadata.permissions (legacy)
+        #[allow(clippy::wildcard_enum_match_arm)]
+        // only Int/Uint carry mode; rest defaults to 0o644
         let permissions = match doc.get(ROOT, "_darn_mode")? {
             Some((automerge::Value::Scalar(s), _)) => match s.as_ref() {
                 automerge::ScalarValue::Int(i) => u32::try_from(*i).unwrap_or(0o644),
@@ -344,7 +346,7 @@ fn mime_type_for_extension(extension: &str, is_text: bool) -> String {
         "html" | "htm" => "text/html",
         "css" => "text/css",
         "js" | "mjs" => "text/javascript",
-        "json" => "application/json",
+        "json" | "map" => "application/json",
         "xml" => "application/xml",
         "md" => "text/markdown",
         "txt" => "text/plain",
@@ -371,9 +373,6 @@ fn mime_type_for_extension(extension: &str, is_text: bool) -> String {
         "tar" => "application/x-tar",
         "gz" => "application/gzip",
 
-        // Source maps
-        "map" => "application/json",
-
         // Default based on content type
         _ => {
             if is_text {
@@ -387,6 +386,7 @@ fn mime_type_for_extension(extension: &str, is_text: bool) -> String {
 }
 
 /// Helper to get a string value from an Automerge document.
+#[allow(clippy::wildcard_enum_match_arm)] // only Str is valid; all other variants are the same error
 fn get_string(
     doc: &Automerge,
     obj: automerge::ObjId,
@@ -409,14 +409,16 @@ fn get_string(
 ///
 /// Returns `Content::Text` if valid UTF-8, `Content::Bytes` otherwise.
 /// Only reads the file once - validates UTF-8 as chunks are read.
+#[allow(clippy::indexing_slicing)] // all slice bounds are validated by loop/UTF-8 logic
 fn streaming_utf8_read(path: &Path) -> Result<content::Content, std::io::Error> {
     let file = std::fs::File::open(path)?;
+    #[allow(clippy::cast_possible_truncation)] // files > usize::MAX can't be allocated anyway
     let file_len = file.metadata()?.len() as usize;
     let mut reader = BufReader::with_capacity(UTF8_CHECK_CHUNK_SIZE, file);
 
     // Pre-allocate buffer for the expected file size
     let mut bytes = Vec::with_capacity(file_len);
-    let mut chunk = [0u8; UTF8_CHECK_CHUNK_SIZE];
+    let mut chunk = vec![0u8; UTF8_CHECK_CHUNK_SIZE].into_boxed_slice();
 
     // Track incomplete UTF-8 sequence at chunk boundary (max 3 bytes for UTF-8)
     let mut pending: [u8; 3] = [0; 3];
@@ -466,6 +468,7 @@ fn streaming_utf8_read(path: &Path) -> Result<content::Content, std::io::Error> 
     }
 
     // We validated all chunks - conversion cannot fail
+    #[allow(clippy::expect_used)] // UTF-8 validity was verified chunk-by-chunk above
     Ok(content::Content::Text(
         String::from_utf8(bytes).expect("validated UTF-8"),
     ))
@@ -674,6 +677,7 @@ mod tests {
         let file_path = dir.path().join("big.txt");
 
         // Create a file just over the threshold (valid UTF-8 content)
+        #[allow(clippy::cast_possible_truncation)]
         let content = "x".repeat(LARGE_FILE_THRESHOLD as usize + 1);
         std::fs::write(&file_path, &content)?;
 
@@ -697,6 +701,7 @@ mod tests {
         std::fs::write(dir.path().join(".darnattributes"), "*.txt text")?;
 
         // Create a file just over the threshold
+        #[allow(clippy::cast_possible_truncation)]
         let content = "x".repeat(LARGE_FILE_THRESHOLD as usize + 1);
         std::fs::write(&file_path, &content)?;
 

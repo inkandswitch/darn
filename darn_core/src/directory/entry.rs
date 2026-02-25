@@ -36,7 +36,8 @@ impl EntryType {
     }
 
     /// Parses from the string representation.
-    pub fn from_str(s: &str) -> Option<Self> {
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "file" => Some(Self::File),
             "folder" => Some(Self::Folder),

@@ -186,7 +186,7 @@ pub enum StorageError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// FsStorage creation failed.
+    /// `FsStorage` creation failed.
     #[error("storage error: {0}")]
     FsStorage(#[from] sedimentree_fs_storage::FsStorageError),
 }

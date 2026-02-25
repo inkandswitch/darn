@@ -19,7 +19,7 @@
 pub mod entry;
 
 use self::entry::{DirectoryEntry, EntryType};
-use automerge::{Automerge, AutomergeError, ObjType, ROOT, ReadDoc, transaction::Transactable};
+use automerge::{transaction::Transactable, Automerge, AutomergeError, ObjType, ReadDoc, ROOT};
 use sedimentree_core::id::SedimentreeId;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -31,14 +31,11 @@ use thiserror::Error;
 /// which is incompatible with the JS library. This function computes the checksum
 /// manually to match.
 fn bs58check_encode(payload: &[u8]) -> String {
-    let checksum = {
-        let first = Sha256::digest(payload);
-        let second = Sha256::digest(first);
-        second
-    };
+    let checksum = Sha256::digest(Sha256::digest(payload));
 
     let mut buf = Vec::with_capacity(payload.len() + 4);
     buf.extend_from_slice(payload);
+    #[allow(clippy::indexing_slicing)] // SHA-256 always produces 32 bytes; 4 < 32
     buf.extend_from_slice(&checksum[..4]);
 
     bs58::encode(buf).into_string()
@@ -47,6 +44,11 @@ fn bs58check_encode(payload: &[u8]) -> String {
 /// Decode a bs58check string (matching JavaScript's `bs58check` library).
 ///
 /// Returns the payload bytes after verifying the 4-byte SHA-256d checksum.
+///
+/// # Errors
+///
+/// Returns an error if the base58 encoding is invalid, the input is too
+/// short, or the checksum doesn't match.
 pub fn bs58check_decode(encoded: &str) -> Result<Vec<u8>, String> {
     let bytes = bs58::decode(encoded)
         .into_vec()
@@ -57,12 +59,9 @@ pub fn bs58check_decode(encoded: &str) -> Result<Vec<u8>, String> {
     }
 
     let (payload, checksum) = bytes.split_at(bytes.len() - 4);
-    let expected = {
-        let first = Sha256::digest(payload);
-        let second = Sha256::digest(first);
-        second
-    };
+    let expected = Sha256::digest(Sha256::digest(payload));
 
+    #[allow(clippy::indexing_slicing)] // SHA-256 always produces 32 bytes; 4 < 32
     if checksum != &expected[..4] {
         return Err("checksum mismatch".into());
     }
@@ -275,7 +274,7 @@ impl Directory {
             let entry_name = get_string(doc, entry_id.clone(), "name")?;
 
             let entry_type_str = get_string(doc, entry_id.clone(), "type")?;
-            let entry_type = EntryType::from_str(&entry_type_str).ok_or_else(|| {
+            let entry_type = EntryType::parse(&entry_type_str).ok_or_else(|| {
                 DeserializeError::InvalidSchema(format!("invalid entry type: {entry_type_str}"))
             })?;
 
@@ -384,15 +383,12 @@ impl Directory {
             for idx in 0..tx.length(&docs_id) {
                 if let Some((automerge::Value::Object(ObjType::Map), entry_id)) =
                     tx.get(&docs_id, idx)?
+                    && let Some((automerge::Value::Scalar(s), _)) = tx.get(&entry_id, "name")?
+                    && let automerge::ScalarValue::Str(existing_name) = s.as_ref()
+                    && existing_name == &name
                 {
-                    if let Some((automerge::Value::Scalar(s), _)) = tx.get(&entry_id, "name")? {
-                        if let automerge::ScalarValue::Str(existing_name) = s.as_ref() {
-                            if existing_name == &name {
-                                to_remove = Some(idx);
-                                break;
-                            }
-                        }
-                    }
+                    to_remove = Some(idx);
+                    break;
                 }
             }
 
@@ -436,15 +432,12 @@ impl Directory {
             for idx in 0..doc.length(&docs_id) {
                 if let Some((automerge::Value::Object(ObjType::Map), entry_id)) =
                     doc.get(&docs_id, idx)?
+                    && let Some((automerge::Value::Scalar(s), _)) = doc.get(&entry_id, "name")?
+                    && let automerge::ScalarValue::Str(existing_name) = s.as_ref()
+                    && existing_name == name
                 {
-                    if let Some((automerge::Value::Scalar(s), _)) = doc.get(&entry_id, "name")? {
-                        if let automerge::ScalarValue::Str(existing_name) = s.as_ref() {
-                            if existing_name == name {
-                                found = Some(idx);
-                                break;
-                            }
-                        }
-                    }
+                    found = Some(idx);
+                    break;
                 }
             }
             found
@@ -494,6 +487,7 @@ impl Directory {
 }
 
 /// Helper to get a string value from an Automerge document.
+#[allow(clippy::wildcard_enum_match_arm)] // only Str is valid; all other variants are the same error
 fn get_string(
     doc: &Automerge,
     obj: automerge::ObjId,
@@ -681,14 +675,14 @@ mod tests {
     #[test]
     fn entry_type_str_roundtrip() {
         assert_eq!(
-            EntryType::from_str(EntryType::File.as_str()),
+            EntryType::parse(EntryType::File.as_str()),
             Some(EntryType::File)
         );
         assert_eq!(
-            EntryType::from_str(EntryType::Folder.as_str()),
+            EntryType::parse(EntryType::Folder.as_str()),
             Some(EntryType::Folder)
         );
-        assert_eq!(EntryType::from_str("unknown"), None);
+        assert_eq!(EntryType::parse("unknown"), None);
     }
 
     #[test]
@@ -700,14 +694,14 @@ mod tests {
         let am = dir.to_automerge()?;
 
         // Check that url field exists and is a string starting with "automerge:"
-        let docs_id = match am.get(ROOT, "docs")? {
-            Some((automerge::Value::Object(ObjType::List), id)) => id,
-            _ => panic!("docs should be a list"),
+        let Some((automerge::Value::Object(ObjType::List), docs_id)) = am.get(ROOT, "docs")?
+        else {
+            panic!("docs should be a list")
         };
 
-        let entry_id = match am.get(&docs_id, 0)? {
-            Some((automerge::Value::Object(ObjType::Map), id)) => id,
-            _ => panic!("entry should be a map"),
+        let Some((automerge::Value::Object(ObjType::Map), entry_id)) = am.get(&docs_id, 0)?
+        else {
+            panic!("entry should be a map")
         };
 
         let url = get_string(&am, entry_id, "url")?;

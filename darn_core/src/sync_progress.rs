@@ -101,7 +101,7 @@ impl SyncSummary {
     }
 
     /// Add a sedimentree sync result to the summary.
-    pub fn add_sync_stats(&mut self, stats: &subduction_core::connection::stats::SyncStats) {
+    pub const fn add_sync_stats(&mut self, stats: &subduction_core::connection::stats::SyncStats) {
         self.sedimentrees_synced += 1;
         self.commits_received += stats.commits_received;
         self.fragments_received += stats.fragments_received;
@@ -128,13 +128,13 @@ impl SyncSummary {
 
     /// Returns true if any syncs succeeded.
     #[must_use]
-    pub fn any_success(&self) -> bool {
+    pub const fn any_success(&self) -> bool {
         self.sedimentrees_synced > 0
     }
 
     /// Returns true if there were any errors.
     #[must_use]
-    pub fn has_errors(&self) -> bool {
+    pub const fn has_errors(&self) -> bool {
         !self.errors.is_empty()
     }
 }
@@ -167,7 +167,7 @@ impl ApplyResult {
 
     /// Returns true if any files were changed.
     #[must_use]
-    pub fn any_changes(&self) -> bool {
+    pub const fn any_changes(&self) -> bool {
         !self.updated.is_empty()
             || !self.merged.is_empty()
             || !self.created.is_empty()
@@ -176,19 +176,19 @@ impl ApplyResult {
 
     /// Returns true if there were any errors.
     #[must_use]
-    pub fn has_errors(&self) -> bool {
+    pub const fn has_errors(&self) -> bool {
         !self.errors.is_empty()
     }
 
     /// Total number of files affected.
     #[must_use]
-    pub fn total_affected(&self) -> usize {
+    pub const fn total_affected(&self) -> usize {
         self.updated.len() + self.merged.len() + self.created.len() + self.deleted.len()
     }
 
     /// Returns true if any files were deleted.
     #[must_use]
-    pub fn has_deletions(&self) -> bool {
+    pub const fn has_deletions(&self) -> bool {
         !self.deleted.is_empty()
     }
 }

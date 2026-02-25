@@ -156,8 +156,9 @@ impl AttributeRules {
                     });
                 }
 
-                let pattern = parts[0];
-                let attr_str = parts[1];
+                // len checked to be exactly 2 above
+                #[allow(clippy::indexing_slicing)]
+                let (pattern, attr_str) = (parts[0], parts[1]);
 
                 let attribute =
                     Attribute::from_str(attr_str).ok_or_else(|| AttributeError::ParseError {
