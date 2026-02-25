@@ -529,17 +529,19 @@ pub enum DeserializeError {
     InvalidSchema(String),
 }
 
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+#[allow(clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use testresult::TestResult;
+
     /// Generate a random 16-byte ID (zero-padded to 32) matching our convention
     /// for automerge-repo compatibility.
-    fn random_id() -> SedimentreeId {
+    fn random_id() -> Result<SedimentreeId, getrandom::Error> {
         let mut bytes = [0u8; 32];
-        getrandom::getrandom(&mut bytes[..16]).expect("getrandom failed");
-        SedimentreeId::new(bytes)
+        getrandom::getrandom(&mut bytes[..16])?;
+        Ok(SedimentreeId::new(bytes))
     }
 
     #[test]
@@ -551,51 +553,54 @@ mod tests {
     }
 
     #[test]
-    fn add_file_entry() {
+    fn add_file_entry() -> TestResult {
         let mut dir = Directory::new("src");
-        let id = random_id();
+        let id = random_id()?;
 
         dir.add_file("main.rs", id);
 
         assert_eq!(dir.len(), 1);
-        let entry = dir.get("main.rs").expect("entry exists");
+        let entry = dir.get("main.rs").ok_or("entry not found")?;
         assert_eq!(entry.name, "main.rs");
         assert_eq!(entry.entry_type, EntryType::File);
         assert_eq!(entry.sedimentree_id, id);
+        Ok(())
     }
 
     #[test]
-    fn add_folder_entry() {
+    fn add_folder_entry() -> TestResult {
         let mut dir = Directory::root();
-        let id = random_id();
+        let id = random_id()?;
 
         dir.add_folder("src", id);
 
         assert_eq!(dir.len(), 1);
-        let entry = dir.get("src").expect("entry exists");
+        let entry = dir.get("src").ok_or("entry not found")?;
         assert_eq!(entry.name, "src");
         assert_eq!(entry.entry_type, EntryType::Folder);
         assert_eq!(entry.sedimentree_id, id);
+        Ok(())
     }
 
     #[test]
-    fn add_replaces_same_name() {
+    fn add_replaces_same_name() -> TestResult {
         let mut dir = Directory::new("test");
-        let id1 = random_id();
-        let id2 = random_id();
+        let id1 = random_id()?;
+        let id2 = random_id()?;
 
         dir.add_file("foo.txt", id1);
         dir.add_file("foo.txt", id2);
 
         assert_eq!(dir.len(), 1);
-        let entry = dir.get("foo.txt").expect("entry exists");
+        let entry = dir.get("foo.txt").ok_or("entry not found")?;
         assert_eq!(entry.sedimentree_id, id2);
+        Ok(())
     }
 
     #[test]
-    fn remove_entry() {
+    fn remove_entry() -> TestResult {
         let mut dir = Directory::new("test");
-        let id = random_id();
+        let id = random_id()?;
 
         dir.add_file("foo.txt", id);
         assert_eq!(dir.len(), 1);
@@ -603,6 +608,7 @@ mod tests {
         let removed = dir.remove("foo.txt");
         assert!(removed.is_some());
         assert_eq!(dir.len(), 0);
+        Ok(())
     }
 
     #[test]
@@ -613,59 +619,63 @@ mod tests {
     }
 
     #[test]
-    fn automerge_roundtrip_empty() {
+    fn automerge_roundtrip_empty() -> TestResult {
         let dir = Directory::new("empty");
 
-        let am = dir.to_automerge().expect("to_automerge");
-        let loaded = Directory::from_automerge(&am).expect("from_automerge");
+        let am = dir.to_automerge()?;
+        let loaded = Directory::from_automerge(&am)?;
 
         assert_eq!(loaded.name, "empty");
         assert!(loaded.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn automerge_roundtrip_with_entries() {
+    fn automerge_roundtrip_with_entries() -> TestResult {
         let mut dir = Directory::root();
-        let file_id = random_id();
-        let folder_id = random_id();
+        let file_id = random_id()?;
+        let folder_id = random_id()?;
 
         dir.add_file("README.md", file_id);
         dir.add_folder("src", folder_id);
 
-        let am = dir.to_automerge().expect("to_automerge");
-        let loaded = Directory::from_automerge(&am).expect("from_automerge");
+        let am = dir.to_automerge()?;
+        let loaded = Directory::from_automerge(&am)?;
 
         assert_eq!(loaded.name, "");
         assert_eq!(loaded.len(), 2);
 
-        let readme = loaded.get("README.md").expect("README.md exists");
+        let readme = loaded.get("README.md").ok_or("README.md not found")?;
         assert_eq!(readme.entry_type, EntryType::File);
         assert_eq!(readme.sedimentree_id, file_id);
 
-        let src = loaded.get("src").expect("src exists");
+        let src = loaded.get("src").ok_or("src not found")?;
         assert_eq!(src.entry_type, EntryType::Folder);
         assert_eq!(src.sedimentree_id, folder_id);
+        Ok(())
     }
 
     #[test]
-    fn bs58check_roundtrip() {
+    fn bs58check_roundtrip() -> TestResult {
         let mut payload = [0u8; 16];
-        getrandom::getrandom(&mut payload).expect("getrandom failed");
+        getrandom::getrandom(&mut payload)?;
 
         let encoded = bs58check_encode(&payload);
-        let decoded = bs58check_decode(&encoded).expect("decode should succeed");
+        let decoded = bs58check_decode(&encoded)?;
         assert_eq!(decoded, payload);
+        Ok(())
     }
 
     #[test]
-    fn sedimentree_url_roundtrip() {
-        let id = random_id();
+    fn sedimentree_url_roundtrip() -> TestResult {
+        let id = random_id()?;
         let url = sedimentree_id_to_url(id);
 
         assert!(url.starts_with("automerge:"));
 
-        let recovered = url_to_sedimentree_id(&url).expect("parse url");
+        let recovered = url_to_sedimentree_id(&url)?;
         assert_eq!(recovered, id);
+        Ok(())
     }
 
     #[test]
@@ -682,28 +692,29 @@ mod tests {
     }
 
     #[test]
-    fn url_format_used_in_serialization() {
+    fn url_format_used_in_serialization() -> TestResult {
         let mut dir = Directory::new("test");
-        let id = random_id();
+        let id = random_id()?;
         dir.add_file("test.txt", id);
 
-        let am = dir.to_automerge().expect("to_automerge");
+        let am = dir.to_automerge()?;
 
         // Check that url field exists and is a string starting with "automerge:"
-        let docs_id = match am.get(ROOT, "docs").unwrap() {
+        let docs_id = match am.get(ROOT, "docs")? {
             Some((automerge::Value::Object(ObjType::List), id)) => id,
             _ => panic!("docs should be a list"),
         };
 
-        let entry_id = match am.get(&docs_id, 0).unwrap() {
+        let entry_id = match am.get(&docs_id, 0)? {
             Some((automerge::Value::Object(ObjType::Map), id)) => id,
             _ => panic!("entry should be a map"),
         };
 
-        let url = get_string(&am, entry_id, "url").expect("url field");
+        let url = get_string(&am, entry_id, "url")?;
         assert!(
             url.starts_with("automerge:"),
             "url should start with 'automerge:'"
         );
+        Ok(())
     }
 }

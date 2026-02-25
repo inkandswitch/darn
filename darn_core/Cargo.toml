@@ -46,3 +46,4 @@ walkdir.workspace = true
 [dev-dependencies]
 bolero.workspace = true
 tempfile.workspace = true
+testresult = "0.4.1"

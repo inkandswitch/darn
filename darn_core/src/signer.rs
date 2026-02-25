@@ -145,11 +145,12 @@ pub enum SignerError {
     Load(#[from] LoadSignerError),
 }
 
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+#[allow(clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;
     use subduction_core::peer::id::PeerId;
+    use testresult::TestResult;
 
     /// Helper to get peer ID from a signer.
     fn signer_peer_id(signer: &MemorySigner) -> PeerId {
@@ -157,67 +158,71 @@ mod tests {
     }
 
     #[test]
-    fn generate_and_save_creates_key_file() {
-        let dir = tempfile::tempdir().expect("create tempdir");
+    fn generate_and_save_creates_key_file() -> TestResult {
+        let dir = tempfile::tempdir()?;
         let signer_dir = dir.path().join("signer");
 
-        let _signer = generate_and_save(&signer_dir).expect("generate_and_save");
+        let _signer = generate_and_save(&signer_dir)?;
 
         let key_path = signer_dir.join(SIGNING_KEY_FILENAME);
         assert!(key_path.exists(), "private key file should exist");
 
-        let key_bytes = std::fs::read(&key_path).expect("read key file");
+        let key_bytes = std::fs::read(&key_path)?;
         assert_eq!(key_bytes.len(), 32, "key should be 32 bytes");
+        Ok(())
     }
 
     #[test]
-    fn generate_creates_unique_keys() {
-        let dir = tempfile::tempdir().expect("create tempdir");
+    fn generate_creates_unique_keys() -> TestResult {
+        let dir = tempfile::tempdir()?;
         let dir1 = dir.path().join("s1");
         let dir2 = dir.path().join("s2");
 
-        let signer1 = generate_and_save(&dir1).expect("generate_and_save 1");
-        let signer2 = generate_and_save(&dir2).expect("generate_and_save 2");
+        let signer1 = generate_and_save(&dir1)?;
+        let signer2 = generate_and_save(&dir2)?;
 
         assert_ne!(
             signer_peer_id(&signer1),
             signer_peer_id(&signer2),
             "each generation should produce a unique peer ID"
         );
+        Ok(())
     }
 
     #[test]
-    fn load_roundtrip() {
-        let dir = tempfile::tempdir().expect("create tempdir");
+    fn load_roundtrip() -> TestResult {
+        let dir = tempfile::tempdir()?;
         let signer_dir = dir.path().join("signer");
 
-        let original = generate_and_save(&signer_dir).expect("generate_and_save");
-        let loaded = load(&signer_dir).expect("load");
+        let original = generate_and_save(&signer_dir)?;
+        let loaded = load(&signer_dir)?;
 
         assert_eq!(
             signer_peer_id(&original),
             signer_peer_id(&loaded),
             "loaded signer should match original"
         );
+        Ok(())
     }
 
     #[test]
-    fn load_nonexistent_fails() {
-        let dir = tempfile::tempdir().expect("create tempdir");
+    fn load_nonexistent_fails() -> TestResult {
+        let dir = tempfile::tempdir()?;
         let signer_dir = dir.path().join("nonexistent");
 
         let result = load(&signer_dir);
         assert!(result.is_err(), "loading nonexistent signer should fail");
+        Ok(())
     }
 
     #[test]
-    fn load_invalid_key_length_fails() {
-        let dir = tempfile::tempdir().expect("create tempdir");
+    fn load_invalid_key_length_fails() -> TestResult {
+        let dir = tempfile::tempdir()?;
         let signer_dir = dir.path();
         let key_path = signer_dir.join(SIGNING_KEY_FILENAME);
 
         // Write a key with wrong length
-        std::fs::write(&key_path, [0u8; 16]).expect("write invalid key");
+        std::fs::write(&key_path, [0u8; 16])?;
 
         let result = load(signer_dir);
         assert!(result.is_err(), "loading invalid key should fail");
@@ -229,43 +234,47 @@ mod tests {
             }
             other => panic!("expected InvalidKeyLength, got {other:?}"),
         }
+        Ok(())
     }
 
     #[test]
-    fn load_or_generate_creates_when_missing() {
-        let dir = tempfile::tempdir().expect("create tempdir");
+    fn load_or_generate_creates_when_missing() -> TestResult {
+        let dir = tempfile::tempdir()?;
         let signer_dir = dir.path().join("signer");
 
-        let signer = load_or_generate(&signer_dir).expect("load_or_generate");
+        let signer = load_or_generate(&signer_dir)?;
 
         let key_path = signer_dir.join(SIGNING_KEY_FILENAME);
         assert!(key_path.exists(), "key file should be created");
         assert!(!signer_peer_id(&signer).as_bytes().is_empty());
+        Ok(())
     }
 
     #[test]
-    fn load_or_generate_loads_when_exists() {
-        let dir = tempfile::tempdir().expect("create tempdir");
+    fn load_or_generate_loads_when_exists() -> TestResult {
+        let dir = tempfile::tempdir()?;
         let signer_dir = dir.path().join("signer");
 
-        let original = generate_and_save(&signer_dir).expect("generate_and_save");
-        let loaded = load_or_generate(&signer_dir).expect("load_or_generate");
+        let original = generate_and_save(&signer_dir)?;
+        let loaded = load_or_generate(&signer_dir)?;
 
         assert_eq!(
             signer_peer_id(&original),
             signer_peer_id(&loaded),
             "should load existing signer"
         );
+        Ok(())
     }
 
     #[test]
-    fn peer_id_extraction() {
-        let dir = tempfile::tempdir().expect("create tempdir");
+    fn peer_id_extraction() -> TestResult {
+        let dir = tempfile::tempdir()?;
         let signer_dir = dir.path().join("signer");
 
-        let signer = generate_and_save(&signer_dir).expect("generate_and_save");
-        let extracted = peer_id(&signer_dir).expect("peer_id");
+        let signer = generate_and_save(&signer_dir)?;
+        let extracted = peer_id(&signer_dir)?;
 
         assert_eq!(signer_peer_id(&signer), extracted);
+        Ok(())
     }
 }

@@ -213,7 +213,7 @@ pub enum ManifestError {
     Io(#[from] std::io::Error),
 }
 
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+#[allow(clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,15 +221,16 @@ mod tests {
     use std::path::PathBuf;
 
     use sedimentree_core::crypto::digest::Digest;
+    use testresult::TestResult;
 
     use crate::file::{file_type::FileType, state::FileState};
     use content_hash::{self, FileSystemContent};
     use tracked::{Sedimentree, Tracked};
 
-    fn random_id() -> SedimentreeId {
+    fn random_id() -> Result<SedimentreeId, getrandom::Error> {
         let mut bytes = [0u8; 32];
-        getrandom::getrandom(&mut bytes).expect("getrandom failed");
-        SedimentreeId::new(bytes)
+        getrandom::getrandom(&mut bytes)?;
+        Ok(SedimentreeId::new(bytes))
     }
 
     fn dummy_fs_digest() -> Digest<FileSystemContent> {
@@ -241,9 +242,9 @@ mod tests {
     }
 
     #[test]
-    fn track_and_get_by_path() {
+    fn track_and_get_by_path() -> TestResult {
         let mut manifest = Manifest::new();
-        let id = random_id();
+        let id = random_id()?;
         let entry = Tracked::new(
             id,
             PathBuf::from("foo/bar.txt"),
@@ -256,14 +257,15 @@ mod tests {
 
         let found = manifest.get_by_path(Path::new("foo/bar.txt"));
         assert!(found.is_some());
-        assert_eq!(found.expect("entry exists").sedimentree_id, id);
+        assert_eq!(found.ok_or("entry not found")?.sedimentree_id, id);
+        Ok(())
     }
 
     #[test]
-    fn track_replaces_same_path() {
+    fn track_replaces_same_path() -> TestResult {
         let mut manifest = Manifest::new();
 
-        let id1 = random_id();
+        let id1 = random_id()?;
         let entry1 = Tracked::new(
             id1,
             PathBuf::from("foo.txt"),
@@ -273,7 +275,7 @@ mod tests {
         );
         manifest.track(entry1);
 
-        let id2 = random_id();
+        let id2 = random_id()?;
         let entry2 = Tracked::new(
             id2,
             PathBuf::from("foo.txt"),
@@ -285,13 +287,14 @@ mod tests {
 
         assert_eq!(manifest.len(), 1);
         let found = manifest.get_by_path(Path::new("foo.txt"));
-        assert_eq!(found.expect("entry exists").sedimentree_id, id2);
+        assert_eq!(found.ok_or("entry not found")?.sedimentree_id, id2);
+        Ok(())
     }
 
     #[test]
-    fn untrack_removes_entry() {
+    fn untrack_removes_entry() -> TestResult {
         let mut manifest = Manifest::new();
-        let id = random_id();
+        let id = random_id()?;
         let entry = Tracked::new(
             id,
             PathBuf::from("test.rs"),
@@ -306,6 +309,7 @@ mod tests {
         let removed = manifest.untrack(Path::new("test.rs"));
         assert!(removed.is_some());
         assert_eq!(manifest.len(), 0);
+        Ok(())
     }
 
     #[test]
@@ -316,10 +320,10 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_via_json() {
+    fn roundtrip_via_json() -> TestResult {
         let mut manifest = Manifest::new();
-        let id1 = random_id();
-        let id2 = random_id();
+        let id1 = random_id()?;
+        let id2 = random_id()?;
 
         manifest.track(Tracked::new(
             id1,
@@ -336,8 +340,8 @@ mod tests {
             dummy_sedimentree_digest(),
         ));
 
-        let json = serde_json::to_string(&manifest).expect("encode");
-        let decoded: Manifest = serde_json::from_str(&json).expect("decode");
+        let json = serde_json::to_string(&manifest)?;
+        let decoded: Manifest = serde_json::from_str(&json)?;
 
         assert_eq!(decoded.len(), 2);
         assert!(decoded.get_by_path(Path::new("a.txt")).is_some());
@@ -346,23 +350,24 @@ mod tests {
         // Verify content kinds are preserved
         assert!(decoded
             .get_by_path(Path::new("a.txt"))
-            .expect("exists")
+            .ok_or("a.txt not found")?
             .file_type
             .is_text());
         assert!(decoded
             .get_by_path(Path::new("b/c.bin"))
-            .expect("exists")
+            .ok_or("b/c.bin not found")?
             .file_type
             .is_binary());
+        Ok(())
     }
 
     #[test]
-    fn save_and_load() {
-        let dir = tempfile::tempdir().expect("create tempdir");
+    fn save_and_load() -> TestResult {
+        let dir = tempfile::tempdir()?;
         let manifest_path = dir.path().join("manifest.json");
 
         let mut manifest = Manifest::new();
-        let id = random_id();
+        let id = random_id()?;
         manifest.track(Tracked::new(
             id,
             PathBuf::from("test.txt"),
@@ -371,41 +376,43 @@ mod tests {
             dummy_sedimentree_digest(),
         ));
 
-        manifest.save(&manifest_path).expect("save");
-        let loaded = Manifest::load(&manifest_path).expect("load");
+        manifest.save(&manifest_path)?;
+        let loaded = Manifest::load(&manifest_path)?;
 
         assert_eq!(loaded.len(), 1);
         assert!(loaded.get_by_path(Path::new("test.txt")).is_some());
+        Ok(())
     }
 
     #[test]
-    fn load_nonexistent_returns_empty() {
-        let dir = tempfile::tempdir().expect("create tempdir");
+    fn load_nonexistent_returns_empty() -> TestResult {
+        let dir = tempfile::tempdir()?;
         let manifest_path = dir.path().join("does_not_exist.json");
 
-        let manifest = Manifest::load(&manifest_path).expect("load");
+        let manifest = Manifest::load(&manifest_path)?;
         assert!(manifest.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn iter_returns_all_entries() {
+    fn iter_returns_all_entries() -> TestResult {
         let mut manifest = Manifest::new();
         manifest.track(Tracked::new(
-            random_id(),
+            random_id()?,
             PathBuf::from("a.txt"),
             FileType::Text,
             dummy_fs_digest(),
             dummy_sedimentree_digest(),
         ));
         manifest.track(Tracked::new(
-            random_id(),
+            random_id()?,
             PathBuf::from("b.txt"),
             FileType::Text,
             dummy_fs_digest(),
             dummy_sedimentree_digest(),
         ));
         manifest.track(Tracked::new(
-            random_id(),
+            random_id()?,
             PathBuf::from("c.txt"),
             FileType::Binary,
             dummy_fs_digest(),
@@ -414,10 +421,11 @@ mod tests {
 
         let paths: Vec<_> = manifest.iter().map(|e| &e.relative_path).collect();
         assert_eq!(paths.len(), 3);
+        Ok(())
     }
 
     #[test]
-    fn base58_roundtrip() {
+    fn base58_roundtrip() -> TestResult {
         // Convert hex to base58 for verification
         let hex_ids = [
             "77108ce3e3dbda91e98a2000e616ab6d7df57f538ab9a6853471d05641dcf1ac",
@@ -427,26 +435,27 @@ mod tests {
         for hex in hex_ids {
             let bytes: Vec<u8> = (0..hex.len())
                 .step_by(2)
-                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
-                .collect();
+                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16))
+                .collect::<Result<_, _>>()?;
             let b58 = bs58::encode(&bytes).into_string();
             eprintln!("Hex: {hex}");
             eprintln!("B58: {b58}");
             eprintln!();
         }
+        Ok(())
     }
 
     #[test]
-    fn file_state_detection() {
-        let dir = tempfile::tempdir().expect("create tempdir");
+    fn file_state_detection() -> TestResult {
+        let dir = tempfile::tempdir()?;
         let file_path = dir.path().join("test.txt");
 
         // Create file with known content
-        std::fs::write(&file_path, "original content").expect("write file");
-        let original_hash = content_hash::hash_file(&file_path).expect("hash file");
+        std::fs::write(&file_path, "original content")?;
+        let original_hash = content_hash::hash_file(&file_path)?;
 
         let entry = Tracked::new(
-            random_id(),
+            random_id()?,
             PathBuf::from("test.txt"),
             FileType::Text,
             original_hash,
@@ -457,11 +466,12 @@ mod tests {
         assert_eq!(entry.state(dir.path()), FileState::Clean);
 
         // Modified state: file changed
-        std::fs::write(&file_path, "modified content").expect("write file");
+        std::fs::write(&file_path, "modified content")?;
         assert_eq!(entry.state(dir.path()), FileState::Modified);
 
         // Missing state: file deleted
-        std::fs::remove_file(&file_path).expect("delete file");
+        std::fs::remove_file(&file_path)?;
         assert_eq!(entry.state(dir.path()), FileState::Missing);
+        Ok(())
     }
 }
