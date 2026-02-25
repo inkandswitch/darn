@@ -17,7 +17,7 @@ rust-version = "1.90"
 
 [workspace.dependencies]
 # Local crates
-darn_core = { version = "0.3.0", path = "darn_core" }
+darn_core = { version = "0.3.0", path = "darn_core", default-features = false }
 
 automerge = "0.7.3"
 blake3 = "1.8"
@@ -50,7 +50,7 @@ tokio = { version = "1.0", features = ["full"] }
 tokio-util = "0.7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tungstenite = "0.27"
+tungstenite = { version = "0.27", default-features = false, features = ["handshake", "http"] }
 walkdir = "2.5"
 
 [workspace.lints.rust]

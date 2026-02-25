@@ -524,7 +524,6 @@ pub enum DeserializeError {
 }
 
 #[allow(clippy::panic)]
-#[allow(clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;
