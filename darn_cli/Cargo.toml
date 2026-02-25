@@ -16,6 +16,11 @@ rust-version.workspace = true
 name = "darn"
 path = "src/main.rs"
 
+[features]
+default = ["native-tls"]
+native-tls = ["darn_core/native-tls"]
+rustls = ["darn_core/rustls"]
+
 [lints]
 workspace = true
 

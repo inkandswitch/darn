@@ -113,7 +113,7 @@
               # outputHashes = {};
             };
 
-            buildInputs = [pkgs.openssl];
+            buildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.openssl];
             nativeBuildInputs = [pkgs.pkg-config];
 
             cargoBuildFlags = ["--bin" "darn"];
@@ -158,9 +158,6 @@
               menu
             ''
             + pkgs.lib.optionalString pkgs.stdenv.isLinux ''
-              unset PKG_CONFIG_PATH
-              export PKG_CONFIG_PATH=${pkgs.openssl.dev}/lib/pkgconfig
-
               export OPENSSL_NO_VENDOR=1
               export OPENSSL_LIB_DIR=${pkgs.openssl.out}/lib
               export OPENSSL_INCLUDE_DIR=${pkgs.openssl.dev}/include
