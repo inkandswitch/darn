@@ -1,7 +1,7 @@
 //! Manifest for tracking files in a `darn` workspace.
 //!
 //! The manifest maintains a mapping between [`SedimentreeId`]s and file metadata,
-//! persisted as JSON at `.darn/manifest.json`.
+//! persisted as JSON at `~/.config/darn/workspaces/<id>/manifest.json`.
 
 pub mod content_hash;
 pub mod tracked;

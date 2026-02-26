@@ -27,7 +27,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use automerge::{Automerge, AutomergeError, ObjType, ROOT, ReadDoc, transaction::Transactable};
+use automerge::{transaction::Transactable, Automerge, AutomergeError, ObjType, ReadDoc, ROOT};
 use thiserror::Error;
 
 use crate::attributes::AttributeRules;
@@ -39,7 +39,7 @@ const UTF8_CHECK_CHUNK_SIZE: usize = 64 * 1024; // 64 KB
 ///
 /// Character-level CRDT merging is expensive for large files, and files this
 /// size are almost always generated (bundler output, build artifacts, etc.)
-/// rather than hand-edited. Users can override with `*.ext text` in `.darnattributes`.
+/// rather than hand-edited. Users can override with `*.ext` in the `.darn` config.
 const LARGE_FILE_THRESHOLD: u64 = 1024 * 1024; // 1 MB
 
 /// A file represented as an Automerge document.
@@ -602,12 +602,24 @@ mod tests {
     #[test]
     fn large_file_respects_text_attribute() -> TestResult {
         use crate::attributes::AttributeRules;
+        use crate::dotfile::{AttributeMap, DarnConfig};
+        use crate::workspace::WorkspaceId;
+        use sedimentree_core::id::SedimentreeId;
 
         let dir = tempfile::tempdir()?;
         let file_path = dir.path().join("big.txt");
 
-        // Create .darnattributes forcing text
-        std::fs::write(dir.path().join(".darnattributes"), "*.txt text")?;
+        // Create .darn config with text attribute for *.txt
+        let config = DarnConfig::with_fields(
+            WorkspaceId::from_bytes([1; 16]),
+            SedimentreeId::new([2; 32]),
+            Vec::new(),
+            AttributeMap {
+                binary: Vec::new(),
+                text: vec!["*.txt".to_string()],
+            },
+        );
+        config.save(dir.path())?;
 
         // Create a file just over the threshold
         #[allow(clippy::cast_possible_truncation)]

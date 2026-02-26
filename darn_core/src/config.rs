@@ -1,7 +1,15 @@
 //! Global configuration for `darn`.
 //!
-//! Manages the global config directory at `~/.config/darn/` which contains
-//! the user's signer and other global settings.
+//! Manages the global config directory which contains the user's signer and
+//! other global settings.
+//!
+//! # Default Locations
+//!
+//! | Platform | Path                     |
+//! |----------|--------------------------|
+//! | Linux    | `~/.config/darn/`        |
+//! | macOS    | `~/.config/darn/`        |
+//! | Windows  | `%APPDATA%\darn\`        |
 //!
 //! # Environment Variables
 //!
@@ -29,20 +37,32 @@ const WORKSPACES_DIR: &str = "workspaces";
 
 /// Returns the global `darn` config directory.
 ///
-/// If `DARN_CONFIG_DIR` is set, uses that path. Otherwise defaults to
-/// `~/.config/darn/`.
+/// If `DARN_CONFIG_DIR` is set, uses that path. Otherwise:
+/// - Unix: `~/.config/darn/`
+/// - Windows: `%APPDATA%\darn\` (via [`dirs::config_dir`])
 ///
 /// # Errors
 ///
-/// Returns [`NoConfigDir`] if the home directory cannot be determined
+/// Returns [`NoConfigDir`] if the home/config directory cannot be determined
 /// (and no override is set).
 pub fn global_config_dir() -> Result<PathBuf, NoConfigDir> {
     if let Ok(override_dir) = std::env::var(CONFIG_DIR_ENV) {
         return Ok(PathBuf::from(override_dir));
     }
-    dirs::home_dir()
-        .map(|p| p.join(".config").join("darn"))
-        .ok_or(NoConfigDir)
+
+    #[cfg(unix)]
+    {
+        dirs::home_dir()
+            .map(|p| p.join(".config").join("darn"))
+            .ok_or(NoConfigDir)
+    }
+
+    #[cfg(not(unix))]
+    {
+        dirs::config_dir()
+            .map(|p| p.join("darn"))
+            .ok_or(NoConfigDir)
+    }
 }
 
 /// Returns the global signer directory.
@@ -85,7 +105,7 @@ pub fn global_storage_dir() -> Result<PathBuf, NoConfigDir> {
 ///
 /// Default: `~/.config/darn/workspaces/`
 ///
-/// Each workspace has a subdirectory here with its manifest and ping-pong trees.
+/// Each workspace has a subdirectory here with its manifest and storage.
 ///
 /// # Errors
 ///
@@ -146,9 +166,11 @@ mod tests {
     fn global_config_dir_ends_with_darn() -> TestResult {
         let dir = global_config_dir()?;
         assert!(dir.ends_with("darn"), "config dir should end with 'darn'");
+
+        #[cfg(unix)]
         assert!(
             dir.to_string_lossy().contains(".config"),
-            "config dir should be under .config"
+            "config dir should be under .config on Unix"
         );
 
         Ok(())

@@ -20,8 +20,8 @@ const REGISTRY_FILE: &str = "workspaces.json";
 
 /// Registry tracking all known workspaces.
 ///
-/// The registry maps workspace IDs to their original paths (where the symlink
-/// should point from) and allows reverse lookup.
+/// The registry maps workspace IDs to their original paths and allows
+/// reverse lookup.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WorkspaceRegistry {
     /// Map from workspace ID (hex) to workspace metadata.
@@ -33,7 +33,7 @@ pub struct WorkspaceRegistry {
 pub struct WorkspaceEntry {
     /// The original path where the workspace was initialized.
     ///
-    /// This is where the user's symlink should point from.
+    /// The workspace root directory (where the `.darn` file lives).
     pub original_path: PathBuf,
 
     /// Human-readable name (defaults to directory name).
@@ -94,10 +94,27 @@ impl WorkspaceRegistry {
             fs::create_dir_all(parent).map_err(RegistryError::Write)?;
         }
 
-        // Write atomically via temp file
-        let temp_path = path.with_extension("json.tmp");
+        // Write atomically via temp file (unique suffix avoids parallel test races).
+        // On Windows, `fs::rename` fails when the destination exists, so we
+        // remove the target first. This makes the operation non-atomic on
+        // Windows but avoids half-written files.
+        let tid = std::thread::current().id();
+        let temp_name = format!(
+            "{}.{tid:?}.tmp",
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("registry")
+        );
+        let temp_path = path.with_file_name(temp_name);
         let contents = serde_json::to_string_pretty(self).map_err(RegistryError::Parse)?;
-        fs::write(&temp_path, contents).map_err(RegistryError::Write)?;
+        fs::write(&temp_path, &contents).map_err(RegistryError::Write)?;
+
+        // Remove existing file on Windows before rename.
+        #[cfg(target_os = "windows")]
+        if path.exists() {
+            fs::remove_file(path).map_err(RegistryError::Write)?;
+        }
+
         fs::rename(&temp_path, path).map_err(RegistryError::Write)?;
 
         Ok(())
@@ -183,19 +200,27 @@ mod tests {
     use super::*;
     use testresult::TestResult;
 
-    fn test_entry(path: &str) -> WorkspaceEntry {
+    fn test_entry(path: &Path) -> WorkspaceEntry {
         WorkspaceEntry {
-            original_path: PathBuf::from(path),
-            name: path.split('/').next_back().unwrap_or("test").to_string(),
+            original_path: path.to_path_buf(),
+            name: path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("test")
+                .to_string(),
             created_at: 1_234_567_890,
         }
     }
 
     #[test]
     fn register_and_lookup() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let project = dir.path().join("test");
+        std::fs::create_dir_all(&project)?;
+
         let mut registry = WorkspaceRegistry::default();
-        let id = WorkspaceId::from_path(Path::new("/tmp/test"));
-        let entry = test_entry("/tmp/test");
+        let id = WorkspaceId::from_path(&project);
+        let entry = test_entry(&project);
 
         registry.register(id, entry.clone());
 
@@ -206,26 +231,35 @@ mod tests {
 
     #[test]
     fn find_by_path() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let project = dir.path().join("myproject");
+        std::fs::create_dir_all(&project)?;
+
         let mut registry = WorkspaceRegistry::default();
-        let id = WorkspaceId::from_path(Path::new("/tmp/myproject"));
-        registry.register(id, test_entry("/tmp/myproject"));
+        let id = WorkspaceId::from_path(&project);
+        registry.register(id, test_entry(&project));
 
         let (found_id, _) = registry
-            .find_by_path(Path::new("/tmp/myproject"))
+            .find_by_path(&project)
             .ok_or("should find by path")?;
         assert_eq!(found_id, id);
         Ok(())
     }
 
     #[test]
-    fn unregister() {
+    fn unregister() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let project = dir.path().join("test");
+        std::fs::create_dir_all(&project)?;
+
         let mut registry = WorkspaceRegistry::default();
-        let id = WorkspaceId::from_path(Path::new("/tmp/test"));
-        registry.register(id, test_entry("/tmp/test"));
+        let id = WorkspaceId::from_path(&project);
+        registry.register(id, test_entry(&project));
 
         assert!(registry.contains(id));
         registry.unregister(id);
         assert!(!registry.contains(id));
+        Ok(())
     }
 
     #[allow(clippy::expect_used)]

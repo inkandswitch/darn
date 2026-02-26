@@ -112,6 +112,7 @@ fn format_paths_as_tree(paths: &[std::path::PathBuf]) -> String {
 }
 
 /// Initialize a new `darn` workspace.
+#[allow(clippy::unused_async)] // Called from async context, keeping signature uniform
 pub(crate) async fn init(path: &Path, out: Output) -> eyre::Result<()> {
     out.intro("darn init")?;
 
@@ -121,52 +122,7 @@ pub(crate) async fn init(path: &Path, out: Output) -> eyre::Result<()> {
 
     out.success(&format!("Initialized workspace at {}", root.display()))?;
 
-    // Open workspace to track .darnignore
-    let darn = Darn::open(&root).await?;
-    let mut manifest = darn.load_manifest()?;
-
-    // Track .darnignore if it exists
-    let darnignore_path = root.join(".darnignore");
-    if darnignore_path.exists() {
-        // Create File from .darnignore
-        let doc = darn_core::file::File::from_path(&darnignore_path)?;
-        let file_type = darn_core::file::file_type::FileType::Text;
-
-        // Convert to Automerge
-        let mut am_doc = doc.into_automerge()?;
-
-        // Generate random SedimentreeId (16-byte for automerge-repo compatibility)
-        let sedimentree_id = darn_core::generate_sedimentree_id();
-
-        // Store as sedimentree commits
-        darn_core::sedimentree::store_document(darn.subduction(), sedimentree_id, &mut am_doc)
-            .await?;
-
-        // Add to root directory
-        darn_core::sedimentree::add_file_to_directory(
-            darn.subduction(),
-            manifest.root_directory_id(),
-            ".darnignore",
-            sedimentree_id,
-        )
-        .await?;
-
-        // Compute digests
-        let file_system_digest = darn_core::manifest::content_hash::hash_file(&darnignore_path)?;
-        let sedimentree_digest =
-            darn_core::sedimentree::compute_digest(darn.subduction(), sedimentree_id).await?;
-
-        // Add to manifest
-        let entry = darn_core::manifest::tracked::Tracked::new(
-            sedimentree_id,
-            std::path::PathBuf::from(".darnignore"),
-            file_type,
-            file_system_digest,
-            sedimentree_digest,
-        );
-        manifest.track(entry);
-        darn.save_manifest(&manifest)?;
-    }
+    let manifest = Manifest::load(&initialized.manifest_path())?;
 
     if out.is_porcelain() {
         let root_dir_url = sedimentree_id_to_url(manifest.root_directory_id());
@@ -430,7 +386,7 @@ async fn clone_directory_recursive_with_sync(
     Ok(file_count)
 }
 
-/// Add patterns to .darnignore.
+/// Add ignore patterns to the `.darn` config.
 pub(crate) fn ignore(patterns: &[String], out: Output) -> eyre::Result<()> {
     let darn = Darn::open_without_subduction(Path::new("."))?;
     let root = darn.root();
@@ -461,13 +417,13 @@ pub(crate) fn ignore(patterns: &[String], out: Output) -> eyre::Result<()> {
     }
 
     if !out.is_porcelain() && added_count > 0 {
-        out.info(&format!("{added_count} pattern(s) added to .darnignore"))?;
+        out.info(&format!("{added_count} pattern(s) added to .darn ignore list"))?;
     }
 
     Ok(())
 }
 
-/// Remove patterns from .darnignore.
+/// Remove ignore patterns from the `.darn` config.
 pub(crate) fn unignore(patterns: &[String], out: Output) -> eyre::Result<()> {
     let darn = Darn::open_without_subduction(Path::new("."))?;
     let root = darn.root();
@@ -488,7 +444,7 @@ pub(crate) fn unignore(patterns: &[String], out: Output) -> eyre::Result<()> {
                 if out.is_porcelain() {
                     out.kv("not_found", pattern)?;
                 } else {
-                    out.warning(&format!("Not in .darnignore: {pattern}"))?;
+                    out.warning(&format!("Not in ignore list: {pattern}"))?;
                 }
             }
             Err(e) => {
@@ -499,7 +455,7 @@ pub(crate) fn unignore(patterns: &[String], out: Output) -> eyre::Result<()> {
 
     if !out.is_porcelain() && removed_count > 0 {
         out.info(&format!(
-            "{removed_count} pattern(s) removed from .darnignore"
+            "{removed_count} pattern(s) removed from .darn ignore list"
         ))?;
     }
 

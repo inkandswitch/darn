@@ -3,7 +3,7 @@
 //! Core library for managing collaborative directories using Automerge and Subduction.
 //!
 //! This crate provides the fundamental types and operations for:
-//! - Workspace management (`.darn/` directory)
+//! - Workspace management (`.darn` config file + centralized storage)
 //! - File-to-Automerge document mapping
 //! - Signer and peer ID management
 //! - Change tracking and history
@@ -34,6 +34,7 @@ pub mod attributes;
 pub mod config;
 pub mod darn;
 pub mod directory;
+pub mod dotfile;
 pub mod discover;
 pub mod file;
 pub mod ignore;

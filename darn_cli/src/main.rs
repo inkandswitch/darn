@@ -105,14 +105,14 @@ enum Commands {
         path: std::path::PathBuf,
     },
 
-    /// Add patterns to .darnignore (excluded from sync)
+    /// Add ignore patterns (excluded from sync)
     Ignore {
         /// Patterns to ignore (gitignore syntax)
         #[arg(required = true)]
         patterns: Vec<String>,
     },
 
-    /// Remove patterns from .darnignore
+    /// Remove ignore patterns
     Unignore {
         /// Patterns to stop ignoring
         #[arg(required = true)]

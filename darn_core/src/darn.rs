@@ -1,7 +1,7 @@
 //! Darn workspace management.
 //!
-//! A workspace is a directory containing a `.darn/` subdirectory that tracks
-//! files as Automerge CRDT documents.
+//! A workspace is a directory containing a `.darn` JSON marker file. All
+//! storage lives under `~/.config/darn/workspaces/<id>/`.
 
 pub mod refresh_diff;
 
@@ -25,6 +25,7 @@ use crate::{
     config::{self, NoConfigDir},
     directory::{Directory, entry::EntryType},
     discover::{self, DiscoverProgress, DiscoverResult},
+    dotfile::{DarnConfig, DotfileError},
     file::{File, file_type::FileType, state::FileState},
     manifest::{Manifest, ManifestError, content_hash, tracked::Tracked},
     peer::Peer,
@@ -36,28 +37,27 @@ use crate::{
         DarnSubduction, SubductionInitError,
     },
     sync_progress::{ApplyResult, SyncProgressEvent, SyncSummary},
+    workspace::{WorkspaceId, WorkspaceLayout, WorkspaceRegistry, registry::WorkspaceEntry},
 };
 use refresh_diff::RefreshDiff;
-
-/// Manifest filename within `.darn/`.
-const MANIFEST_FILE: &str = "manifest.json";
-
-/// The name of the `.darn` directory.
-const DARN_DIR: &str = ".darn";
-
-/// Storage subdirectory within `.darn/`.
-const STORAGE_DIR: &str = "storage";
 
 /// A `darn` workspace rooted at a directory.
 ///
 /// The `Darn` struct manages a workspace with:
-/// - File tracking via manifest
+/// - A `.darn` marker file in the project root
+/// - Centralized storage under `~/.config/darn/workspaces/<id>/`
 /// - Automerge document storage via Subduction
 /// - Peer configuration for sync
 #[derive(Debug)]
 pub struct Darn {
-    /// The root directory of the workspace (parent of `.darn/`).
+    /// The root directory of the workspace (contains `.darn` file).
     root: PathBuf,
+
+    /// Loaded configuration from the `.darn` file.
+    config: DarnConfig,
+
+    /// Paths into `~/.config/darn/workspaces/<id>/`.
+    layout: WorkspaceLayout,
 
     /// The Subduction instance for this workspace.
     subduction: Arc<DarnSubduction>,
@@ -66,7 +66,8 @@ pub struct Darn {
 impl Darn {
     /// Initialize a new workspace at the given path.
     ///
-    /// Creates the `.darn/` directory structure and ensures the global signer exists.
+    /// Creates a `.darn` marker file, centralized storage under
+    /// `~/.config/darn/workspaces/<id>/`, and ensures the global signer exists.
     /// This is a synchronous operation that doesn't initialize Subduction.
     ///
     /// # Errors
@@ -77,25 +78,47 @@ impl Darn {
     /// - Signer generation fails
     pub fn init(path: &Path) -> Result<InitializedDarn, InitWorkspaceError> {
         let root = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        let darn_dir = root.join(DARN_DIR);
 
-        if darn_dir.exists() {
+        // Check for existing workspace
+        let dotfile_path = root.join(crate::dotfile::DOTFILE_NAME);
+        if dotfile_path.exists() {
             return Err(InitWorkspaceError::AlreadyExists(root));
         }
 
-        // Create workspace directory structure
-        std::fs::create_dir_all(&darn_dir)?;
-        std::fs::create_dir_all(darn_dir.join(STORAGE_DIR))?;
+        // Generate workspace ID from canonical path
+        let id = WorkspaceId::from_path(&root);
 
         // Create initial manifest with random root directory ID
-        let manifest = crate::manifest::Manifest::new();
-        manifest.save(&darn_dir.join(MANIFEST_FILE))?;
+        let manifest = Manifest::new();
+        let root_directory_id = manifest.root_directory_id();
 
-        // Create default .darnignore file
-        crate::ignore::create_default(&root)?;
+        // Create centralized storage directory
+        let layout = WorkspaceLayout::new(id)?;
+        layout.create_dirs()?;
 
-        // Create default .darnattributes file
-        crate::attributes::create_default_darnattributes(&root)?;
+        // Save manifest to centralized location
+        manifest.save(&layout.manifest_path())?;
+
+        // Create .darn marker file with default ignore/attribute patterns
+        let config = DarnConfig::create(&root, id, root_directory_id)?;
+
+        // Register in global registry
+        let mut registry = WorkspaceRegistry::load()?;
+        registry.register(
+            id,
+            WorkspaceEntry {
+                original_path: root.clone(),
+                name: root
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("workspace")
+                    .to_string(),
+                created_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs()),
+            },
+        );
+        registry.save()?;
 
         // Ensure global signer exists
         let signer_dir = config::global_signer_dir()?;
@@ -104,11 +127,16 @@ impl Darn {
         let peer_id: PeerId = signer.verifying_key().into();
         tracing::info!(
             path = %root.display(),
+            workspace_id = %id.to_hex(),
             peer_id = %hex::encode(peer_id.as_bytes()),
             "Initialized workspace"
         );
 
-        Ok(InitializedDarn { root })
+        Ok(InitializedDarn {
+            root,
+            config,
+            layout,
+        })
     }
 
     /// Initialize a workspace with a specific root directory ID.
@@ -127,22 +155,44 @@ impl Darn {
         root_directory_id: sedimentree_core::id::SedimentreeId,
     ) -> Result<InitializedDarn, InitWorkspaceError> {
         let root = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        let darn_dir = root.join(DARN_DIR);
 
-        if darn_dir.exists() {
+        // Check for existing workspace
+        let dotfile_path = root.join(crate::dotfile::DOTFILE_NAME);
+        if dotfile_path.exists() {
             return Err(InitWorkspaceError::AlreadyExists(root));
         }
 
-        // Create workspace directory structure
-        std::fs::create_dir_all(&darn_dir)?;
-        std::fs::create_dir_all(darn_dir.join(STORAGE_DIR))?;
+        // Generate workspace ID from canonical path
+        let id = WorkspaceId::from_path(&root);
 
-        // Create manifest with the provided root directory ID
-        let manifest = crate::manifest::Manifest::with_root_id(root_directory_id);
-        manifest.save(&darn_dir.join(MANIFEST_FILE))?;
+        // Create centralized storage directory
+        let layout = WorkspaceLayout::new(id)?;
+        layout.create_dirs()?;
 
-        // Create default .darnattributes file
-        crate::attributes::create_default_darnattributes(&root)?;
+        // Save manifest with provided root directory ID to centralized location
+        let manifest = Manifest::with_root_id(root_directory_id);
+        manifest.save(&layout.manifest_path())?;
+
+        // Create .darn marker file with default ignore/attribute patterns
+        let config = DarnConfig::create(&root, id, root_directory_id)?;
+
+        // Register in global registry
+        let mut registry = WorkspaceRegistry::load()?;
+        registry.register(
+            id,
+            WorkspaceEntry {
+                original_path: root.clone(),
+                name: root
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("workspace")
+                    .to_string(),
+                created_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs()),
+            },
+        );
+        registry.save()?;
 
         // Ensure global signer exists
         let signer_dir = config::global_signer_dir()?;
@@ -151,30 +201,67 @@ impl Darn {
         let peer_id: PeerId = signer.verifying_key().into();
         tracing::info!(
             path = %root.display(),
+            workspace_id = %id.to_hex(),
             root_directory_id = %bs58::encode(root_directory_id.as_bytes()).into_string(),
             peer_id = %hex::encode(peer_id.as_bytes()),
             "Initialized workspace with root directory ID"
         );
 
-        Ok(InitializedDarn { root })
+        Ok(InitializedDarn {
+            root,
+            config,
+            layout,
+        })
     }
 
     /// Open an existing workspace and hydrate Subduction from storage.
     ///
-    /// Searches for a `.darn/` directory starting from the given path and
-    /// walking up to parent directories. Loads all existing sedimentrees
-    /// from storage.
+    /// Searches for a `.darn` file starting from the given path and walking up
+    /// to parent directories. Loads all existing sedimentrees from storage.
     ///
     /// # Errors
     ///
     /// Returns an error if no workspace is found or Subduction cannot be initialized.
     pub async fn open(path: &Path) -> Result<Self, OpenError> {
         let root = Self::find_root(path)?;
-        let signer = Self::load_signer_from(&root)?;
-        let storage = Self::storage_from(&root)?;
+        let config = DarnConfig::load(&root)?;
+        let layout = WorkspaceLayout::new(config.id)?;
+
+        // Auto-heal registry if workspace was moved
+        if let Ok(mut registry) = WorkspaceRegistry::load() {
+            let needs_update = registry
+                .get(config.id)
+                .is_none_or(|entry| entry.original_path != root);
+
+            if needs_update {
+                registry.register(
+                    config.id,
+                    WorkspaceEntry {
+                        original_path: root.clone(),
+                        name: root
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("workspace")
+                            .to_string(),
+                        created_at: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |d| d.as_secs()),
+                    },
+                );
+                drop(registry.save());
+            }
+        }
+
+        let signer = Self::load_signer_static()?;
+        let storage = Self::storage_from_layout(&layout)?;
         let subduction = Box::pin(subduction::hydrate(signer, storage)).await?;
 
-        Ok(Self { root, subduction })
+        Ok(Self {
+            root,
+            config,
+            layout,
+            subduction,
+        })
     }
 
     /// Open an existing workspace without initializing Subduction.
@@ -186,28 +273,22 @@ impl Darn {
     /// Returns an error if no workspace is found.
     pub fn open_without_subduction(path: &Path) -> Result<UnopenedDarn, NotAWorkspace> {
         let root = Self::find_root(path)?;
-        Ok(UnopenedDarn { root })
+        let config = DarnConfig::load(&root).map_err(|_| NotAWorkspace)?;
+        let layout = WorkspaceLayout::new(config.id).map_err(|_| NotAWorkspace)?;
+        Ok(UnopenedDarn {
+            root,
+            config,
+            layout,
+        })
     }
 
     /// Find the workspace root by walking up the directory tree.
     ///
     /// # Errors
     ///
-    /// Returns an error if no `.darn/` directory is found.
+    /// Returns an error if no `.darn` file is found.
     pub fn find_root(start: &Path) -> Result<PathBuf, NotAWorkspace> {
-        let mut current = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
-
-        loop {
-            let darn_dir = current.join(DARN_DIR);
-            if darn_dir.is_dir() {
-                return Ok(current);
-            }
-
-            match current.parent() {
-                Some(parent) => current = parent.to_path_buf(),
-                None => return Err(NotAWorkspace),
-            }
-        }
+        DarnConfig::find_root(start).map_err(|_| NotAWorkspace)
     }
 
     /// Get the workspace root directory.
@@ -216,16 +297,22 @@ impl Darn {
         &self.root
     }
 
-    /// Get the `.darn/` directory path.
+    /// Get the loaded `.darn` config.
     #[must_use]
-    pub fn darn_dir(&self) -> PathBuf {
-        self.root.join(DARN_DIR)
+    pub const fn config(&self) -> &DarnConfig {
+        &self.config
     }
 
-    /// Get the storage directory path.
+    /// Get the workspace layout (centralized storage paths).
+    #[must_use]
+    pub const fn layout(&self) -> &WorkspaceLayout {
+        &self.layout
+    }
+
+    /// Get the storage directory path (`~/.config/darn/workspaces/<id>/storage/`).
     #[must_use]
     pub fn storage_dir(&self) -> PathBuf {
-        self.darn_dir().join(STORAGE_DIR)
+        self.layout.storage_dir()
     }
 
     /// Get the Subduction instance.
@@ -240,11 +327,11 @@ impl Darn {
     ///
     /// Returns an error if the signer cannot be loaded.
     pub fn load_signer(&self) -> Result<MemorySigner, SignerLoadError> {
-        Self::load_signer_from(&self.root)
+        Self::load_signer_static()
     }
 
     /// Load the global signer (static helper).
-    fn load_signer_from(_root: &Path) -> Result<MemorySigner, SignerLoadError> {
+    fn load_signer_static() -> Result<MemorySigner, SignerLoadError> {
         let signer_dir = config::global_signer_dir()?;
         Ok(signer::load(&signer_dir)?)
     }
@@ -259,16 +346,15 @@ impl Darn {
         Ok(signer::peer_id(&signer_dir)?)
     }
 
-    /// Create storage from root path.
-    fn storage_from(root: &Path) -> Result<FsStorage, StorageError> {
-        let storage_dir = root.join(DARN_DIR).join(STORAGE_DIR);
-        FsStorage::new(storage_dir).map_err(StorageError)
+    /// Create storage from a workspace layout.
+    fn storage_from_layout(layout: &WorkspaceLayout) -> Result<FsStorage, StorageError> {
+        FsStorage::new(layout.storage_dir()).map_err(StorageError)
     }
 
-    /// Get the manifest file path.
+    /// Get the manifest file path (`~/.config/darn/workspaces/<id>/manifest.json`).
     #[must_use]
     pub fn manifest_path(&self) -> PathBuf {
-        self.darn_dir().join(MANIFEST_FILE)
+        self.layout.manifest_path()
     }
 
     /// Load the manifest from disk.
@@ -297,7 +383,7 @@ impl Darn {
     ///
     /// Returns an error if the storage cannot be initialized.
     pub fn storage(&self) -> Result<FsStorage, StorageError> {
-        FsStorage::new(self.storage_dir()).map_err(StorageError)
+        Self::storage_from_layout(&self.layout)
     }
 
     /// Refreshes a single tracked file if it has changed.
@@ -1207,6 +1293,8 @@ impl Darn {
 #[derive(Debug)]
 pub struct InitializedDarn {
     root: PathBuf,
+    config: DarnConfig,
+    layout: WorkspaceLayout,
 }
 
 impl InitializedDarn {
@@ -1216,10 +1304,22 @@ impl InitializedDarn {
         &self.root
     }
 
-    /// Get the `.darn/` directory path.
+    /// Get the loaded `.darn` config.
     #[must_use]
-    pub fn darn_dir(&self) -> PathBuf {
-        self.root.join(DARN_DIR)
+    pub const fn config(&self) -> &DarnConfig {
+        &self.config
+    }
+
+    /// Get the workspace layout (centralized storage paths).
+    #[must_use]
+    pub const fn layout(&self) -> &WorkspaceLayout {
+        &self.layout
+    }
+
+    /// Get the manifest file path (`~/.config/darn/workspaces/<id>/manifest.json`).
+    #[must_use]
+    pub fn manifest_path(&self) -> PathBuf {
+        self.layout.manifest_path()
     }
 
     /// Get the peer ID from the global signer.
@@ -1240,6 +1340,8 @@ impl InitializedDarn {
 #[derive(Debug)]
 pub struct UnopenedDarn {
     root: PathBuf,
+    config: DarnConfig,
+    layout: WorkspaceLayout,
 }
 
 impl UnopenedDarn {
@@ -1249,22 +1351,28 @@ impl UnopenedDarn {
         &self.root
     }
 
-    /// Get the `.darn/` directory path.
+    /// Get the loaded `.darn` config.
     #[must_use]
-    pub fn darn_dir(&self) -> PathBuf {
-        self.root.join(DARN_DIR)
+    pub const fn config(&self) -> &DarnConfig {
+        &self.config
     }
 
-    /// Get the storage directory path.
+    /// Get the workspace layout (centralized storage paths).
+    #[must_use]
+    pub const fn layout(&self) -> &WorkspaceLayout {
+        &self.layout
+    }
+
+    /// Get the storage directory path (`~/.config/darn/workspaces/<id>/storage/`).
     #[must_use]
     pub fn storage_dir(&self) -> PathBuf {
-        self.darn_dir().join(STORAGE_DIR)
+        self.layout.storage_dir()
     }
 
-    /// Get the manifest file path.
+    /// Get the manifest file path (`~/.config/darn/workspaces/<id>/manifest.json`).
     #[must_use]
     pub fn manifest_path(&self) -> PathBuf {
-        self.darn_dir().join(MANIFEST_FILE)
+        self.layout.manifest_path()
     }
 
     /// Load the manifest from disk.
@@ -1303,8 +1411,8 @@ impl UnopenedDarn {
     ///
     /// Returns an error if initialization fails.
     pub fn subduction(&self) -> Result<Arc<DarnSubduction>, SubductionError> {
-        let signer = Darn::load_signer_from(&self.root)?;
-        let storage = Darn::storage_from(&self.root)?;
+        let signer = Darn::load_signer_static()?;
+        let storage = Darn::storage_from_layout(&self.layout)?;
         Ok(subduction::spawn(signer, storage))
     }
 
@@ -1314,11 +1422,13 @@ impl UnopenedDarn {
     ///
     /// Returns an error if hydration fails.
     pub async fn hydrate(self) -> Result<Darn, OpenError> {
-        let signer = Darn::load_signer_from(&self.root)?;
-        let storage = Darn::storage_from(&self.root)?;
+        let signer = Darn::load_signer_static()?;
+        let storage = Darn::storage_from_layout(&self.layout)?;
         let subduction = Box::pin(subduction::hydrate(signer, storage)).await?;
         Ok(Darn {
             root: self.root,
+            config: self.config,
+            layout: self.layout,
             subduction,
         })
     }
@@ -1375,7 +1485,7 @@ impl UnopenedDarn {
     ///
     /// Returns an error if the signer cannot be loaded.
     pub fn load_signer(&self) -> Result<MemorySigner, SignerLoadError> {
-        Darn::load_signer_from(&self.root)
+        Darn::load_signer_static()
     }
 }
 
@@ -1385,6 +1495,14 @@ pub enum OpenError {
     /// Not a workspace.
     #[error(transparent)]
     NotAWorkspace(#[from] NotAWorkspace),
+
+    /// Config directory error.
+    #[error(transparent)]
+    Config(#[from] NoConfigDir),
+
+    /// Dotfile error.
+    #[error(transparent)]
+    Dotfile(#[from] DotfileError),
 
     /// Signer error.
     #[error(transparent)]
@@ -1427,9 +1545,9 @@ pub enum SignerLoadError {
     Signer(#[from] LoadSignerError),
 }
 
-/// No workspace found (no `.darn` directory).
+/// No workspace found (no `.darn` file).
 #[derive(Debug, Clone, Copy, Error)]
-#[error("not a darn workspace (or any parent): .darn directory not found")]
+#[error("not a darn workspace (or any parent): .darn file not found")]
 pub struct NotAWorkspace;
 
 /// Error initializing a workspace.
@@ -1442,6 +1560,14 @@ pub enum InitWorkspaceError {
     /// Config directory error.
     #[error(transparent)]
     Config(#[from] NoConfigDir),
+
+    /// Dotfile error.
+    #[error(transparent)]
+    Dotfile(#[from] DotfileError),
+
+    /// Registry error.
+    #[error(transparent)]
+    Registry(#[from] crate::workspace::registry::RegistryError),
 
     /// Signer error.
     #[error(transparent)]
@@ -1527,6 +1653,7 @@ pub enum SyncError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dotfile::DOTFILE_NAME;
     use std::sync::Once;
 
     /// Ensure a global signer exists before any workspace test runs.
@@ -1550,15 +1677,26 @@ mod tests {
     }
 
     #[test]
-    fn init_creates_darn_directory_structure() {
+    fn init_creates_dotfile_and_centralized_storage() {
         with_temp_home(|temp_dir| {
             let ws = Darn::init(temp_dir).expect("init workspace");
 
-            let darn_dir = temp_dir.join(DARN_DIR);
-            assert!(darn_dir.is_dir(), ".darn directory should exist");
+            // .darn marker file should exist (not a directory)
+            let dotfile = temp_dir.join(DOTFILE_NAME);
+            assert!(dotfile.is_file(), ".darn file should exist");
+            assert!(!dotfile.is_dir(), ".darn should not be a directory");
 
-            let storage_dir = darn_dir.join(STORAGE_DIR);
-            assert!(storage_dir.is_dir(), "storage directory should exist");
+            // Centralized storage should exist
+            assert!(
+                ws.layout().storage_dir().is_dir(),
+                "centralized storage directory should exist"
+            );
+
+            // Manifest should exist in centralized location
+            assert!(
+                ws.manifest_path().is_file(),
+                "manifest should exist in centralized storage"
+            );
 
             assert!(
                 ws.root()
@@ -1588,7 +1726,7 @@ mod tests {
             Darn::init(temp_dir).expect("init");
 
             let ws = Darn::open_without_subduction(temp_dir).expect("open");
-            assert!(ws.darn_dir().is_dir());
+            assert!(ws.storage_dir().is_dir());
         });
     }
 
@@ -1614,7 +1752,7 @@ mod tests {
             std::fs::create_dir_all(&subdir).expect("create subdirs");
 
             let ws = Darn::open_without_subduction(&subdir).expect("open from nested subdir");
-            assert!(ws.darn_dir().is_dir());
+            assert!(ws.storage_dir().is_dir());
         });
     }
 
@@ -1627,7 +1765,7 @@ mod tests {
             std::fs::create_dir_all(&subdir).expect("create subdirs");
 
             let root = Darn::find_root(&subdir).expect("find_root");
-            assert!(root.join(DARN_DIR).is_dir());
+            assert!(root.join(DOTFILE_NAME).is_file());
         });
     }
 
@@ -1645,13 +1783,21 @@ mod tests {
     }
 
     #[test]
-    fn unopened_darn_paths() {
+    fn centralized_storage_paths() {
         with_temp_home(|temp_dir| {
             Darn::init(temp_dir).expect("init");
             let ws = Darn::open_without_subduction(temp_dir).expect("open");
 
-            assert_eq!(ws.darn_dir(), ws.root().join(DARN_DIR));
-            assert_eq!(ws.storage_dir(), ws.darn_dir().join(STORAGE_DIR));
+            // Storage and manifest should be under ~/.config/darn/workspaces/<id>/
+            let workspace_dir = ws.layout().workspace_dir();
+            assert!(
+                ws.storage_dir().starts_with(&workspace_dir),
+                "storage should be under workspace dir"
+            );
+            assert!(
+                ws.manifest_path().starts_with(&workspace_dir),
+                "manifest should be under workspace dir"
+            );
         });
     }
 
@@ -1663,6 +1809,20 @@ mod tests {
             // Root should be the canonicalized temp_dir
             assert!(ws.root().is_absolute());
             assert!(ws.root().is_dir());
+        });
+    }
+
+    #[test]
+    fn config_has_workspace_id() {
+        with_temp_home(|temp_dir| {
+            let ws = Darn::init(temp_dir).expect("init");
+
+            let expected_id = WorkspaceId::from_path(
+                &temp_dir
+                    .canonicalize()
+                    .unwrap_or_else(|_| temp_dir.to_path_buf()),
+            );
+            assert_eq!(ws.config().id, expected_id);
         });
     }
 }

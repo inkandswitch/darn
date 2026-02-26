@@ -29,7 +29,7 @@ use std::{
     time::Duration,
 };
 
-use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer, notify::RecursiveMode};
+use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode, DebounceEventResult, Debouncer};
 use thiserror::Error;
 use tokio::sync::mpsc;
 
@@ -225,19 +225,19 @@ impl Watcher {
                 for event in events {
                     let path = &event.path;
 
-                    // Skip .darn directory
+                    // Skip .darn marker file
                     if path
                         .strip_prefix(root)
-                        .is_ok_and(|p| p.starts_with(".darn"))
+                        .is_ok_and(|p| p.as_os_str() == ".darn")
                     {
                         continue;
                     }
 
-                    // Skip hidden files, but allow .darnignore
-                    if path.file_name().is_some_and(|n| {
-                        let name = n.to_string_lossy();
-                        name.starts_with('.') && name != ".darnignore"
-                    }) {
+                    // Skip hidden files
+                    if path
+                        .file_name()
+                        .is_some_and(|n| n.to_string_lossy().starts_with('.'))
+                    {
                         continue;
                     }
 
@@ -473,12 +473,21 @@ mod tests {
     }
 
     #[test]
-    fn event_processor_ignores_darnignore_patterns() {
+    fn event_processor_ignores_config_patterns() {
+        use crate::dotfile::{AttributeMap, DarnConfig};
+        use crate::workspace::WorkspaceId;
+
         let temp_dir = tempfile::tempdir().expect("create tempdir");
         let manifest = Manifest::new();
 
-        // Create .darnignore
-        std::fs::write(temp_dir.path().join(".darnignore"), "*.log\n").expect("write .darnignore");
+        // Create .darn config with ignore pattern
+        let config = DarnConfig::with_fields(
+            WorkspaceId::from_bytes([1; 16]),
+            sedimentree_core::id::SedimentreeId::new([2; 32]),
+            vec!["*.log".to_string()],
+            AttributeMap::default(),
+        );
+        config.save(temp_dir.path()).expect("save config");
 
         let mut processor =
             WatchEventProcessor::new(temp_dir.path(), &manifest).expect("create processor");

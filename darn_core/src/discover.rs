@@ -163,12 +163,9 @@ fn collect_discovery_candidates(
     let mut candidates = Vec::new();
 
     for entry in walkdir::WalkDir::new(root).into_iter().filter_entry(|e| {
-        // Skip hidden directories and .darn, but allow config files
+        // Skip hidden directories and files (the .darn file is handled by ignore rules)
         let name = e.file_name().to_string_lossy();
-        !name.starts_with('.')
-            || e.depth() == 0
-            || name == ".darnignore"
-            || name == ".darnattributes"
+        !name.starts_with('.') || e.depth() == 0
     }) {
         let entry = match entry {
             Ok(e) => e,
