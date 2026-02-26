@@ -46,7 +46,11 @@ async fn main() -> Result<()> {
     }
 
     match cli.command {
-        Commands::Init { path } => commands::init(&path, out).await,
+        Commands::Init {
+            path,
+            peer,
+            peer_name,
+        } => commands::init(&path, peer.as_deref(), peer_name.as_deref(), out).await,
         Commands::Clone { root_id, path } => commands::clone_cmd(&root_id, &path, out).await,
         Commands::Ignore { patterns } => commands::ignore(&patterns, out),
         Commands::Unignore { patterns } => commands::unignore(&patterns, out),
@@ -93,6 +97,14 @@ enum Commands {
         /// Directory to initialize (defaults to current directory)
         #[arg(default_value = ".")]
         path: std::path::PathBuf,
+
+        /// Add a sync server during init (WebSocket URL, e.g. `ws://localhost:9000`)
+        #[arg(long)]
+        peer: Option<String>,
+
+        /// Name for the peer (defaults to hostname from URL)
+        #[arg(long, requires = "peer")]
+        peer_name: Option<String>,
     },
 
     /// Clone a workspace by root directory ID (syncs from global peers)

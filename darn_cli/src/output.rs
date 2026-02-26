@@ -167,6 +167,27 @@ impl Output {
                 .interact()?)
         }
     }
+
+    // -- Text input --
+
+    /// Prompt for text input. In porcelain mode, returns the default or empty string.
+    pub(crate) fn input(
+        self,
+        prompt: &str,
+        placeholder: &str,
+        default: Option<&str>,
+    ) -> eyre::Result<String> {
+        if self.porcelain {
+            return Ok(default.unwrap_or("").to_string());
+        }
+
+        let mut builder = cliclack::input(prompt).placeholder(placeholder);
+        if let Some(d) = default {
+            builder = builder.default_input(d);
+        }
+        let result: String = builder.interact()?;
+        Ok(result)
+    }
 }
 
 /// Spinner abstraction: wraps `cliclack::ProgressBar` or is a no-op.

@@ -112,8 +112,16 @@ fn format_paths_as_tree(paths: &[std::path::PathBuf]) -> String {
 }
 
 /// Initialize a new `darn` workspace.
+///
+/// After creating the workspace, offers to register a sync server (peer).
+/// In porcelain mode or when `--peer` is provided, skips interactive prompts.
 #[allow(clippy::unused_async)] // Called from async context, keeping signature uniform
-pub(crate) async fn init(path: &Path, out: Output) -> eyre::Result<()> {
+pub(crate) async fn init(
+    path: &Path,
+    peer_url: Option<&str>,
+    peer_name_override: Option<&str>,
+    out: Output,
+) -> eyre::Result<()> {
     out.intro("darn init")?;
 
     // Initialize workspace structure
@@ -130,9 +138,112 @@ pub(crate) async fn init(path: &Path, out: Output) -> eyre::Result<()> {
         out.kv("root_dir_id", &root_dir_url)?;
     }
 
-    out.outro("Ready to sync")?;
+    // Peer registration
+    let peer_added = if let Some(url) = peer_url {
+        // Non-interactive: --peer flag provided
+        let name = peer_name_override.map_or_else(|| peer_name_from_url(url), String::from);
+        add_peer_during_init(&name, url, out)?
+    } else if !out.is_porcelain() {
+        // Interactive: prompt the user
+        prompt_peer_during_init(out)?
+    } else {
+        false
+    };
+
+    if peer_added {
+        out.outro(&format!("Ready to sync — run {}", cmd("darn sync")))?;
+    } else {
+        out.outro(&format!(
+            "Ready — add a server with {}",
+            cmd("darn peer add <name> <url>")
+        ))?;
+    }
 
     Ok(())
+}
+
+/// Derive a peer name from a WebSocket URL.
+///
+/// Strips protocol, port, and path to produce a short hostname-based name.
+/// Falls back to "server" if parsing fails.
+fn peer_name_from_url(url: &str) -> String {
+    let host = url
+        .strip_prefix("wss://")
+        .or_else(|| url.strip_prefix("ws://"))
+        .unwrap_or(url);
+
+    // Take just the hostname (strip port and path)
+    let host = host.split(':').next().unwrap_or(host);
+    let host = host.split('/').next().unwrap_or(host);
+
+    if host.is_empty() {
+        "server".to_string()
+    } else {
+        // Replace dots with hyphens for a valid peer name
+        host.replace('.', "-")
+    }
+}
+
+/// Add a peer during init (non-interactive).
+fn add_peer_during_init(name: &str, url: &str, out: Output) -> eyre::Result<bool> {
+    let peer_name = PeerName::new(name)?;
+
+    // Check if already exists
+    if darn_core::peer::get_peer(&peer_name)?.is_some() {
+        out.remark(&format!("Peer already exists: {name}"))?;
+        return Ok(true);
+    }
+
+    let peer = Peer::discover(peer_name, url.to_string());
+    darn_core::peer::add_peer(&peer)?;
+
+    if out.is_porcelain() {
+        out.kv("peer_name", name)?;
+        out.kv("peer_url", url)?;
+    } else {
+        out.success(&format!("Added server: {name} ({url})"))?;
+    }
+
+    Ok(true)
+}
+
+/// Interactively prompt the user to add a sync server during init.
+fn prompt_peer_during_init(out: Output) -> eyre::Result<bool> {
+    let existing_peers = darn_core::peer::list_peers()?;
+
+    let prompt = if existing_peers.is_empty() {
+        "Add a sync server?"
+    } else {
+        let names: Vec<_> = existing_peers.iter().map(|p| p.name.as_str()).collect();
+        cliclack::log::remark(format!(
+            "Existing server(s): {}",
+            names.join(", ")
+        ))?;
+        "Add another sync server?"
+    };
+
+    if !out.confirm(prompt, existing_peers.is_empty())? {
+        return Ok(!existing_peers.is_empty());
+    }
+
+    let url: String = out.input(
+        "Server URL",
+        "ws://localhost:9000",
+        None,
+    )?;
+
+    if url.is_empty() {
+        return Ok(!existing_peers.is_empty());
+    }
+
+    let default_name = peer_name_from_url(&url);
+    let name: String = out.input(
+        "Server name",
+        &default_name,
+        Some(&default_name),
+    )?;
+
+    add_peer_during_init(&name, &url, out)
 }
 
 /// Clone a workspace by root directory ID from global peers.
