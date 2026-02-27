@@ -52,11 +52,10 @@ class Darn < Formula
     # Verify the binary runs and prints version
     assert_match version.to_s, shell_output("#{bin}/darn --version")
 
-    # Verify init creates a .darn directory
+    # Verify init creates a .darn marker file (porcelain mode avoids TTY requirement)
     mkdir "test-workspace" do
-      system bin/"darn", "init"
-      assert_predicate Pathname.pwd/".darn", :directory?
-      assert_predicate Pathname.pwd/".darn"/"manifest.json", :file?
+      system bin/"darn", "--porcelain", "init"
+      assert_predicate Pathname.pwd/".darn", :file?
     end
   end
 end
