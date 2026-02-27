@@ -69,6 +69,7 @@ impl PartialEq for DarnConnection {
             (Self::WebSocket(a), Self::WebSocket(b)) => a == b,
             #[cfg(feature = "iroh")]
             (Self::Iroh(a), Self::Iroh(b)) => a == b,
+            #[cfg(feature = "iroh")]
             _ => false,
         }
     }

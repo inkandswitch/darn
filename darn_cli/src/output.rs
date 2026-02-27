@@ -177,6 +177,7 @@ impl Output {
     /// # Errors
     ///
     /// Returns an error if the interactive prompt fails.
+    #[cfg(feature = "iroh")]
     pub(crate) fn select<T: Clone + Eq>(
         self,
         prompt: &str,

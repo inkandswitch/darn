@@ -17,7 +17,8 @@ name = "darn"
 path = "src/main.rs"
 
 [features]
-default = ["native-tls"]
+default = ["iroh", "native-tls"]
+iroh = ["darn_core/iroh"]
 native-tls = ["darn_core/native-tls"]
 rustls = ["darn_core/rustls"]
 

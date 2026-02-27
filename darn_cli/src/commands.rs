@@ -1951,6 +1951,7 @@ async fn track_single_file(
 /// Add a peer.
 ///
 /// Interactive when flags are omitted; fully flag-driven in porcelain mode.
+#[allow(unused_variables, clippy::needless_pass_by_value)]
 pub(crate) fn peer_add(
     name: Option<String>,
     websocket: Option<String>,
@@ -1976,33 +1977,11 @@ pub(crate) fn peer_add(
     // -- Address --
     let address = match (websocket, iroh) {
         (Some(url), _) => PeerAddress::websocket(url),
+        #[cfg(feature = "iroh")]
         (_, Some(node_id)) => PeerAddress::iroh(node_id, relay),
-        (None, None) => {
-            let transport: &str = out.select(
-                "Transport",
-                &[
-                    (
-                        "websocket",
-                        "WebSocket",
-                        "relay connection (ws:// or wss://)",
-                    ),
-                    ("iroh", "Iroh", "direct QUIC (NAT-traversing)"),
-                ],
-            )?;
-            if transport == "iroh" {
-                let node_id = out.input("Node ID", "base32 public key", None)?;
-                let relay = out.input(
-                    "Relay URL (optional, press Enter to skip)",
-                    "https://relay.example.com",
-                    None,
-                )?;
-                let relay = if relay.is_empty() { None } else { Some(relay) };
-                PeerAddress::iroh(node_id, relay)
-            } else {
-                let url = out.input("URL", "ws://relay.example.com:9000", None)?;
-                PeerAddress::websocket(url)
-            }
-        }
+        #[cfg(not(feature = "iroh"))]
+        (_, Some(_)) => eyre::bail!("iroh support is not enabled (rebuild with --features iroh)"),
+        (None, None) => peer_add_interactive(out)?,
     };
 
     // -- Peer ID (optional, for known mode) --
@@ -2043,6 +2022,42 @@ pub(crate) fn peer_add(
     }
 
     Ok(())
+}
+
+/// Interactive transport selection for `peer add`.
+#[cfg(feature = "iroh")]
+fn peer_add_interactive(out: Output) -> eyre::Result<PeerAddress> {
+    let transport: &str = out.select(
+        "Transport",
+        &[
+            (
+                "websocket",
+                "WebSocket",
+                "relay connection (ws:// or wss://)",
+            ),
+            ("iroh", "Iroh", "direct QUIC (NAT-traversing)"),
+        ],
+    )?;
+    if transport == "iroh" {
+        let node_id = out.input("Node ID", "base32 public key", None)?;
+        let relay = out.input(
+            "Relay URL (optional, press Enter to skip)",
+            "https://relay.example.com",
+            None,
+        )?;
+        let relay = if relay.is_empty() { None } else { Some(relay) };
+        Ok(PeerAddress::iroh(node_id, relay))
+    } else {
+        let url = out.input("URL", "ws://relay.example.com:9000", None)?;
+        Ok(PeerAddress::websocket(url))
+    }
+}
+
+/// Interactive transport selection for `peer add` (without iroh support).
+#[cfg(not(feature = "iroh"))]
+fn peer_add_interactive(out: Output) -> eyre::Result<PeerAddress> {
+    let url = out.input("URL", "ws://relay.example.com:9000", None)?;
+    Ok(PeerAddress::websocket(url))
 }
 
 /// List known peers.
