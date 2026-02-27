@@ -196,38 +196,36 @@ jobs:
       - name: Update formula
         run: |
           macos_arm_sha=$(grep "darn-macos-aarch64-" /tmp/SHA256SUMS | cut -d' ' -f1)
+          macos_x64_sha=$(grep "darn-macos-x86_64-" /tmp/SHA256SUMS | cut -d' ' -f1)
           linux_x64_musl_sha=$(grep "darn-linux-x86_64-musl-" /tmp/SHA256SUMS | cut -d' ' -f1)
           linux_arm_musl_sha=$(grep "darn-linux-aarch64-musl-" /tmp/SHA256SUMS | cut -d' ' -f1)
 
           echo "macOS ARM:       $macos_arm_sha"
+          echo "macOS x64:       $macos_x64_sha"
           echo "Linux x64 musl:  $linux_x64_musl_sha"
           echo "Linux ARM musl:  $linux_arm_musl_sha"
 
-          # Update version
           sed -i "s/^  version \".*\"/  version \"${VERSION}\"/" Formula/darn.rb
 
-          # Update macOS ARM SHA
-          # Match the sha256 line inside the on_arm block (first sha256 in file)
           python3 -c "
-          import re, sys
+          import re
 
           with open('Formula/darn.rb') as f:
               content = f.read()
 
-          # Replace SHA256 values by their surrounding context
           def replace_sha(content, url_pattern, new_sha):
-              # Find url line, then replace the next sha256 line
               lines = content.split('\n')
               for i, line in enumerate(lines):
                   if url_pattern in line:
                       for j in range(i+1, min(i+3, len(lines))):
                           if 'sha256' in lines[j]:
-                              lines[j] = re.sub(r'sha256 \"[a-f0-9]+\"', f'sha256 \"{new_sha}\"', lines[j])
+                              lines[j] = re.sub(r'sha256 \"[^\"]+\"', f'sha256 \"{new_sha}\"', lines[j])
                               break
                       break
               return '\n'.join(lines)
 
           content = replace_sha(content, 'darn-macos-aarch64', '$macos_arm_sha')
+          content = replace_sha(content, 'darn-macos-x86_64', '$macos_x64_sha')
           content = replace_sha(content, 'darn-linux-aarch64-musl', '$linux_arm_musl_sha')
           content = replace_sha(content, 'darn-linux-x86_64-musl', '$linux_x64_musl_sha')
 
