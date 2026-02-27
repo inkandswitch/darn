@@ -16,7 +16,6 @@ use std::{
 };
 
 use console::Style;
-use futures::StreamExt as _;
 use darn_core::{
     darn::Darn,
     directory::{Directory, entry::EntryType, sedimentree_id_to_url},
@@ -29,6 +28,7 @@ use darn_core::{
     sync_progress::SyncProgressEvent,
     watcher::{WatchEvent, WatchEventProcessor, Watcher, WatcherConfig},
 };
+use futures::StreamExt as _;
 use sedimentree_core::id::SedimentreeId;
 use subduction_core::{peer::id::PeerId, storage::traits::Storage};
 use tokio_util::sync::CancellationToken;
@@ -294,7 +294,9 @@ pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path, out: Output) -> ey
     out.success(&format!("Initialized workspace at {}", root.display()))?;
 
     // Step 5: Open workspace with Subduction
+    let spinner = out.spinner("Loading workspace...");
     let darn = Darn::open(&root).await?;
+    spinner.stop("Workspace loaded");
 
     // Step 6: Connect to all peers (but don't sync yet - we'll sync specific sedimentrees)
     let spinner = out.spinner("Connecting to peers...");
@@ -371,7 +373,10 @@ pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path, out: Output) -> ey
             let subduction = &subduction;
 
             async move {
-                match subduction.sync_all(entry.sedimentree_id, true, timeout).await {
+                match subduction
+                    .sync_all(entry.sedimentree_id, true, timeout)
+                    .await
+                {
                     Ok(sync_result) => {
                         for (success, stats, _errors) in sync_result.values() {
                             if *success {
@@ -426,7 +431,13 @@ pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path, out: Output) -> ey
         let sed_digest =
             sedimentree::compute_digest(darn.subduction(), entry.sedimentree_id).await?;
 
-        staged.stage_create(&file, entry.path.clone(), entry.sedimentree_id, file_type, sed_digest)?;
+        staged.stage_create(
+            &file,
+            entry.path.clone(),
+            entry.sedimentree_id,
+            file_type,
+            sed_digest,
+        )?;
         file_count += 1;
 
         stage_progress.inc(1);
@@ -725,8 +736,10 @@ pub(crate) fn tree(out: Output) -> eyre::Result<()> {
 
 /// Show stats for a tracked file.
 pub(crate) async fn stat(target: &str, out: Output) -> eyre::Result<()> {
+    let spinner = out.spinner("Loading workspace...");
     let darn = Darn::open(Path::new(".")).await?;
     let manifest = darn.load_manifest()?;
+    spinner.clear();
     let root = darn.root();
 
     // Try to find by path first, then by Sedimentree ID
@@ -893,8 +906,10 @@ pub(crate) async fn sync_cmd(
 
     out.intro("darn sync")?;
 
+    let spinner = out.spinner("Loading workspace...");
     let darn = Darn::open(Path::new(".")).await?;
     let mut manifest = darn.load_manifest()?;
+    spinner.stop("Workspace loaded");
 
     // Phase 1: Scan for new files (fast, no side effects)
     let spinner = out.spinner("Scanning for new files...");
@@ -1111,10 +1126,10 @@ async fn continue_sync(
                         );
                     } else {
                         let green = Style::new().green();
+                        let file_count = manifest.len();
                         out.success(&format!(
-                            "{} synced {} files (▼{} ▲{})",
+                            "{} synced {file_count} file(s) (▼{} ▲{})",
                             green.apply_to(&peer.name),
-                            summary.sedimentrees_synced,
                             summary.total_received(),
                             summary.total_sent()
                         ))?;
@@ -1506,13 +1521,15 @@ pub(crate) async fn watch(
     no_track: bool,
     out: Output,
 ) -> eyre::Result<()> {
+    out.intro("darn watch")?;
+
+    let spinner = out.spinner("Loading workspace...");
     let darn = Darn::open(Path::new(".")).await?;
     let root = darn.root().to_path_buf();
     let mut manifest = darn.load_manifest()?;
+    spinner.stop("Workspace loaded");
 
     info!(root = %root.display(), ?sync_interval, no_track, "Starting watch");
-
-    out.intro("darn watch")?;
     out.info(&format!("Watching {}", root.display()))?;
 
     if !no_track {
@@ -1543,6 +1560,28 @@ pub(crate) async fn watch(
 
     watcher.start()?;
     out.success("Watcher started")?;
+
+    // Start Iroh accept loop for incoming peer-to-peer connections.
+    // We wrap `darn` in an Arc so the accept loop can share it.
+    let darn = std::sync::Arc::new(darn);
+
+    #[cfg(feature = "iroh")]
+    let iroh_cancel = tokio_util::sync::CancellationToken::new();
+    #[cfg(feature = "iroh")]
+    let _iroh_accept_handle = {
+        let iroh_cancel_clone = iroh_cancel.clone();
+        let darn_accept = darn.clone();
+        let handle = tokio::spawn(async move {
+            darn_accept.accept_iroh_connections(iroh_cancel_clone).await;
+        });
+        let iroh_addr = darn.iroh_addr();
+        out.remark(&format!("Iroh node ID: {}", darn.iroh_public_key()))?;
+        for relay in iroh_addr.relay_urls() {
+            out.remark(&format!("Iroh relay:   {relay}"))?;
+        }
+        handle
+    };
+
     out.remark("Press Ctrl+C to stop")?;
     if !out.is_porcelain() {
         println!(); // Blank line before events
@@ -1935,6 +1974,8 @@ pub(crate) async fn watch(
     }
 
     watcher.stop();
+    #[cfg(feature = "iroh")]
+    iroh_cancel.cancel();
     out.outro("Watch stopped")?;
 
     Ok(())
@@ -2206,18 +2247,24 @@ pub(crate) fn info(out: Output) -> eyre::Result<()> {
         Err(e) => format!("(error: {e})"),
     };
 
+    let iroh_node_id_str = match darn_core::signer::iroh_node_id_string(&signer_dir) {
+        Ok(id) => id,
+        Err(e) => format!("(error: {e})"),
+    };
+
     if out.is_porcelain() {
-        info_porcelain(&config_dir, &peer_id_str);
+        info_porcelain(&config_dir, &peer_id_str, &iroh_node_id_str);
         return Ok(());
     }
 
-    info_human(out, &config_dir, &peer_id_str)
+    info_human(out, &config_dir, &peer_id_str, &iroh_node_id_str)
 }
 
 /// Porcelain output for `darn info`.
-fn info_porcelain(config_dir: &Path, peer_id_str: &str) {
+fn info_porcelain(config_dir: &Path, peer_id_str: &str, iroh_node_id_str: &str) {
     println!("config_dir\t{}", config_dir.display());
     println!("peer_id\t{peer_id_str}");
+    println!("iroh_node_id\t{iroh_node_id_str}");
 
     // Peers
     if let Ok(peers) = darn_core::peer::list_peers() {
@@ -2274,25 +2321,33 @@ fn info_porcelain(config_dir: &Path, peer_id_str: &str) {
 }
 
 /// Human-friendly output for `darn info`.
-fn info_human(out: Output, config_dir: &Path, peer_id_str: &str) -> eyre::Result<()> {
+fn info_human(
+    out: Output,
+    config_dir: &Path,
+    peer_id_str: &str,
+    iroh_node_id_str: &str,
+) -> eyre::Result<()> {
     let dim = Style::new().dim();
 
     out.intro("darn info")?;
 
     let global_table = format!(
         "\
-┌─────────────┬──────────────────────────────────────────────────────────────┐
-│ {:^11} │ {:^60} │
-├─────────────┼──────────────────────────────────────────────────────────────┤
-│ {:<11} │ {:<60} │
-│ {:<11} │ {:<60} │
-└─────────────┴──────────────────────────────────────────────────────────────┘",
+┌──────────────┬──────────────────────────────────────────────────────────────┐
+│ {:^12} │ {:^60} │
+├──────────────┼──────────────────────────────────────────────────────────────┤
+│ {:<12} │ {:<60} │
+│ {:<12} │ {:<60} │
+│ {:<12} │ {:<60} │
+└──────────────┴──────────────────────────────────────────────────────────────┘",
         "Field",
         "Value",
         "Config",
         truncate_path(&config_dir.display().to_string(), 60),
         "Peer ID",
-        peer_id_str
+        peer_id_str,
+        "Iroh Node ID",
+        truncate_str(iroh_node_id_str, 60),
     );
     cliclack::note("Global Configuration", global_table)?;
 

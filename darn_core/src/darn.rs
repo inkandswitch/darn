@@ -52,6 +52,7 @@ use refresh_diff::RefreshDiff;
 /// - Centralized storage under `~/.config/darn/workspaces/<id>/`
 /// - Automerge document storage via Subduction
 /// - Peer configuration for sync
+/// - An Iroh endpoint for peer-to-peer QUIC transport (when the `iroh` feature is enabled)
 #[derive(Debug)]
 pub struct Darn {
     /// The root directory of the workspace (contains `.darn` file).
@@ -65,6 +66,14 @@ pub struct Darn {
 
     /// The Subduction instance for this workspace.
     subduction: Arc<DarnSubduction>,
+
+    /// Long-lived Iroh endpoint for QUIC transport.
+    ///
+    /// Created once at open time using the persistent Ed25519 signing key,
+    /// giving this node a stable Iroh node ID. Used for both outgoing
+    /// connections and accepting incoming ones.
+    #[cfg(feature = "iroh")]
+    iroh_endpoint: iroh::Endpoint,
 }
 
 impl Darn {
@@ -260,11 +269,26 @@ impl Darn {
         let storage = Self::storage_from_layout(&layout)?;
         let subduction = Box::pin(subduction::hydrate(signer, storage)).await?;
 
+        #[cfg(feature = "iroh")]
+        let iroh_endpoint = {
+            let signer_dir = config::global_signer_dir()?;
+            let key_bytes = signer::load_key_bytes(&signer_dir).map_err(SignerLoadError::from)?;
+            let secret_key = iroh::SecretKey::from_bytes(&key_bytes);
+            iroh::Endpoint::builder()
+                .secret_key(secret_key)
+                .alpns(vec![subduction_iroh::ALPN.to_vec()])
+                .bind()
+                .await
+                .map_err(|e| OpenError::IrohBind(e.to_string()))?
+        };
+
         Ok(Self {
             root,
             config,
             layout,
             subduction,
+            #[cfg(feature = "iroh")]
+            iroh_endpoint,
         })
     }
 
@@ -348,6 +372,34 @@ impl Darn {
     pub fn peer_id(&self) -> Result<PeerId, SignerLoadError> {
         let signer_dir = config::global_signer_dir()?;
         Ok(signer::peer_id(&signer_dir)?)
+    }
+
+    /// Get a reference to the long-lived Iroh endpoint.
+    ///
+    /// This endpoint uses the persistent Ed25519 signing key, giving
+    /// this node a stable Iroh node ID across restarts. Use it for
+    /// both outgoing connections and accepting incoming ones.
+    #[cfg(feature = "iroh")]
+    #[must_use]
+    pub const fn iroh_endpoint(&self) -> &iroh::Endpoint {
+        &self.iroh_endpoint
+    }
+
+    /// Get the Iroh public key derived from the persistent signing key.
+    ///
+    /// This is the public identity other Iroh peers use to address
+    /// this node.
+    #[cfg(feature = "iroh")]
+    #[must_use]
+    pub fn iroh_public_key(&self) -> iroh::PublicKey {
+        self.iroh_endpoint.secret_key().public()
+    }
+
+    /// Get the full Iroh endpoint address (public key + relay URL + direct addresses).
+    #[cfg(feature = "iroh")]
+    #[must_use]
+    pub fn iroh_addr(&self) -> iroh::EndpointAddr {
+        self.iroh_endpoint.addr()
     }
 
     /// Create storage from a workspace layout.
@@ -1210,16 +1262,10 @@ impl Darn {
             addr = addr.with_relay_url(parsed);
         }
 
-        let endpoint = iroh::Endpoint::builder()
-            .alpns(vec![subduction_iroh::ALPN.to_vec()])
-            .bind()
-            .await
-            .map_err(SyncError::IrohBind)?;
-
         let signer = self.load_signer()?;
 
         let result = subduction_iroh::client::connect(
-            &endpoint,
+            &self.iroh_endpoint,
             addr,
             Self::DEFAULT_TIMEOUT,
             TimeoutTokio,
@@ -1245,6 +1291,89 @@ impl Darn {
             .map(crate::subduction::DarnConnection::Iroh);
 
         Ok((authenticated, actual_peer_id))
+    }
+
+    /// Accept incoming Iroh connections in a loop until cancelled.
+    ///
+    /// Each accepted connection is authenticated via the Subduction handshake
+    /// and registered with the Subduction instance, enabling bidirectional sync.
+    /// Background listener/sender tasks are spawned for each connection.
+    ///
+    /// The loop runs until the `cancel` token is triggered (e.g., on Ctrl+C).
+    #[cfg(feature = "iroh")]
+    pub async fn accept_iroh_connections(&self, cancel: CancellationToken) {
+        use subduction_core::connection::{handshake::Audience, nonce_cache::NonceCache};
+
+        let signer = match self.load_signer() {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("Failed to load signer for Iroh accept loop: {e}");
+                return;
+            }
+        };
+
+        let our_peer_id: PeerId = signer.verifying_key().into();
+        let nonce_cache = NonceCache::default();
+        let handshake_max_drift = Duration::from_secs(600);
+
+        // Clients in discovery mode derive their audience from the Iroh node ID
+        // string (the service name for PeerAddress::Iroh). We must accept that
+        // same audience on the server side.
+        let iroh_public_key_str = self.iroh_endpoint.secret_key().public().to_string();
+        let discovery_audience = Audience::discover(iroh_public_key_str.as_bytes());
+
+        tracing::info!(
+            iroh_public_key = %iroh_public_key_str,
+            "Iroh accept loop started"
+        );
+
+        loop {
+            tokio::select! {
+                () = cancel.cancelled() => {
+                    tracing::info!("Iroh accept loop cancelled");
+                    break;
+                }
+                result = subduction_iroh::server::accept_one(
+                    &self.iroh_endpoint,
+                    Self::DEFAULT_TIMEOUT,
+                    TimeoutTokio,
+                    &signer,
+                    &nonce_cache,
+                    our_peer_id,
+                    Some(discovery_audience),
+                    handshake_max_drift,
+                ) => {
+                    match result {
+                        Ok(accept_result) => {
+                            let peer_id = accept_result.peer_id;
+                            tracing::info!(%peer_id, "Accepted incoming Iroh connection");
+
+                            tokio::spawn(async move {
+                                if let Err(e) = accept_result.listener_task.await {
+                                    tracing::error!(%peer_id, "Iroh listener error: {e:?}");
+                                }
+                            });
+                            tokio::spawn(async move {
+                                if let Err(e) = accept_result.sender_task.await {
+                                    tracing::error!(%peer_id, "Iroh sender error: {e:?}");
+                                }
+                            });
+
+                            let authenticated = accept_result
+                                .authenticated
+                                .map(crate::subduction::DarnConnection::Iroh);
+
+                            if let Err(e) = self.subduction.register(authenticated).await {
+                                tracing::error!(%peer_id, "Failed to register Iroh connection: {e:?}");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Iroh accept error: {e:?}");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Connect to a peer, attach to Subduction, and perform a full sync.
@@ -1559,11 +1688,27 @@ impl UnopenedDarn {
         let signer = Darn::load_signer_static()?;
         let storage = Darn::storage_from_layout(&self.layout)?;
         let subduction = Box::pin(subduction::hydrate(signer, storage)).await?;
+
+        #[cfg(feature = "iroh")]
+        let iroh_endpoint = {
+            let signer_dir = config::global_signer_dir()?;
+            let key_bytes = signer::load_key_bytes(&signer_dir).map_err(SignerLoadError::from)?;
+            let secret_key = iroh::SecretKey::from_bytes(&key_bytes);
+            iroh::Endpoint::builder()
+                .secret_key(secret_key)
+                .alpns(vec![subduction_iroh::ALPN.to_vec()])
+                .bind()
+                .await
+                .map_err(|e| OpenError::IrohBind(e.to_string()))?
+        };
+
         Ok(Darn {
             root: self.root,
             config: self.config,
             layout: self.layout,
             subduction,
+            #[cfg(feature = "iroh")]
+            iroh_endpoint,
         })
     }
 
@@ -1633,9 +1778,8 @@ struct RefreshCandidate {
 /// Updated digests from a parallel file refresh.
 struct RefreshedDigests {
     file_system: sedimentree_core::crypto::digest::Digest<content_hash::FileSystemContent>,
-    sedimentree: sedimentree_core::crypto::digest::Digest<
-        sedimentree_core::sedimentree::Sedimentree,
-    >,
+    sedimentree:
+        sedimentree_core::crypto::digest::Digest<sedimentree_core::sedimentree::Sedimentree>,
 }
 
 /// Result from refreshing a single file in parallel.
@@ -1671,6 +1815,11 @@ pub enum OpenError {
     /// Subduction initialization error.
     #[error(transparent)]
     Init(#[from] SubductionInitError),
+
+    /// Iroh endpoint failed to bind.
+    #[cfg(feature = "iroh")]
+    #[error("iroh endpoint bind failed: {0}")]
+    IrohBind(String),
 }
 
 /// Error creating Subduction instance.

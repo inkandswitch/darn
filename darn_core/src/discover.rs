@@ -560,10 +560,7 @@ where
                             stored.discovered.relative_path.display()
                         );
                         if let Ok(mut errs) = errors.lock() {
-                            errs.push((
-                                stored.discovered.relative_path.clone(),
-                                e.to_string(),
-                            ));
+                            errs.push((stored.discovered.relative_path.clone(), e.to_string()));
                         }
                         continue;
                     }
