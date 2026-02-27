@@ -2247,24 +2247,31 @@ pub(crate) fn info(out: Output) -> eyre::Result<()> {
         Err(e) => format!("(error: {e})"),
     };
 
-    let iroh_node_id_str = match darn_core::signer::iroh_node_id_string(&signer_dir) {
-        Ok(id) => id,
-        Err(e) => format!("(error: {e})"),
-    };
+    #[cfg(feature = "iroh")]
+    let iroh_node_id_str: Option<String> =
+        Some(match darn_core::signer::iroh_node_id_string(&signer_dir) {
+            Ok(id) => id,
+            Err(e) => format!("(error: {e})"),
+        });
+
+    #[cfg(not(feature = "iroh"))]
+    let iroh_node_id_str: Option<String> = None;
 
     if out.is_porcelain() {
-        info_porcelain(&config_dir, &peer_id_str, &iroh_node_id_str);
+        info_porcelain(&config_dir, &peer_id_str, iroh_node_id_str.as_deref());
         return Ok(());
     }
 
-    info_human(out, &config_dir, &peer_id_str, &iroh_node_id_str)
+    info_human(out, &config_dir, &peer_id_str, iroh_node_id_str.as_deref())
 }
 
 /// Porcelain output for `darn info`.
-fn info_porcelain(config_dir: &Path, peer_id_str: &str, iroh_node_id_str: &str) {
+fn info_porcelain(config_dir: &Path, peer_id_str: &str, iroh_node_id_str: Option<&str>) {
     println!("config_dir\t{}", config_dir.display());
     println!("peer_id\t{peer_id_str}");
-    println!("iroh_node_id\t{iroh_node_id_str}");
+    if let Some(iroh_id) = iroh_node_id_str {
+        println!("iroh_node_id\t{iroh_id}");
+    }
 
     // Peers
     if let Ok(peers) = darn_core::peer::list_peers() {
@@ -2325,29 +2332,35 @@ fn info_human(
     out: Output,
     config_dir: &Path,
     peer_id_str: &str,
-    iroh_node_id_str: &str,
+    iroh_node_id_str: Option<&str>,
 ) -> eyre::Result<()> {
     let dim = Style::new().dim();
 
     out.intro("darn info")?;
 
-    let global_table = format!(
+    let mut global_table = format!(
         "\
 ┌──────────────┬──────────────────────────────────────────────────────────────┐
 │ {:^12} │ {:^60} │
 ├──────────────┼──────────────────────────────────────────────────────────────┤
 │ {:<12} │ {:<60} │
-│ {:<12} │ {:<60} │
-│ {:<12} │ {:<60} │
-└──────────────┴──────────────────────────────────────────────────────────────┘",
+│ {:<12} │ {:<60} │",
         "Field",
         "Value",
         "Config",
         truncate_path(&config_dir.display().to_string(), 60),
         "Peer ID",
         peer_id_str,
-        "Iroh Node ID",
-        truncate_str(iroh_node_id_str, 60),
+    );
+    if let Some(iroh_id) = iroh_node_id_str {
+        global_table.push_str(&format!(
+            "\n│ {:<12} │ {:<60} │",
+            "Iroh Node ID",
+            truncate_str(iroh_id, 60),
+        ));
+    }
+    global_table.push_str(
+        "\n└──────────────┴──────────────────────────────────────────────────────────────┘",
     );
     cliclack::note("Global Configuration", global_table)?;
 
