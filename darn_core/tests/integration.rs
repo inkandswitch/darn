@@ -14,7 +14,13 @@ use std::{
     sync::Mutex,
 };
 
-use darn_core::{darn::Darn, file::state::FileState, ignore, staged_update::StagedUpdate};
+use darn_core::{
+    darn::{Darn, NotAWorkspace},
+    file::state::FileState,
+    ignore,
+    staged_update::StagedUpdate,
+    workspace::WorkspaceId,
+};
 use testresult::TestResult;
 
 /// Serializes access to `DARN_CONFIG_DIR` across tests in this binary.
@@ -214,6 +220,75 @@ fn open_nonexistent_workspace_fails() -> TestResult {
     with_env(|env| {
         let result = Darn::open_without_subduction(env.workspace());
         assert!(result.is_err());
+        Ok(())
+    })
+}
+
+#[test]
+fn find_root_from_nested_directory() -> TestResult {
+    with_env(|env| {
+        env.init();
+
+        let subdir = env.workspace().join("a").join("b").join("c");
+        std::fs::create_dir_all(&subdir)?;
+
+        let root = Darn::find_root(&subdir)?;
+        assert!(root.join(".darn").is_file());
+
+        Ok(())
+    })
+}
+
+#[test]
+fn find_root_not_found() -> TestResult {
+    with_env(|env| {
+        let result = Darn::find_root(env.workspace());
+        assert!(matches!(result, Err(NotAWorkspace)));
+
+        Ok(())
+    })
+}
+
+#[test]
+fn centralized_storage_paths() -> TestResult {
+    with_env(|env| {
+        env.init();
+        let ws = Darn::open_without_subduction(env.workspace())?;
+
+        let workspace_dir = ws.layout().workspace_dir();
+        assert!(
+            ws.storage_dir().starts_with(&workspace_dir),
+            "storage should be under workspace dir"
+        );
+        assert!(
+            ws.manifest_path().starts_with(&workspace_dir),
+            "manifest should be under workspace dir"
+        );
+
+        Ok(())
+    })
+}
+
+#[test]
+fn root_is_absolute_and_exists() -> TestResult {
+    with_env(|env| {
+        let ws = env.init();
+        assert!(ws.root().is_absolute());
+        assert!(ws.root().is_dir());
+
+        Ok(())
+    })
+}
+
+#[test]
+fn config_has_workspace_id() -> TestResult {
+    with_env(|env| {
+        let ws = env.init();
+
+        let canonical = env.workspace().canonicalize()?;
+        let expected_id = WorkspaceId::from_path(&canonical);
+        assert_eq!(ws.config().id, expected_id);
+
         Ok(())
     })
 }
