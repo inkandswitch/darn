@@ -9,7 +9,7 @@
 class Darn < Formula
   desc "CLI for CRDT-backed file sync with automatic conflict resolution"
   homepage "https://github.com/inkandswitch/darn"
-  version "0.3.1"
+  version "0.4.0"
   license any_of: ["Apache-2.0", "MIT"]
 
   on_macos do

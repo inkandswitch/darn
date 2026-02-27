@@ -822,9 +822,9 @@ dependencies = [
 
 [[package]]
 name = "crypto-common"
-version = "0.2.1"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77727bb15fa921304124b128af125e7e3b968275d1b108b379190264f4423710"
+checksum = "211f05e03c7d03754740fd9e585de910a095d6b99f8bcfffdef8319fa02a8331"
 dependencies = [
  "hybrid-array",
 ]
@@ -911,7 +911,7 @@ dependencies = [
 
 [[package]]
 name = "darn_cli"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "assert_cmd",
  "bs58",
@@ -921,7 +921,7 @@ dependencies = [
  "console",
  "darn_core",
  "eyre",
- "future_form",
+ "future_form 0.3.0",
  "getrandom 0.2.17",
  "predicates",
  "sedimentree_core",
@@ -939,14 +939,14 @@ dependencies = [
 
 [[package]]
 name = "darn_core"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "automerge",
  "blake3",
  "bolero",
  "bs58",
  "dirs",
- "future_form",
+ "future_form 0.3.0",
  "futures",
  "getrandom 0.2.17",
  "globset",
@@ -1094,7 +1094,7 @@ checksum = "afa94b64bfc6549e6e4b5a3216f22593224174083da7a90db47e951c4fb31725"
 dependencies = [
  "block-buffer 0.11.0",
  "const-oid 0.10.2",
- "crypto-common 0.2.1",
+ "crypto-common 0.2.0",
 ]
 
 [[package]]
@@ -1433,12 +1433,33 @@ dependencies = [
 
 [[package]]
 name = "future_form"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4159f8f5bb6df8db8bbe94103a577e8275ea0529d8560f0541670e9de0e13d9"
+dependencies = [
+ "future_form_macros 0.2.0",
+ "futures",
+]
+
+[[package]]
+name = "future_form"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2c0f8f7ec5a203efc9c9d1fe3fb01b0b3c7f59347ed633f05d0f825c9b4eeb8c"
 dependencies = [
- "future_form_macros",
+ "future_form_macros 0.3.0",
  "futures",
+]
+
+[[package]]
+name = "future_form_macros"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb36d9328dd9609d00322d77d8a8dd51f404328057e374a39d5fbc4ec14745b7"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -3189,18 +3210,18 @@ dependencies = [
 
 [[package]]
 name = "pin-project"
-version = "1.1.10"
+version = "1.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "677f1add503faace112b9f1373e43e9e054bfdd22ff1a63c1bc485eaec6a6a8a"
+checksum = "f1749c7ed4bcaf4c3d0a3efc28538844fb29bcdd7d2b67b2be7e20ba861ff517"
 dependencies = [
  "pin-project-internal",
 ]
 
 [[package]]
 name = "pin-project-internal"
-version = "1.1.10"
+version = "1.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e918e4ff8c4549eb882f14b3a4bc8c8bc93de829416eacf579f1207a8fbf861"
+checksum = "d9b20ed30f105399776b9c883e68e536ef602a16ae6f596d2c473591d6ad64c6"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3916,7 +3937,7 @@ checksum = "c70277193334d30ec14d7c71d0e6f0f4f1a88f4fcb1732501794bc9ce885b518"
 dependencies = [
  "async-lock",
  "blake3",
- "future_form",
+ "future_form 0.3.0",
  "futures",
  "futures-util",
  "getrandom 0.2.17",
@@ -3930,12 +3951,12 @@ dependencies = [
 
 [[package]]
 name = "sedimentree_fs_storage"
-version = "0.4.1"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "58be932738eb7f0ea848d91450d88bae3ad8f9bd7da3b5ed833d08a9acf24e29"
+checksum = "b358b169dbca6b4e934c2b7564c693e5eea16d14b57002c8cefde74f356916a8"
 dependencies = [
  "async-lock",
- "future_form",
+ "future_form 0.2.0",
  "hex",
  "sedimentree_core",
  "subduction_core",
@@ -4287,7 +4308,7 @@ dependencies = [
  "async-lock",
  "blake3",
  "ed25519-dalek 2.2.0",
- "future_form",
+ "future_form 0.3.0",
  "futures",
  "getrandom 0.2.17",
  "nonempty",
@@ -4306,7 +4327,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d7d9afe4f924eba58a69c8aef7d02f105737d6901ad6e29c9a379a2611f30d5"
 dependencies = [
  "ed25519-dalek 2.2.0",
- "future_form",
+ "future_form 0.3.0",
  "futures",
  "getrandom 0.2.17",
  "sedimentree_core",
@@ -4322,7 +4343,7 @@ checksum = "8a15da9e175ff7816289c400bf67cd25d2709accd773013a8ed4e272d7778933"
 dependencies = [
  "async-channel",
  "async-lock",
- "future_form",
+ "future_form 0.3.0",
  "futures",
  "iroh",
  "rand 0.8.5",
@@ -4336,15 +4357,15 @@ dependencies = [
 
 [[package]]
 name = "subduction_websocket"
-version = "0.4.3"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50ecc56d70fe35bb21e68cfeb77e5e86e41656e39bc055cdd241ecdc0a651e62"
+checksum = "d3321684fa8acfbf47582f1e25f34e426136a9927255cc0f83fb58491e746295"
 dependencies = [
  "async-channel",
  "async-lock",
  "async-tungstenite",
  "blake3",
- "future_form",
+ "future_form 0.2.0",
  "futures",
  "futures-timer",
  "futures-util",
@@ -5802,18 +5823,18 @@ checksum = "2164e798d9e3d84ee2c91139ace54638059a3b23e361f5c11781c2c6459bde0f"
 
 [[package]]
 name = "zerocopy"
-version = "0.8.40"
+version = "0.8.39"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a789c6e490b576db9f7e6b6d661bcc9799f7c0ac8352f56ea20193b2681532e5"
+checksum = "db6d35d663eadb6c932438e763b262fe1a70987f9ae936e60158176d710cae4a"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.40"
+version = "0.8.39"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f65c489a7071a749c849713807783f70672b28094011623e200cb86dcb835953"
+checksum = "4122cd3169e94605190e77839c9a40d40ed048d305bfdc146e7df40ab0f3e517"
 dependencies = [
  "proc-macro2",
  "quote",
