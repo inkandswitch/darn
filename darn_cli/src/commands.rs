@@ -22,8 +22,9 @@ use darn_core::{
     discover::{DiscoverProgress, DiscoverResult},
     file::{File, file_type::FileType, state::FileState},
     manifest::{Manifest, content_hash, tracked::Tracked},
-    peer::{Peer, PeerName},
+    peer::{Peer, PeerAddress, PeerName},
     sedimentree,
+    staged_update::StagedUpdate,
     sync_progress::SyncProgressEvent,
     watcher::{WatchEvent, WatchEventProcessor, Watcher, WatcherConfig},
 };
@@ -112,7 +113,16 @@ fn format_paths_as_tree(paths: &[std::path::PathBuf]) -> String {
 }
 
 /// Initialize a new `darn` workspace.
-pub(crate) async fn init(path: &Path, out: Output) -> eyre::Result<()> {
+///
+/// After creating the workspace, offers to register a sync server (peer).
+/// In porcelain mode or when `--peer` is provided, skips interactive prompts.
+#[allow(clippy::unused_async)] // Called from async context, keeping signature uniform
+pub(crate) async fn init(
+    path: &Path,
+    peer_url: Option<&str>,
+    peer_name_override: Option<&str>,
+    out: Output,
+) -> eyre::Result<()> {
     out.intro("darn init")?;
 
     // Initialize workspace structure
@@ -121,52 +131,7 @@ pub(crate) async fn init(path: &Path, out: Output) -> eyre::Result<()> {
 
     out.success(&format!("Initialized workspace at {}", root.display()))?;
 
-    // Open workspace to track .darnignore
-    let darn = Darn::open(&root).await?;
-    let mut manifest = darn.load_manifest()?;
-
-    // Track .darnignore if it exists
-    let darnignore_path = root.join(".darnignore");
-    if darnignore_path.exists() {
-        // Create File from .darnignore
-        let doc = darn_core::file::File::from_path(&darnignore_path)?;
-        let file_type = darn_core::file::file_type::FileType::Text;
-
-        // Convert to Automerge
-        let mut am_doc = doc.into_automerge()?;
-
-        // Generate random SedimentreeId (16-byte for automerge-repo compatibility)
-        let sedimentree_id = darn_core::generate_sedimentree_id();
-
-        // Store as sedimentree commits
-        darn_core::sedimentree::store_document(darn.subduction(), sedimentree_id, &mut am_doc)
-            .await?;
-
-        // Add to root directory
-        darn_core::sedimentree::add_file_to_directory(
-            darn.subduction(),
-            manifest.root_directory_id(),
-            ".darnignore",
-            sedimentree_id,
-        )
-        .await?;
-
-        // Compute digests
-        let file_system_digest = darn_core::manifest::content_hash::hash_file(&darnignore_path)?;
-        let sedimentree_digest =
-            darn_core::sedimentree::compute_digest(darn.subduction(), sedimentree_id).await?;
-
-        // Add to manifest
-        let entry = darn_core::manifest::tracked::Tracked::new(
-            sedimentree_id,
-            std::path::PathBuf::from(".darnignore"),
-            file_type,
-            file_system_digest,
-            sedimentree_digest,
-        );
-        manifest.track(entry);
-        darn.save_manifest(&manifest)?;
-    }
+    let manifest = Manifest::load(&initialized.manifest_path())?;
 
     if out.is_porcelain() {
         let root_dir_url = sedimentree_id_to_url(manifest.root_directory_id());
@@ -174,9 +139,101 @@ pub(crate) async fn init(path: &Path, out: Output) -> eyre::Result<()> {
         out.kv("root_dir_id", &root_dir_url)?;
     }
 
-    out.outro("Ready to sync")?;
+    // Peer registration
+    let peer_added = if let Some(url) = peer_url {
+        // Non-interactive: --peer flag provided
+        let name = peer_name_override.map_or_else(|| peer_name_from_url(url), String::from);
+        add_peer_during_init(&name, url, out)?
+    } else if !out.is_porcelain() {
+        // Interactive: prompt the user
+        prompt_peer_during_init(out)?
+    } else {
+        false
+    };
+
+    if peer_added {
+        out.outro(&format!("Ready to sync — run {}", cmd("darn sync")))?;
+    } else {
+        out.outro(&format!(
+            "Ready — add a server with {}",
+            cmd("darn peer add")
+        ))?;
+    }
 
     Ok(())
+}
+
+/// Derive a peer name from a WebSocket URL.
+///
+/// Strips protocol, port, and path to produce a short hostname-based name.
+/// Falls back to "server" if parsing fails.
+fn peer_name_from_url(url: &str) -> String {
+    let host = url
+        .strip_prefix("wss://")
+        .or_else(|| url.strip_prefix("ws://"))
+        .unwrap_or(url);
+
+    // Take just the hostname (strip port and path)
+    let host = host.split(':').next().unwrap_or(host);
+    let host = host.split('/').next().unwrap_or(host);
+
+    if host.is_empty() {
+        "server".to_string()
+    } else {
+        // Replace dots with hyphens for a valid peer name
+        host.replace('.', "-")
+    }
+}
+
+/// Add a peer during init (non-interactive).
+fn add_peer_during_init(name: &str, url: &str, out: Output) -> eyre::Result<bool> {
+    let peer_name = PeerName::new(name)?;
+
+    // Check if already exists
+    if darn_core::peer::get_peer(&peer_name)?.is_some() {
+        out.remark(&format!("Peer already exists: {name}"))?;
+        return Ok(true);
+    }
+
+    let peer = Peer::discover(peer_name, PeerAddress::websocket(url.to_string()));
+    darn_core::peer::add_peer(&peer)?;
+
+    if out.is_porcelain() {
+        out.kv("peer_name", name)?;
+        out.kv("peer_url", url)?;
+    } else {
+        out.success(&format!("Added server: {name} ({url})"))?;
+    }
+
+    Ok(true)
+}
+
+/// Interactively prompt the user to add a sync server during init.
+fn prompt_peer_during_init(out: Output) -> eyre::Result<bool> {
+    let existing_peers = darn_core::peer::list_peers()?;
+
+    let prompt = if existing_peers.is_empty() {
+        "Add a sync server?"
+    } else {
+        let names: Vec<_> = existing_peers.iter().map(|p| p.name.as_str()).collect();
+        cliclack::log::remark(format!("Existing server(s): {}", names.join(", ")))?;
+        "Add another sync server?"
+    };
+
+    if !out.confirm(prompt, existing_peers.is_empty())? {
+        return Ok(!existing_peers.is_empty());
+    }
+
+    let url: String = out.input("Server URL", "ws://localhost:9000", None)?;
+
+    if url.is_empty() {
+        return Ok(!existing_peers.is_empty());
+    }
+
+    let default_name = peer_name_from_url(&url);
+    let name: String = out.input("Server name", &default_name, Some(&default_name))?;
+
+    add_peer_during_init(&name, &url, out)
 }
 
 /// Clone a workspace by root directory ID from global peers.
@@ -249,7 +306,7 @@ pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path, out: Output) -> ey
 
     spinner.stop(format!("Connected to {connected_peers} peer(s)"));
 
-    // Step 6: Sync and traverse directory tree, writing files
+    // Step 6: Sync and traverse directory tree, staging files
     let mut manifest = darn.load_manifest()?;
     let timeout = Some(Duration::from_secs(30));
 
@@ -257,13 +314,14 @@ pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path, out: Output) -> ey
 
     let mut total_received = 0usize;
     let mut total_sent = 0usize;
+    let mut staged = StagedUpdate::new(&root)?;
 
     let file_count = clone_directory_recursive_with_sync(
         darn.subduction(),
         root_dir_id,
         &root,
         std::path::PathBuf::new(),
-        &mut manifest,
+        &mut staged,
         timeout,
         &mut total_received,
         &mut total_sent,
@@ -276,6 +334,14 @@ pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path, out: Output) -> ey
         progress.stop("No files found");
         out.outro("Clone complete (empty workspace)")?;
         return Ok(());
+    }
+
+    // Commit: parallel renames from staging dir into workspace
+    let commit_result = staged.commit(&mut manifest).await?;
+    if !commit_result.errors.is_empty() {
+        for (path, err) in &commit_result.errors {
+            out.warning(&format!("Failed to write {}: {err}", path.display()))?;
+        }
     }
 
     progress.stop(format!(
@@ -296,14 +362,18 @@ pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path, out: Output) -> ey
     Ok(())
 }
 
-/// Recursively clone a directory: sync each sedimentree, then write files.
+/// Recursively clone a directory: sync each sedimentree, then stage files.
+///
+/// Files are staged into a [`StagedUpdate`] rather than written directly
+/// to the workspace. The caller commits the staged update after traversal
+/// completes, giving external observers a near-atomic view.
 #[allow(clippy::too_many_arguments)]
 async fn clone_directory_recursive_with_sync(
     subduction: &std::sync::Arc<darn_core::subduction::DarnSubduction>,
     dir_id: SedimentreeId,
     workspace_root: &Path,
     current_path: std::path::PathBuf,
-    manifest: &mut darn_core::manifest::Manifest,
+    staged: &mut StagedUpdate,
     timeout: Option<std::time::Duration>,
     total_received: &mut usize,
     total_sent: &mut usize,
@@ -367,38 +437,23 @@ async fn clone_directory_recursive_with_sync(
                     }
                 };
 
-                // Full path on disk
-                let full_path = workspace_root.join(&entry_path);
-
-                // Create parent directories if needed
-                if let Some(parent) = full_path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-
-                // Write file to disk
-                file.write_to_path(&full_path)?;
-
-                // Determine file type
                 let file_type = if file.content.is_text() {
                     FileType::Text
                 } else {
                     FileType::Binary
                 };
 
-                // Compute digests
-                let file_system_digest = content_hash::hash_file(&full_path)?;
-                let sedimentree_digest =
+                let sed_digest =
                     sedimentree::compute_digest(subduction, entry.sedimentree_id).await?;
 
-                // Add to manifest
-                let tracked = Tracked::new(
-                    entry.sedimentree_id,
+                // Stage the file (written to staging dir, not workspace)
+                staged.stage_create(
+                    &file,
                     entry_path.clone(),
+                    entry.sedimentree_id,
                     file_type,
-                    file_system_digest,
-                    sedimentree_digest,
-                );
-                manifest.track(tracked);
+                    sed_digest,
+                )?;
 
                 file_count += 1;
                 if out.is_porcelain() {
@@ -415,7 +470,7 @@ async fn clone_directory_recursive_with_sync(
                     entry.sedimentree_id,
                     workspace_root,
                     entry_path,
-                    manifest,
+                    staged,
                     timeout,
                     total_received,
                     total_sent,
@@ -430,7 +485,7 @@ async fn clone_directory_recursive_with_sync(
     Ok(file_count)
 }
 
-/// Add patterns to .darnignore.
+/// Add ignore patterns to the `.darn` config.
 pub(crate) fn ignore(patterns: &[String], out: Output) -> eyre::Result<()> {
     let darn = Darn::open_without_subduction(Path::new("."))?;
     let root = darn.root();
@@ -461,13 +516,15 @@ pub(crate) fn ignore(patterns: &[String], out: Output) -> eyre::Result<()> {
     }
 
     if !out.is_porcelain() && added_count > 0 {
-        out.info(&format!("{added_count} pattern(s) added to .darnignore"))?;
+        out.info(&format!(
+            "{added_count} pattern(s) added to .darn ignore list"
+        ))?;
     }
 
     Ok(())
 }
 
-/// Remove patterns from .darnignore.
+/// Remove ignore patterns from the `.darn` config.
 pub(crate) fn unignore(patterns: &[String], out: Output) -> eyre::Result<()> {
     let darn = Darn::open_without_subduction(Path::new("."))?;
     let root = darn.root();
@@ -488,7 +545,7 @@ pub(crate) fn unignore(patterns: &[String], out: Output) -> eyre::Result<()> {
                 if out.is_porcelain() {
                     out.kv("not_found", pattern)?;
                 } else {
-                    out.warning(&format!("Not in .darnignore: {pattern}"))?;
+                    out.warning(&format!("Not in ignore list: {pattern}"))?;
                 }
             }
             Err(e) => {
@@ -499,7 +556,7 @@ pub(crate) fn unignore(patterns: &[String], out: Output) -> eyre::Result<()> {
 
     if !out.is_porcelain() && removed_count > 0 {
         out.info(&format!(
-            "{removed_count} pattern(s) removed from .darnignore"
+            "{removed_count} pattern(s) removed from .darn ignore list"
         ))?;
     }
 
@@ -970,10 +1027,7 @@ async fn continue_sync(
     if peers.is_empty() {
         out.warning("No peers configured")?;
         if !out.is_porcelain() {
-            out.outro(&format!(
-                "Use {} to add peers",
-                cmd("darn peer add <name> <url>")
-            ))?;
+            out.outro(&format!("Use {} to add peers", cmd("darn peer add")))?;
         }
         return Ok(());
     }
@@ -1267,10 +1321,7 @@ fn sync_dry_run(peer_name: Option<&str>, out: Output) -> eyre::Result<()> {
     if peers.is_empty() {
         out.warning("No peers configured")?;
         if !out.is_porcelain() {
-            out.outro(&format!(
-                "Use {} to add peers",
-                cmd("darn peer add <name> <url>")
-            ))?;
+            out.outro(&format!("Use {} to add peers", cmd("darn peer add")))?;
         }
         return Ok(());
     }
@@ -1315,7 +1366,7 @@ fn display_peer_dry_run_status(
         println!(
             "peer\t{}\t{}\t{peer_id_display}\t{last_sync}\t{}",
             peer.name,
-            peer.url,
+            peer.address,
             unsynced.len()
         );
         for path in &unsynced {
@@ -1323,7 +1374,7 @@ fn display_peer_dry_run_status(
         }
     } else {
         // Build peer status content
-        let mut content = format!("URL:       {}\n", peer.url);
+        let mut content = format!("Address:   {}\n", peer.address);
         writeln!(content, "Peer ID:   {peer_id_display}").expect("write to string");
         writeln!(content, "Last sync: {last_sync}").expect("write to string");
 
@@ -1898,26 +1949,44 @@ async fn track_single_file(
 }
 
 /// Add a peer.
+///
+/// Interactive when flags are omitted; fully flag-driven in porcelain mode.
+#[allow(unused_variables, clippy::needless_pass_by_value)]
 pub(crate) fn peer_add(
-    name: &str,
-    url: &str,
-    peer_id: Option<&str>,
+    name: Option<String>,
+    websocket: Option<String>,
+    iroh: Option<String>,
+    relay: Option<String>,
+    peer_id: Option<String>,
     out: Output,
 ) -> eyre::Result<()> {
     let darn = Darn::open_without_subduction(Path::new("."))?;
 
-    // Validate peer name
-    let peer_name = PeerName::new(name)?;
+    // -- Name --
+    let name = match name {
+        Some(n) => n,
+        None => out.input("Peer name", "my-relay", None)?,
+    };
+    let peer_name = PeerName::new(&name)?;
 
-    // Check if peer already exists
     if darn.get_peer(&peer_name)?.is_some() {
         out.error(&format!("Peer already exists: {name}"))?;
         return Ok(());
     }
 
+    // -- Address --
+    let address = match (websocket, iroh) {
+        (Some(url), _) => PeerAddress::websocket(url),
+        #[cfg(feature = "iroh")]
+        (_, Some(node_id)) => PeerAddress::iroh(node_id, relay),
+        #[cfg(not(feature = "iroh"))]
+        (_, Some(_)) => eyre::bail!("iroh support is not enabled (rebuild with --features iroh)"),
+        (None, None) => peer_add_interactive(out)?,
+    };
+
+    // -- Peer ID (optional, for known mode) --
     let peer = if let Some(id_str) = peer_id {
-        // Parse peer ID from base58
-        let id_bytes = bs58::decode(id_str)
+        let id_bytes = bs58::decode(&id_str)
             .into_vec()
             .map_err(|e| eyre::eyre!("invalid peer ID (expected base58): {e}"))?;
 
@@ -1927,14 +1996,12 @@ pub(crate) fn peer_add(
 
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&id_bytes);
-        let peer_id = PeerId::new(arr);
-
-        Peer::known(peer_name, url.to_string(), peer_id)
+        Peer::known(peer_name, address, PeerId::new(arr))
     } else {
-        // Discovery mode: service name derived from URL (strip ws:// or wss://)
-        Peer::discover(peer_name, url.to_string())
+        Peer::discover(peer_name, address)
     };
 
+    let addr_display = peer.address.display_addr();
     let peer_id_display = if let Some(id) = peer.peer_id() {
         bs58::encode(id.as_bytes()).into_string()
     } else {
@@ -1943,18 +2010,54 @@ pub(crate) fn peer_add(
 
     darn.add_peer(&peer)?;
 
-    info!(%name, %url, "Added peer");
+    info!(%name, %addr_display, "Added peer");
 
     if out.is_porcelain() {
         println!("name\t{name}");
-        println!("url\t{url}");
+        println!("address\t{addr_display}");
         println!("peer_id\t{peer_id_display}");
     } else {
-        out.success(&format!("Added peer: {name} ({url})"))?;
+        out.success(&format!("Added peer: {name} ({addr_display})"))?;
         out.remark(&format!("Peer ID: {peer_id_display}"))?;
     }
 
     Ok(())
+}
+
+/// Interactive transport selection for `peer add`.
+#[cfg(feature = "iroh")]
+fn peer_add_interactive(out: Output) -> eyre::Result<PeerAddress> {
+    let transport: &str = out.select(
+        "Transport",
+        &[
+            (
+                "websocket",
+                "WebSocket",
+                "relay connection (ws:// or wss://)",
+            ),
+            ("iroh", "Iroh", "direct QUIC (NAT-traversing)"),
+        ],
+    )?;
+    if transport == "iroh" {
+        let node_id = out.input("Node ID", "base32 public key", None)?;
+        let relay = out.input(
+            "Relay URL (optional, press Enter to skip)",
+            "https://relay.example.com",
+            None,
+        )?;
+        let relay = if relay.is_empty() { None } else { Some(relay) };
+        Ok(PeerAddress::iroh(node_id, relay))
+    } else {
+        let url = out.input("URL", "ws://relay.example.com:9000", None)?;
+        Ok(PeerAddress::websocket(url))
+    }
+}
+
+/// Interactive transport selection for `peer add` (without iroh support).
+#[cfg(not(feature = "iroh"))]
+fn peer_add_interactive(out: Output) -> eyre::Result<PeerAddress> {
+    let url = out.input("URL", "ws://relay.example.com:9000", None)?;
+    Ok(PeerAddress::websocket(url))
 }
 
 /// List known peers.
@@ -1978,7 +2081,7 @@ pub(crate) fn peer_list(out: Output) -> eyre::Result<()> {
                 .map_or_else(|| "never".to_string(), |ts| ts.as_secs().to_string());
             println!(
                 "{}\t{}\t{mode}\t{peer_id_display}\t{last_sync}",
-                peer.name, peer.url
+                peer.name, peer.address
             );
         }
         return Ok(());
@@ -1989,10 +2092,7 @@ pub(crate) fn peer_list(out: Output) -> eyre::Result<()> {
 
     if peers.is_empty() {
         out.remark("No peers configured")?;
-        out.outro(&format!(
-            "Use {} to add peers",
-            cmd("darn peer add <name> <url>")
-        ))?;
+        out.outro(&format!("Use {} to add peers", cmd("darn peer add")))?;
         return Ok(());
     }
 
@@ -2009,7 +2109,7 @@ pub(crate) fn peer_list(out: Output) -> eyre::Result<()> {
             .last_synced_at
             .map_or_else(|| "never".to_string(), format_timestamp);
 
-        let mut content = format!("URL:       {}\n", peer.url);
+        let mut content = format!("Address:   {}\n", peer.address);
         content.push_str(&format!("Peer ID:   {peer_id_display}\n"));
         content.push_str(&format!("Last sync: {last_sync}"));
 
@@ -2077,7 +2177,7 @@ fn info_porcelain(config_dir: &Path, peer_id_str: &str) {
             };
             println!(
                 "peer\t{}\t{}\t{mode}\t{peer_id_display}",
-                peer.name, peer.url
+                peer.name, peer.address
             );
         }
     }
@@ -2163,7 +2263,7 @@ fn info_human(out: Output, config_dir: &Path, peer_id_str: &str) -> eyre::Result
                 table.push_str(&format!(
                     "│ {:<14} │ {:<38} │ {:^8} │\n",
                     truncate_str(peer.name.as_ref(), 14),
-                    truncate_str(&peer.url, 38),
+                    truncate_str(&peer.address.display_addr(), 38),
                     mode
                 ));
             }

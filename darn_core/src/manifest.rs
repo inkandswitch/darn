@@ -1,7 +1,7 @@
 //! Manifest for tracking files in a `darn` workspace.
 //!
 //! The manifest maintains a mapping between [`SedimentreeId`]s and file metadata,
-//! persisted as JSON at `.darn/manifest.json`.
+//! persisted as JSON at `~/.config/darn/workspaces/<id>/manifest.json`.
 
 pub mod content_hash;
 pub mod tracked;
@@ -84,19 +84,17 @@ impl Manifest {
         }
     }
 
-    /// Saves the manifest to the given path.
+    /// Saves the manifest to the given path atomically.
+    ///
+    /// Uses a temp-file-then-rename pattern to prevent readers from seeing
+    /// a partially-written file.
     ///
     /// # Errors
     ///
     /// Returns an error if the file cannot be written.
     pub fn save(&self, path: &Path) -> Result<(), ManifestError> {
         let json = serde_json::to_string_pretty(self)?;
-
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        std::fs::write(path, json)?;
+        crate::atomic_write::atomic_write(path, json.as_bytes())?;
         Ok(())
     }
 
@@ -151,6 +149,12 @@ impl Manifest {
     #[must_use]
     pub fn get_by_id(&self, id: &SedimentreeId) -> Option<&Tracked> {
         self.entries.get(id)
+    }
+
+    /// Looks up a tracked file by its Sedimentree ID (mutable).
+    #[must_use]
+    pub fn get_by_id_mut(&mut self, id: &SedimentreeId) -> Option<&mut Tracked> {
+        self.entries.get_mut(id)
     }
 
     /// Returns `true` if no files are tracked.

@@ -163,12 +163,9 @@ fn collect_discovery_candidates(
     let mut candidates = Vec::new();
 
     for entry in walkdir::WalkDir::new(root).into_iter().filter_entry(|e| {
-        // Skip hidden directories and .darn, but allow config files
+        // Skip hidden directories and files (the .darn file is handled by ignore rules)
         let name = e.file_name().to_string_lossy();
-        !name.starts_with('.')
-            || e.depth() == 0
-            || name == ".darnignore"
-            || name == ".darnattributes"
+        !name.starts_with('.') || e.depth() == 0
     }) {
         let entry = match entry {
             Ok(e) => e,
@@ -207,18 +204,24 @@ fn collect_discovery_candidates(
     candidates
 }
 
-/// Process a single file for discovery.
+/// Intermediate result from Phase 1: the file has been read, converted to
+/// Automerge, and stored as a sedimentree, but the directory tree has _not_
+/// been updated yet.
+struct StoredFile {
+    discovered: DiscoveredFile,
+}
+
+/// Phase 1 of file ingestion (parallelizable).
 ///
-/// Reads the file, converts to Automerge, stores in sedimentree, and updates directory tree.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn process_single_file(
+/// Reads the file, converts to Automerge, stores as sedimentree, and computes
+/// digests. Does _not_ touch the directory tree — all directory mutations are
+/// deferred to Phase 2 to avoid concurrent CRDT map-key conflicts.
+async fn store_single_file(
     path: &Path,
     root: &Path,
     subduction: &DarnSubduction,
-    root_dir_id: SedimentreeId,
-    dir_cache: &ShardedDirCache,
     attributes: &AttributeRules,
-) -> Result<DiscoveredFile, FileProcessError> {
+) -> Result<StoredFile, FileProcessError> {
     let relative_path = path
         .strip_prefix(root)
         .map_err(|_| FileProcessError::InvalidPath)?
@@ -254,21 +257,6 @@ pub(crate) async fn process_single_file(
         .await
         .map_err(FileProcessError::Sedimentree)?;
 
-    // Add file to directory tree (with caching)
-    let parent_dir_id =
-        ensure_parent_directories_cached(subduction, root_dir_id, &relative_path, dir_cache)
-            .await
-            .map_err(FileProcessError::Sedimentree)?;
-
-    let file_name = relative_path
-        .file_name()
-        .ok_or(FileProcessError::InvalidPath)?
-        .to_string_lossy();
-
-    sedimentree::add_file_to_directory(subduction, parent_dir_id, &file_name, sedimentree_id)
-        .await
-        .map_err(FileProcessError::Sedimentree)?;
-
     // Compute digests (hash is CPU-bound, run on blocking pool)
     let path_for_hash = path.to_path_buf();
     let file_system_digest =
@@ -280,46 +268,50 @@ pub(crate) async fn process_single_file(
         .await
         .map_err(FileProcessError::Sedimentree)?;
 
-    Ok(DiscoveredFile {
-        relative_path,
-        sedimentree_id,
-        file_type,
-        file_system_digest,
-        sedimentree_digest,
+    Ok(StoredFile {
+        discovered: DiscoveredFile {
+            relative_path,
+            sedimentree_id,
+            file_type,
+            file_system_digest,
+            sedimentree_digest,
+        },
     })
 }
 
-/// Ensure parent directories exist, using the cache to avoid redundant operations.
-async fn ensure_parent_directories_cached(
+/// Phase 2 of file ingestion (sequential).
+///
+/// Ensures parent directories exist and adds the file entry to its parent
+/// directory document. Must be called sequentially to avoid concurrent CRDT
+/// map-key conflicts on the Automerge "docs" list.
+async fn register_file_in_directory(
     subduction: &DarnSubduction,
-    root_id: SedimentreeId,
-    relative_path: &Path,
-    cache: &ShardedDirCache,
-) -> Result<SedimentreeId, SedimentreeError> {
-    let parent = relative_path.parent();
+    root_dir_id: SedimentreeId,
+    stored: &StoredFile,
+) -> Result<(), FileProcessError> {
+    let relative_path = &stored.discovered.relative_path;
 
-    // No parent means file is in root
-    if parent.is_none() || parent == Some(Path::new("")) {
-        return Ok(root_id);
-    }
+    // Ensure parent directories exist (creates intermediate dirs if needed)
+    let parent_dir_id =
+        sedimentree::ensure_parent_directories(subduction, root_dir_id, relative_path)
+            .await
+            .map_err(FileProcessError::Sedimentree)?;
 
-    // SAFETY: checked `is_none()` and `== Some("")` above
-    #[allow(clippy::expect_used)]
-    let parent_path = parent.expect("checked above");
+    let file_name = relative_path
+        .file_name()
+        .ok_or(FileProcessError::InvalidPath)?
+        .to_string_lossy();
 
-    // Check cache first
-    if let Some(id) = cache.get(parent_path) {
-        return Ok(id);
-    }
+    sedimentree::add_file_to_directory(
+        subduction,
+        parent_dir_id,
+        &file_name,
+        stored.discovered.sedimentree_id,
+    )
+    .await
+    .map_err(FileProcessError::Sedimentree)?;
 
-    // Cache miss - need to ensure directories exist
-    let parent_id =
-        sedimentree::ensure_parent_directories(subduction, root_id, relative_path).await?;
-
-    // Cache the result
-    cache.insert(parent_path.to_path_buf(), parent_id);
-
-    Ok(parent_id)
+    Ok(())
 }
 
 /// Generate a random `SedimentreeId` compatible with automerge-repo.
@@ -384,6 +376,7 @@ pub enum FileProcessError {
 /// # Returns
 ///
 /// Returns ingested files, errors, and cancellation status.
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn ingest_files_parallel<F>(
     paths: Vec<PathBuf>,
     root: &Path,
@@ -410,18 +403,16 @@ where
         .map(std::num::NonZero::get)
         .unwrap_or(4);
 
-    let dir_cache = ShardedDirCache::new();
-    let results: Arc<Mutex<Vec<DiscoveredFile>>> = Arc::new(Mutex::new(Vec::new()));
+    let stored_files: Arc<Mutex<Vec<StoredFile>>> = Arc::new(Mutex::new(Vec::new()));
     let errors: Arc<Mutex<Vec<(PathBuf, String)>>> = Arc::new(Mutex::new(Vec::new()));
     let completed = AtomicUsize::new(0);
     let in_flight = AtomicUsize::new(0);
     let last_completed: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
 
-    // Process files concurrently
+    // ── Phase 1: store files in parallel (no directory updates) ──────────
     stream::iter(paths)
         .for_each_concurrent(concurrency, |path| {
-            let dir_cache = &dir_cache;
-            let results = Arc::clone(&results);
+            let stored_files = Arc::clone(&stored_files);
             let errors = Arc::clone(&errors);
             let last_completed = Arc::clone(&last_completed);
             let completed = &completed;
@@ -430,42 +421,28 @@ where
             let attributes = &attributes;
 
             async move {
-                // Check cancellation before processing
                 if cancel.is_cancelled() {
                     return;
                 }
 
-                // Track that we're starting this file
                 in_flight.fetch_add(1, Ordering::Relaxed);
 
-                // Process the file
-                let result = process_single_file(
-                    &path,
-                    root,
-                    subduction,
-                    root_dir_id,
-                    dir_cache,
-                    attributes,
-                )
-                .await;
+                let result = store_single_file(&path, root, subduction, attributes).await;
 
-                // Update counters and last_completed
                 in_flight.fetch_sub(1, Ordering::Relaxed);
                 completed.fetch_add(1, Ordering::Relaxed);
 
                 match result {
-                    Ok(file) => {
-                        // Update last_completed with this file's path
+                    Ok(stored) => {
                         if let Ok(mut lc) = last_completed.lock() {
-                            *lc = Some(file.relative_path.clone());
+                            *lc = Some(stored.discovered.relative_path.clone());
                         }
-                        if let Ok(mut r) = results.lock() {
-                            r.push(file);
+                        if let Ok(mut r) = stored_files.lock() {
+                            r.push(stored);
                         }
                     }
                     Err(e) => {
                         tracing::warn!("Failed to process {}: {e}", path.display());
-                        // Still update last_completed for failed files
                         if let Ok(mut lc) = last_completed.lock()
                             && let Ok(rel) = path.strip_prefix(root)
                         {
@@ -477,7 +454,6 @@ where
                     }
                 }
 
-                // Report progress after completion
                 let last_path = last_completed.lock().ok().and_then(|g| g.clone());
                 on_progress(DiscoverProgress {
                     completed: completed.load(Ordering::Relaxed),
@@ -489,7 +465,7 @@ where
         })
         .await;
 
-    // Final progress update
+    // Final progress update for phase 1
     let last_path = last_completed.lock().ok().and_then(|g| g.clone());
     on_progress(DiscoverProgress {
         completed: completed.load(Ordering::Relaxed),
@@ -498,8 +474,8 @@ where
         in_flight: 0,
     });
 
-    // Extract results - at this point the stream is done so we're the only holder
-    let final_results = match Arc::try_unwrap(results) {
+    // Extract stored files
+    let all_stored = match Arc::try_unwrap(stored_files) {
         Ok(mutex) => mutex.into_inner().unwrap_or_default(),
         Err(arc) => arc
             .lock()
@@ -507,13 +483,45 @@ where
             .unwrap_or_default(),
     };
 
-    let final_errors = match Arc::try_unwrap(errors) {
+    let mut final_errors = match Arc::try_unwrap(errors) {
         Ok(mutex) => mutex.into_inner().unwrap_or_default(),
         Err(arc) => arc
             .lock()
             .map(|mut g| std::mem::take(&mut *g))
             .unwrap_or_default(),
     };
+
+    // ── Phase 2: update directory tree sequentially ────────────────────
+    //
+    // All directory document mutations (creating parent directories and
+    // adding file entries) happen here, one file at a time. Concurrent
+    // modifications to the same Automerge directory document cause CRDT
+    // map-key conflicts: each concurrent writer creates its own "docs"
+    // list, and the merge picks one winner, losing the other entries.
+    let mut final_results = Vec::with_capacity(all_stored.len());
+
+    for stored in &all_stored {
+        if cancel.is_cancelled() {
+            break;
+        }
+
+        if let Err(e) = register_file_in_directory(subduction, root_dir_id, stored).await {
+            tracing::warn!(
+                "Failed to register {} in directory: {e}",
+                stored.discovered.relative_path.display()
+            );
+            final_errors.push((stored.discovered.relative_path.clone(), e.to_string()));
+            continue;
+        }
+
+        final_results.push(DiscoveredFile {
+            relative_path: stored.discovered.relative_path.clone(),
+            sedimentree_id: stored.discovered.sedimentree_id,
+            file_type: stored.discovered.file_type,
+            file_system_digest: stored.discovered.file_system_digest,
+            sedimentree_digest: stored.discovered.sedimentree_digest,
+        });
+    }
 
     (final_results, final_errors, cancel.is_cancelled())
 }

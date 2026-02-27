@@ -1,33 +1,17 @@
 //! Ignore patterns for `darn` workspaces.
 //!
-//! Supports gitignore-style patterns via `.darnignore` files.
-//! The `.darn/` directory is always ignored.
+//! Supports gitignore-style patterns loaded from the `.darn` config file.
+//! The `.darn` file itself is always ignored.
 
-use std::{io::Write, path::Path};
+use std::path::Path;
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use thiserror::Error;
 
-/// Default patterns that are always ignored.
-const ALWAYS_IGNORED: &[&str] = &[".darn", ".darn/", ".darn/**"];
+use crate::dotfile::DarnConfig;
 
-/// Name of the ignore file.
-const DARNIGNORE_FILE: &str = ".darnignore";
-
-/// Default content for a new `.darnignore` file.
-const DEFAULT_DARNIGNORE: &str = "\
-# darn ignore file
-# Patterns here will be excluded from sync (gitignore syntax)
-
-# Version control
-.git/
-
-# Example patterns:
-# *.log
-# target/
-# node_modules/
-# .env
-";
+/// Default patterns that are always ignored (hardcoded, not user-editable).
+const ALWAYS_IGNORED: &[&str] = &[".darn"];
 
 /// Ignore pattern matcher for a workspace.
 #[derive(Debug)]
@@ -36,32 +20,48 @@ pub struct IgnoreRules {
 }
 
 impl IgnoreRules {
+    /// Build ignore rules from a loaded `DarnConfig`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the ignore patterns cannot be compiled.
+    pub fn from_config(root: &Path, config: &DarnConfig) -> Result<Self, IgnorePatternError> {
+        let mut builder = GitignoreBuilder::new(root);
+
+        // Always ignore .darn marker file
+        for pattern in ALWAYS_IGNORED {
+            builder.add_line(None, pattern)?;
+        }
+
+        // Add user-configured ignore patterns from .darn file
+        for pattern in &config.ignore {
+            builder.add_line(None, pattern)?;
+        }
+
+        let matcher = builder.build()?;
+        Ok(Self { matcher })
+    }
+
     /// Build ignore rules from a workspace root.
     ///
-    /// Reads `.darnignore` if present and adds default patterns.
+    /// Loads the `.darn` config file and builds rules from it.
+    /// Falls back to hardcoded always-ignored patterns if no config is found.
     ///
     /// # Errors
     ///
     /// Returns an error if the ignore patterns cannot be compiled.
     pub fn from_workspace_root(root: &Path) -> Result<Self, IgnorePatternError> {
-        let mut builder = GitignoreBuilder::new(root);
-
-        // Always ignore .darn directory
-        for pattern in ALWAYS_IGNORED {
-            builder.add_line(None, pattern)?;
+        if let Ok(config) = DarnConfig::load(root) {
+            Self::from_config(root, &config)
+        } else {
+            // No .darn file — just use hardcoded patterns
+            let mut builder = GitignoreBuilder::new(root);
+            for pattern in ALWAYS_IGNORED {
+                builder.add_line(None, pattern)?;
+            }
+            let matcher = builder.build()?;
+            Ok(Self { matcher })
         }
-
-        // Load .darnignore if it exists
-        let darnignore_path = root.join(".darnignore");
-        if darnignore_path.exists()
-            && let Some(err) = builder.add(&darnignore_path)
-        {
-            return Err(err.into());
-        }
-
-        let matcher = builder.build()?;
-
-        Ok(Self { matcher })
     }
 
     /// Check if a path should be ignored.
@@ -81,172 +81,105 @@ impl IgnoreRules {
 #[error("failed to parse ignore patterns: {0}")]
 pub struct IgnorePatternError(#[from] ignore::Error);
 
-/// Create a default `.darnignore` file if it doesn't exist.
+/// Add a pattern to the `.darn` config's ignore list.
 ///
-/// Returns `true` if the file was created, `false` if it already exists.
-///
-/// # Errors
-///
-/// Returns an error if the file cannot be written.
-pub fn create_default(root: &Path) -> Result<bool, std::io::Error> {
-    let path = root.join(DARNIGNORE_FILE);
-
-    if path.exists() {
-        return Ok(false);
-    }
-
-    std::fs::write(&path, DEFAULT_DARNIGNORE)?;
-    Ok(true)
-}
-
-/// Add a pattern to the `.darnignore` file.
-///
-/// Creates the file if it doesn't exist. Appends to the end if it does.
 /// Does nothing if the pattern already exists.
 ///
 /// # Errors
 ///
-/// Returns an error if the file cannot be written.
-pub fn add_pattern(root: &Path, pattern: &str) -> Result<bool, std::io::Error> {
-    let path = root.join(DARNIGNORE_FILE);
-    let pattern = pattern.trim();
+/// Returns an error if the config cannot be read or written.
+pub fn add_pattern(root: &Path, pattern: &str) -> Result<bool, IgnoreMutateError> {
+    let pattern = pattern.trim().to_string();
+    let mut config = DarnConfig::load(root)?;
 
-    // Check if pattern already exists
-    if path.exists() {
-        let content = std::fs::read_to_string(&path)?;
-        if content.lines().any(|line| line.trim() == pattern) {
-            return Ok(false); // Already exists
-        }
+    if config.ignore.iter().any(|p| p == &pattern) {
+        return Ok(false);
     }
 
-    // Append pattern
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)?;
-
-    // Add newline before if file exists and doesn't end with newline
-    if path.exists() {
-        let content = std::fs::read_to_string(&path)?;
-        if !content.is_empty() && !content.ends_with('\n') {
-            writeln!(file)?;
-        }
-    }
-
-    writeln!(file, "{pattern}")?;
+    config.ignore.push(pattern);
+    config.save(root)?;
     Ok(true)
 }
 
-/// Remove a pattern from the `.darnignore` file.
+/// Remove a pattern from the `.darn` config's ignore list.
 ///
 /// Returns `true` if the pattern was found and removed, `false` otherwise.
 ///
 /// # Errors
 ///
-/// Returns an error if the file cannot be read or written.
-pub fn remove_pattern(root: &Path, pattern: &str) -> Result<bool, std::io::Error> {
-    let path = root.join(DARNIGNORE_FILE);
+/// Returns an error if the config cannot be read or written.
+pub fn remove_pattern(root: &Path, pattern: &str) -> Result<bool, IgnoreMutateError> {
     let pattern = pattern.trim();
+    let mut config = DarnConfig::load(root)?;
 
-    if !path.exists() {
+    let initial_len = config.ignore.len();
+    config.ignore.retain(|p| p != pattern);
+
+    if config.ignore.len() == initial_len {
         return Ok(false);
     }
 
-    let content = std::fs::read_to_string(&path)?;
-    let lines: Vec<&str> = content.lines().collect();
-
-    let filtered: Vec<&str> = lines
-        .iter()
-        .filter(|line| line.trim() != pattern)
-        .copied()
-        .collect();
-
-    if filtered.len() == lines.len() {
-        return Ok(false); // Pattern not found
-    }
-
-    // Write back without the pattern
-    let new_content = if filtered.is_empty() {
-        String::new()
-    } else {
-        filtered.join("\n") + "\n"
-    };
-
-    std::fs::write(&path, new_content)?;
+    config.save(root)?;
     Ok(true)
 }
 
-/// List all patterns in the `.darnignore` file.
+/// List all user-configured ignore patterns from the `.darn` config.
 ///
-/// Returns an empty vec if the file doesn't exist.
+/// Returns an empty vec if the config doesn't exist.
 ///
 /// # Errors
 ///
-/// Returns an error if the file cannot be read.
-pub fn list_patterns(root: &Path) -> Result<Vec<String>, std::io::Error> {
-    let path = root.join(DARNIGNORE_FILE);
-
-    if !path.exists() {
-        return Ok(Vec::new());
+/// Returns an error if the config cannot be read.
+pub fn list_patterns(root: &Path) -> Result<Vec<String>, IgnoreMutateError> {
+    match DarnConfig::load(root) {
+        Ok(config) => Ok(config.ignore),
+        Err(_) => Ok(Vec::new()),
     }
+}
 
-    let content = std::fs::read_to_string(&path)?;
-    Ok(content
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(String::from)
-        .collect())
+/// Error mutating ignore patterns.
+#[derive(Debug, Error)]
+pub enum IgnoreMutateError {
+    /// Error reading/writing the `.darn` config.
+    #[error(transparent)]
+    Dotfile(#[from] crate::dotfile::DotfileError),
 }
 
 #[allow(clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace::WorkspaceId;
     use bolero::check;
+    use sedimentree_core::id::SedimentreeId;
     use testresult::TestResult;
 
-    // NOTE: These two tests use bolero's `check!()` macro which expands to a
-    // bare `return;`, making them incompatible with a non-`()` return type.
-    // They keep `.expect()` for fallible setup and retain `clippy::expect_used`.
+    /// Create a `.darn` config file for testing.
+    fn create_test_config(root: &Path, ignore: Vec<String>) {
+        let id = WorkspaceId::from_bytes([1; 16]);
+        let sed_id = SedimentreeId::new([2; 32]);
+        let config =
+            DarnConfig::with_fields(id, sed_id, ignore, crate::dotfile::AttributeMap::default());
+        config.save(root).expect("save test config");
+    }
 
     #[test]
-    fn darn_dir_always_ignored() {
+    fn darn_file_always_ignored() {
         let dir = tempfile::tempdir().expect("create tempdir");
+        create_test_config(dir.path(), Vec::new());
         let rules = IgnoreRules::from_workspace_root(dir.path()).expect("build rules");
 
-        check!()
-            .with_type::<Vec<String>>()
-            .for_each(|segments: &Vec<String>| {
-                // Filter to valid path segments
-                let segments: Vec<_> = segments
-                    .iter()
-                    .filter(|s| !s.is_empty() && !s.contains('/') && !s.contains('\\'))
-                    .collect();
-
-                // .darn itself
-                assert!(rules.is_ignored(Path::new(".darn"), true));
-
-                // .darn/<anything>
-                if !segments.is_empty() {
-                    let suffix: std::path::PathBuf = segments.iter().collect();
-                    let path = Path::new(".darn").join(&suffix);
-                    assert!(
-                        rules.is_ignored(&path, false),
-                        "expected .darn/{} to be ignored",
-                        suffix.display()
-                    );
-                }
-            });
+        // .darn file should be ignored
+        assert!(rules.is_ignored(Path::new(".darn"), false));
     }
 
     #[test]
     fn non_darn_paths_not_ignored_by_default() {
         let dir = tempfile::tempdir().expect("create tempdir");
+        create_test_config(dir.path(), Vec::new());
         let rules = IgnoreRules::from_workspace_root(dir.path()).expect("build rules");
 
         check!().with_type::<String>().for_each(|segment: &String| {
-            // Skip invalid or special segments
             if segment.is_empty()
                 || segment.contains('/')
                 || segment.contains('\\')
@@ -266,9 +199,9 @@ mod tests {
     }
 
     #[test]
-    fn darnignore_patterns_respected() -> TestResult {
+    fn config_ignore_patterns_respected() -> TestResult {
         let dir = tempfile::tempdir()?;
-        std::fs::write(dir.path().join(".darnignore"), "*.log\ntarget/\n")?;
+        create_test_config(dir.path(), vec!["*.log".to_string(), "target/".to_string()]);
 
         let rules = IgnoreRules::from_workspace_root(dir.path())?;
 
@@ -284,7 +217,10 @@ mod tests {
     #[test]
     fn negation_patterns_work() -> TestResult {
         let dir = tempfile::tempdir()?;
-        std::fs::write(dir.path().join(".darnignore"), "*.log\n!important.log\n")?;
+        create_test_config(
+            dir.path(),
+            vec!["*.log".to_string(), "!important.log".to_string()],
+        );
 
         let rules = IgnoreRules::from_workspace_root(dir.path())?;
 
@@ -295,12 +231,35 @@ mod tests {
     }
 
     #[test]
-    fn missing_darnignore_is_fine() -> TestResult {
+    fn missing_config_uses_defaults() -> TestResult {
         let dir = tempfile::tempdir()?;
+        // No .darn file
         let rules = IgnoreRules::from_workspace_root(dir.path())?;
 
-        assert!(rules.is_ignored(Path::new(".darn"), true));
+        assert!(rules.is_ignored(Path::new(".darn"), false));
         assert!(!rules.is_ignored(Path::new("foo.txt"), false));
+
+        Ok(())
+    }
+
+    #[test]
+    fn add_and_remove_pattern() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        create_test_config(dir.path(), Vec::new());
+
+        // Add a pattern
+        assert!(add_pattern(dir.path(), "*.log")?);
+        assert!(!add_pattern(dir.path(), "*.log")?); // duplicate
+
+        let patterns = list_patterns(dir.path())?;
+        assert!(patterns.contains(&"*.log".to_string()));
+
+        // Remove it
+        assert!(remove_pattern(dir.path(), "*.log")?);
+        assert!(!remove_pattern(dir.path(), "*.log")?); // already gone
+
+        let patterns = list_patterns(dir.path())?;
+        assert!(!patterns.contains(&"*.log".to_string()));
 
         Ok(())
     }

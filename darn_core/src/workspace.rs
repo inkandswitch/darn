@@ -1,36 +1,35 @@
-//! Workspace layout and atomic tree management.
+//! Workspace layout and centralized storage.
 //!
-//! Workspaces are stored under `~/.config/darn/workspaces/<id>/` with:
+//! Workspaces store their data under `~/.config/darn/workspaces/<id>/` with:
 //! - A manifest tracking files
-//! - Ping-pong trees for atomic swaps
-//! - A `current` symlink pointing to the active tree
+//! - Per-workspace storage for sedimentree blobs
 //!
-//! The user's project directory is a symlink to the `current` tree.
+//! The user's project directory contains a `.darn` JSON marker file.
 //!
 //! # Directory Layout
 //!
 //! ```text
 //! ~/.config/darn/
-//! ├── signing_key.ed25519
-//! ├── storage/                    # shared content-addressed store
-//! │   ├── blobs/
-//! │   ├── commits/
-//! │   └── fragments/
+//! ├── signer/
+//! │   └── signing_key.ed25519
+//! ├── peers/
+//! │   └── {name}.json
+//! ├── workspaces.json             # registry: id → path
 //! └── workspaces/
 //!     └── <workspace-id>/
 //!         ├── manifest.json
-//!         ├── trees/
-//!         │   ├── a/              # ping-pong tree A
-//!         │   └── b/              # ping-pong tree B
-//!         └── current -> a        # symlink to active tree
+//!         └── storage/
+//!             └── {sedimentree_id}/
+//!                 └── blobs/
 //!
-//! ~/projects/myproject -> ~/.config/darn/workspaces/<id>/trees/current
+//! ~/projects/myproject/
+//! ├── .darn                       # JSON marker file (id, ignore, attributes)
+//! └── ... user files ...
 //! ```
 
 pub mod id;
 pub mod layout;
 pub mod registry;
-pub mod swap;
 
 pub use id::WorkspaceId;
 pub use layout::WorkspaceLayout;

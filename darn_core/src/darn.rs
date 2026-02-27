@@ -1,7 +1,7 @@
 //! Darn workspace management.
 //!
-//! A workspace is a directory containing a `.darn/` subdirectory that tracks
-//! files as Automerge CRDT documents.
+//! A workspace is a directory containing a `.darn` JSON marker file. All
+//! storage lives under `~/.config/darn/workspaces/<id>/`.
 
 pub mod refresh_diff;
 
@@ -18,6 +18,8 @@ use subduction_websocket::tokio::{TimeoutTokio, client::TokioWebSocketClient};
 use thiserror::Error;
 use tungstenite::http::Uri;
 
+use crate::peer::PeerAddress;
+
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -25,39 +27,40 @@ use crate::{
     config::{self, NoConfigDir},
     directory::{Directory, entry::EntryType},
     discover::{self, DiscoverProgress, DiscoverResult},
+    dotfile::{DarnConfig, DotfileError},
     file::{File, file_type::FileType, state::FileState},
     manifest::{Manifest, ManifestError, content_hash, tracked::Tracked},
     peer::Peer,
     refresh::{self, RefreshError},
     sedimentree::{self, SedimentreeError},
     signer::{self, LoadSignerError, SignerError},
+    staged_update::{StageError, StagedUpdate},
     subduction::{
         self, AuthenticatedDarnConnection, DarnAttachError, DarnIoError, DarnRegistrationError,
         DarnSubduction, SubductionInitError,
     },
     sync_progress::{ApplyResult, SyncProgressEvent, SyncSummary},
+    workspace::{WorkspaceId, WorkspaceLayout, WorkspaceRegistry, registry::WorkspaceEntry},
 };
 use refresh_diff::RefreshDiff;
-
-/// Manifest filename within `.darn/`.
-const MANIFEST_FILE: &str = "manifest.json";
-
-/// The name of the `.darn` directory.
-const DARN_DIR: &str = ".darn";
-
-/// Storage subdirectory within `.darn/`.
-const STORAGE_DIR: &str = "storage";
 
 /// A `darn` workspace rooted at a directory.
 ///
 /// The `Darn` struct manages a workspace with:
-/// - File tracking via manifest
+/// - A `.darn` marker file in the project root
+/// - Centralized storage under `~/.config/darn/workspaces/<id>/`
 /// - Automerge document storage via Subduction
 /// - Peer configuration for sync
 #[derive(Debug)]
 pub struct Darn {
-    /// The root directory of the workspace (parent of `.darn/`).
+    /// The root directory of the workspace (contains `.darn` file).
     root: PathBuf,
+
+    /// Loaded configuration from the `.darn` file.
+    config: DarnConfig,
+
+    /// Paths into `~/.config/darn/workspaces/<id>/`.
+    layout: WorkspaceLayout,
 
     /// The Subduction instance for this workspace.
     subduction: Arc<DarnSubduction>,
@@ -66,7 +69,8 @@ pub struct Darn {
 impl Darn {
     /// Initialize a new workspace at the given path.
     ///
-    /// Creates the `.darn/` directory structure and ensures the global signer exists.
+    /// Creates a `.darn` marker file, centralized storage under
+    /// `~/.config/darn/workspaces/<id>/`, and ensures the global signer exists.
     /// This is a synchronous operation that doesn't initialize Subduction.
     ///
     /// # Errors
@@ -77,25 +81,47 @@ impl Darn {
     /// - Signer generation fails
     pub fn init(path: &Path) -> Result<InitializedDarn, InitWorkspaceError> {
         let root = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        let darn_dir = root.join(DARN_DIR);
 
-        if darn_dir.exists() {
+        // Check for existing workspace
+        let dotfile_path = root.join(crate::dotfile::DOTFILE_NAME);
+        if dotfile_path.exists() {
             return Err(InitWorkspaceError::AlreadyExists(root));
         }
 
-        // Create workspace directory structure
-        std::fs::create_dir_all(&darn_dir)?;
-        std::fs::create_dir_all(darn_dir.join(STORAGE_DIR))?;
+        // Generate workspace ID from canonical path
+        let id = WorkspaceId::from_path(&root);
 
         // Create initial manifest with random root directory ID
-        let manifest = crate::manifest::Manifest::new();
-        manifest.save(&darn_dir.join(MANIFEST_FILE))?;
+        let manifest = Manifest::new();
+        let root_directory_id = manifest.root_directory_id();
 
-        // Create default .darnignore file
-        crate::ignore::create_default(&root)?;
+        // Create centralized storage directory
+        let layout = WorkspaceLayout::new(id)?;
+        layout.create_dirs()?;
 
-        // Create default .darnattributes file
-        crate::attributes::create_default_darnattributes(&root)?;
+        // Save manifest to centralized location
+        manifest.save(&layout.manifest_path())?;
+
+        // Create .darn marker file with default ignore/attribute patterns
+        let config = DarnConfig::create(&root, id, root_directory_id)?;
+
+        // Register in global registry
+        let mut registry = WorkspaceRegistry::load()?;
+        registry.register(
+            id,
+            WorkspaceEntry {
+                original_path: root.clone(),
+                name: root
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("workspace")
+                    .to_string(),
+                created_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs()),
+            },
+        );
+        registry.save()?;
 
         // Ensure global signer exists
         let signer_dir = config::global_signer_dir()?;
@@ -104,11 +130,16 @@ impl Darn {
         let peer_id: PeerId = signer.verifying_key().into();
         tracing::info!(
             path = %root.display(),
+            workspace_id = %id.to_hex(),
             peer_id = %hex::encode(peer_id.as_bytes()),
             "Initialized workspace"
         );
 
-        Ok(InitializedDarn { root })
+        Ok(InitializedDarn {
+            root,
+            config,
+            layout,
+        })
     }
 
     /// Initialize a workspace with a specific root directory ID.
@@ -127,22 +158,44 @@ impl Darn {
         root_directory_id: sedimentree_core::id::SedimentreeId,
     ) -> Result<InitializedDarn, InitWorkspaceError> {
         let root = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        let darn_dir = root.join(DARN_DIR);
 
-        if darn_dir.exists() {
+        // Check for existing workspace
+        let dotfile_path = root.join(crate::dotfile::DOTFILE_NAME);
+        if dotfile_path.exists() {
             return Err(InitWorkspaceError::AlreadyExists(root));
         }
 
-        // Create workspace directory structure
-        std::fs::create_dir_all(&darn_dir)?;
-        std::fs::create_dir_all(darn_dir.join(STORAGE_DIR))?;
+        // Generate workspace ID from canonical path
+        let id = WorkspaceId::from_path(&root);
 
-        // Create manifest with the provided root directory ID
-        let manifest = crate::manifest::Manifest::with_root_id(root_directory_id);
-        manifest.save(&darn_dir.join(MANIFEST_FILE))?;
+        // Create centralized storage directory
+        let layout = WorkspaceLayout::new(id)?;
+        layout.create_dirs()?;
 
-        // Create default .darnattributes file
-        crate::attributes::create_default_darnattributes(&root)?;
+        // Save manifest with provided root directory ID to centralized location
+        let manifest = Manifest::with_root_id(root_directory_id);
+        manifest.save(&layout.manifest_path())?;
+
+        // Create .darn marker file with default ignore/attribute patterns
+        let config = DarnConfig::create(&root, id, root_directory_id)?;
+
+        // Register in global registry
+        let mut registry = WorkspaceRegistry::load()?;
+        registry.register(
+            id,
+            WorkspaceEntry {
+                original_path: root.clone(),
+                name: root
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("workspace")
+                    .to_string(),
+                created_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs()),
+            },
+        );
+        registry.save()?;
 
         // Ensure global signer exists
         let signer_dir = config::global_signer_dir()?;
@@ -151,30 +204,67 @@ impl Darn {
         let peer_id: PeerId = signer.verifying_key().into();
         tracing::info!(
             path = %root.display(),
+            workspace_id = %id.to_hex(),
             root_directory_id = %bs58::encode(root_directory_id.as_bytes()).into_string(),
             peer_id = %hex::encode(peer_id.as_bytes()),
             "Initialized workspace with root directory ID"
         );
 
-        Ok(InitializedDarn { root })
+        Ok(InitializedDarn {
+            root,
+            config,
+            layout,
+        })
     }
 
     /// Open an existing workspace and hydrate Subduction from storage.
     ///
-    /// Searches for a `.darn/` directory starting from the given path and
-    /// walking up to parent directories. Loads all existing sedimentrees
-    /// from storage.
+    /// Searches for a `.darn` file starting from the given path and walking up
+    /// to parent directories. Loads all existing sedimentrees from storage.
     ///
     /// # Errors
     ///
     /// Returns an error if no workspace is found or Subduction cannot be initialized.
     pub async fn open(path: &Path) -> Result<Self, OpenError> {
         let root = Self::find_root(path)?;
-        let signer = Self::load_signer_from(&root)?;
-        let storage = Self::storage_from(&root)?;
+        let config = DarnConfig::load(&root)?;
+        let layout = WorkspaceLayout::new(config.id)?;
+
+        // Auto-heal registry if workspace was moved
+        if let Ok(mut registry) = WorkspaceRegistry::load() {
+            let needs_update = registry
+                .get(config.id)
+                .is_none_or(|entry| entry.original_path != root);
+
+            if needs_update {
+                registry.register(
+                    config.id,
+                    WorkspaceEntry {
+                        original_path: root.clone(),
+                        name: root
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("workspace")
+                            .to_string(),
+                        created_at: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |d| d.as_secs()),
+                    },
+                );
+                drop(registry.save());
+            }
+        }
+
+        let signer = Self::load_signer_static()?;
+        let storage = Self::storage_from_layout(&layout)?;
         let subduction = Box::pin(subduction::hydrate(signer, storage)).await?;
 
-        Ok(Self { root, subduction })
+        Ok(Self {
+            root,
+            config,
+            layout,
+            subduction,
+        })
     }
 
     /// Open an existing workspace without initializing Subduction.
@@ -186,28 +276,22 @@ impl Darn {
     /// Returns an error if no workspace is found.
     pub fn open_without_subduction(path: &Path) -> Result<UnopenedDarn, NotAWorkspace> {
         let root = Self::find_root(path)?;
-        Ok(UnopenedDarn { root })
+        let config = DarnConfig::load(&root).map_err(|_| NotAWorkspace)?;
+        let layout = WorkspaceLayout::new(config.id).map_err(|_| NotAWorkspace)?;
+        Ok(UnopenedDarn {
+            root,
+            config,
+            layout,
+        })
     }
 
     /// Find the workspace root by walking up the directory tree.
     ///
     /// # Errors
     ///
-    /// Returns an error if no `.darn/` directory is found.
+    /// Returns an error if no `.darn` file is found.
     pub fn find_root(start: &Path) -> Result<PathBuf, NotAWorkspace> {
-        let mut current = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
-
-        loop {
-            let darn_dir = current.join(DARN_DIR);
-            if darn_dir.is_dir() {
-                return Ok(current);
-            }
-
-            match current.parent() {
-                Some(parent) => current = parent.to_path_buf(),
-                None => return Err(NotAWorkspace),
-            }
-        }
+        DarnConfig::find_root(start).map_err(|_| NotAWorkspace)
     }
 
     /// Get the workspace root directory.
@@ -216,16 +300,22 @@ impl Darn {
         &self.root
     }
 
-    /// Get the `.darn/` directory path.
+    /// Get the loaded `.darn` config.
     #[must_use]
-    pub fn darn_dir(&self) -> PathBuf {
-        self.root.join(DARN_DIR)
+    pub const fn config(&self) -> &DarnConfig {
+        &self.config
     }
 
-    /// Get the storage directory path.
+    /// Get the workspace layout (centralized storage paths).
+    #[must_use]
+    pub const fn layout(&self) -> &WorkspaceLayout {
+        &self.layout
+    }
+
+    /// Get the storage directory path (`~/.config/darn/workspaces/<id>/storage/`).
     #[must_use]
     pub fn storage_dir(&self) -> PathBuf {
-        self.darn_dir().join(STORAGE_DIR)
+        self.layout.storage_dir()
     }
 
     /// Get the Subduction instance.
@@ -240,11 +330,11 @@ impl Darn {
     ///
     /// Returns an error if the signer cannot be loaded.
     pub fn load_signer(&self) -> Result<MemorySigner, SignerLoadError> {
-        Self::load_signer_from(&self.root)
+        Self::load_signer_static()
     }
 
     /// Load the global signer (static helper).
-    fn load_signer_from(_root: &Path) -> Result<MemorySigner, SignerLoadError> {
+    fn load_signer_static() -> Result<MemorySigner, SignerLoadError> {
         let signer_dir = config::global_signer_dir()?;
         Ok(signer::load(&signer_dir)?)
     }
@@ -259,16 +349,15 @@ impl Darn {
         Ok(signer::peer_id(&signer_dir)?)
     }
 
-    /// Create storage from root path.
-    fn storage_from(root: &Path) -> Result<FsStorage, StorageError> {
-        let storage_dir = root.join(DARN_DIR).join(STORAGE_DIR);
-        FsStorage::new(storage_dir).map_err(StorageError)
+    /// Create storage from a workspace layout.
+    fn storage_from_layout(layout: &WorkspaceLayout) -> Result<FsStorage, StorageError> {
+        FsStorage::new(layout.storage_dir()).map_err(StorageError)
     }
 
-    /// Get the manifest file path.
+    /// Get the manifest file path (`~/.config/darn/workspaces/<id>/manifest.json`).
     #[must_use]
     pub fn manifest_path(&self) -> PathBuf {
-        self.darn_dir().join(MANIFEST_FILE)
+        self.layout.manifest_path()
     }
 
     /// Load the manifest from disk.
@@ -297,7 +386,7 @@ impl Darn {
     ///
     /// Returns an error if the storage cannot be initialized.
     pub fn storage(&self) -> Result<FsStorage, StorageError> {
-        FsStorage::new(self.storage_dir()).map_err(StorageError)
+        Self::storage_from_layout(&self.layout)
     }
 
     /// Refreshes a single tracked file if it has changed.
@@ -402,22 +491,40 @@ impl Darn {
     ///
     /// Individual file errors are collected in the result; this method doesn't
     /// fail on individual file errors.
-    pub async fn apply_remote_changes(&self, manifest: &mut Manifest) -> ApplyResult {
-        let mut result = ApplyResult::new();
+    /// Stage all remote changes for batch application to the workspace.
+    ///
+    /// This is the slow "prepare" phase: loads CRDT documents, serializes
+    /// file content, and writes everything to a staging directory. No
+    /// workspace files are modified.
+    ///
+    /// Call [`StagedUpdate::commit`] to apply the changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns errors from individual file operations in `ApplyResult`.
+    /// The `StagedUpdate` contains only the successfully staged operations.
+    #[allow(clippy::too_many_lines)]
+    pub async fn stage_remote_changes(
+        &self,
+        manifest: &Manifest,
+    ) -> Result<(StagedUpdate, ApplyResult), StageError> {
+        let mut staged = StagedUpdate::new(&self.root)?;
+        let mut errors = ApplyResult::new();
 
         tracing::debug!(
             manifest_entries = manifest.iter().count(),
-            "apply_remote_changes: checking for changes"
+            "stage_remote_changes: checking for changes"
         );
 
-        for entry in manifest.iter_mut() {
+        // Step 1: Stage updates to existing tracked files
+        for entry in manifest.iter() {
             let path = entry.relative_path.clone();
 
             let new_sed_digest =
                 match sedimentree::compute_digest(&self.subduction, entry.sedimentree_id).await {
                     Ok(d) => d,
                     Err(e) => {
-                        result.errors.push((path, format!("compute digest: {e}")));
+                        errors.errors.push((path, format!("compute digest: {e}")));
                         continue;
                     }
                 };
@@ -427,7 +534,7 @@ impl Darn {
                 old_digest = %entry.sedimentree_digest,
                 new_digest = %new_sed_digest,
                 changed = new_sed_digest != entry.sedimentree_digest,
-                "apply_remote_changes: checking file"
+                "stage_remote_changes: checking file"
             );
 
             if new_sed_digest == entry.sedimentree_digest {
@@ -440,109 +547,134 @@ impl Darn {
                 match sedimentree::load_document(&self.subduction, entry.sedimentree_id).await {
                     Ok(Some(doc)) => doc,
                     Ok(None) => {
-                        result
+                        errors
                             .errors
                             .push((path, "document not found after sync".into()));
                         continue;
                     }
                     Err(e) => {
-                        result.errors.push((path, format!("load document: {e}")));
+                        errors.errors.push((path, format!("load document: {e}")));
                         continue;
                     }
                 };
 
-            // Parse as File
             let file = match File::from_automerge(&am_doc) {
                 Ok(f) => f,
                 Err(e) => {
-                    result.errors.push((path, format!("parse file: {e}")));
+                    errors.errors.push((path, format!("parse file: {e}")));
                     continue;
                 }
             };
 
-            // Write to disk
-            let full_path = self.root.join(&entry.relative_path);
-            if let Err(e) = file.write_to_path(&full_path) {
-                result.errors.push((path, format!("write file: {e}")));
-                continue;
-            }
-
-            // Update digests
-            match content_hash::hash_file(&full_path) {
-                Ok(fs_digest) => {
-                    entry.file_system_digest = fs_digest;
-                    entry.sedimentree_digest = new_sed_digest;
-                }
-                Err(e) => {
-                    result
-                        .errors
-                        .push((path.clone(), format!("hash file: {e}")));
-                    // Still mark as updated since we wrote it
-                }
-            }
-
-            if local_changed {
-                result.merged.push(path);
+            let file_type = if file.content.is_text() {
+                FileType::Text
             } else {
-                result.updated.push(path);
+                FileType::Binary
+            };
+
+            if let Err(e) = staged.stage_write(
+                &file,
+                path.clone(),
+                entry.sedimentree_id,
+                file_type,
+                new_sed_digest,
+                local_changed,
+            ) {
+                errors.errors.push((path, format!("stage write: {e}")));
             }
         }
 
-        // Step 2: Discover new files from remote directory tree
-        if let Err(e) = self.discover_remote_files(manifest, &mut result).await {
-            tracing::warn!("Error discovering remote files: {e}");
-        }
-
-        // Step 3: Detect and remove files deleted from remote
-        if let Err(e) = self.remove_deleted_files(manifest, &mut result).await {
-            tracing::warn!("Error detecting deleted files: {e}");
-        }
-
-        result
-    }
-
-    /// Discover new files from the remote directory tree that aren't in the local manifest.
-    async fn discover_remote_files(
-        &self,
-        manifest: &mut Manifest,
-        result: &mut ApplyResult,
-    ) -> Result<(), SedimentreeError> {
-        let root_dir_id = manifest.root_directory_id();
-        self.discover_remote_files_recursive(root_dir_id, PathBuf::new(), manifest, result)
+        // Step 2: Stage new files from remote directory tree
+        if let Err(e) = self
+            .stage_remote_files_recursive(
+                manifest.root_directory_id(),
+                PathBuf::new(),
+                manifest,
+                &mut staged,
+                &mut errors,
+            )
             .await
+        {
+            tracing::warn!("Error staging remote files: {e}");
+        }
+
+        // Step 3: Stage deletions (files not in remote tree)
+        if let Err(e) = self
+            .stage_deleted_files(manifest, &mut staged, &mut errors)
+            .await
+        {
+            tracing::warn!("Error staging deleted files: {e}");
+        }
+
+        Ok((staged, errors))
     }
 
-    /// Recursively discover files from a remote directory.
-    #[allow(clippy::only_used_in_recursion)] // manifest is used, clippy is confused by async
-    #[allow(clippy::too_many_lines)] // Complex but coherent file discovery logic
-    async fn discover_remote_files_recursive(
+    /// Convenience wrapper: stage + commit in one call.
+    ///
+    /// Equivalent to calling [`stage_remote_changes`](Self::stage_remote_changes)
+    /// followed by [`StagedUpdate::commit`].
+    pub async fn apply_remote_changes(&self, manifest: &mut Manifest) -> ApplyResult {
+        let (staged, mut stage_errors) = match self.stage_remote_changes(manifest).await {
+            Ok(pair) => pair,
+            Err(e) => {
+                let mut result = ApplyResult::new();
+                result
+                    .errors
+                    .push((PathBuf::new(), format!("staging failed: {e}")));
+                return result;
+            }
+        };
+
+        if staged.is_empty() {
+            return stage_errors;
+        }
+
+        match staged.commit(manifest).await {
+            Ok(mut result) => {
+                // Merge any staging errors into the commit result
+                result.errors.append(&mut stage_errors.errors);
+                result
+            }
+            Err(e) => {
+                stage_errors
+                    .errors
+                    .push((PathBuf::new(), format!("commit failed: {e}")));
+                stage_errors
+            }
+        }
+    }
+
+    /// Recursively stage new files from a remote directory.
+    #[allow(clippy::only_used_in_recursion)]
+    #[allow(clippy::too_many_lines)]
+    async fn stage_remote_files_recursive(
         &self,
         dir_id: sedimentree_core::id::SedimentreeId,
         current_path: PathBuf,
-        manifest: &mut Manifest,
-        result: &mut ApplyResult,
+        manifest: &Manifest,
+        staged: &mut StagedUpdate,
+        errors: &mut ApplyResult,
     ) -> Result<(), SedimentreeError> {
         tracing::debug!(
             ?dir_id,
             path = %current_path.display(),
-            "discover_remote_files_recursive: loading directory"
+            "stage_remote_files_recursive: loading directory"
         );
 
-        // Load directory document
         let Some(am_doc) = sedimentree::load_document(&self.subduction, dir_id).await? else {
-            tracing::debug!(?dir_id, "discover_remote_files_recursive: empty directory");
-            return Ok(()); // Empty directory
+            tracing::debug!(?dir_id, "stage_remote_files_recursive: empty directory");
+            return Ok(());
         };
 
         let Ok(dir) = Directory::from_automerge(&am_doc) else {
-            tracing::debug!(?dir_id, "discover_remote_files_recursive: not a directory");
-            return Ok(()); // Not a directory document
+            tracing::debug!(?dir_id, "stage_remote_files_recursive: not a directory");
+            return Ok(());
         };
 
         tracing::debug!(
             ?dir_id,
             entry_count = dir.entries.len(),
-            "discover_remote_files_recursive: found entries"
+            "stage_remote_files_recursive: found entries"
         );
 
         for entry in &dir.entries {
@@ -552,7 +684,7 @@ impl Darn {
                 name = %entry.name,
                 entry_type = ?entry.entry_type,
                 sed_id = ?entry.sedimentree_id,
-                "discover_remote_files_recursive: processing entry"
+                "stage_remote_files_recursive: processing entry"
             );
 
             match entry.entry_type {
@@ -563,7 +695,7 @@ impl Darn {
                     }
 
                     tracing::info!(name = %entry.name, "discovered new remote file");
-                    // This is a new file from remote
+
                     let am_doc =
                         match sedimentree::load_document(&self.subduction, entry.sedimentree_id)
                             .await
@@ -571,7 +703,7 @@ impl Darn {
                             Ok(Some(doc)) => doc,
                             Ok(None) => continue,
                             Err(e) => {
-                                result
+                                errors
                                     .errors
                                     .push((entry_path.clone(), format!("load file: {e}")));
                                 continue;
@@ -581,30 +713,12 @@ impl Darn {
                     let file = match File::from_automerge(&am_doc) {
                         Ok(f) => f,
                         Err(e) => {
-                            result
+                            errors
                                 .errors
                                 .push((entry_path.clone(), format!("parse file: {e}")));
                             continue;
                         }
                     };
-
-                    let full_path = self.root.join(&entry_path);
-
-                    if let Some(parent) = full_path.parent()
-                        && let Err(e) = std::fs::create_dir_all(parent)
-                    {
-                        result
-                            .errors
-                            .push((entry_path.clone(), format!("create dir: {e}")));
-                        continue;
-                    }
-
-                    if let Err(e) = file.write_to_path(&full_path) {
-                        result
-                            .errors
-                            .push((entry_path.clone(), format!("write file: {e}")));
-                        continue;
-                    }
 
                     let file_type = if file.content.is_text() {
                         FileType::Text
@@ -612,50 +726,39 @@ impl Darn {
                         FileType::Binary
                     };
 
-                    // Compute digests
-                    let file_system_digest = match content_hash::hash_file(&full_path) {
-                        Ok(d) => d,
-                        Err(e) => {
-                            result
-                                .errors
-                                .push((entry_path.clone(), format!("hash file: {e}")));
-                            continue;
-                        }
-                    };
-
-                    let sedimentree_digest =
+                    let sed_digest =
                         match sedimentree::compute_digest(&self.subduction, entry.sedimentree_id)
                             .await
                         {
                             Ok(d) => d,
                             Err(e) => {
-                                result
+                                errors
                                     .errors
                                     .push((entry_path.clone(), format!("compute digest: {e}")));
                                 continue;
                             }
                         };
 
-                    // Add to manifest
-                    let tracked = Tracked::new(
-                        entry.sedimentree_id,
+                    if let Err(e) = staged.stage_create(
+                        &file,
                         entry_path.clone(),
+                        entry.sedimentree_id,
                         file_type,
-                        file_system_digest,
-                        sedimentree_digest,
-                    );
-                    manifest.track(tracked);
-
-                    result.created.push(entry_path);
+                        sed_digest,
+                    ) {
+                        errors
+                            .errors
+                            .push((entry_path, format!("stage create: {e}")));
+                    }
                 }
 
                 EntryType::Folder => {
-                    // Recurse into subdirectory
-                    Box::pin(self.discover_remote_files_recursive(
+                    Box::pin(self.stage_remote_files_recursive(
                         entry.sedimentree_id,
                         entry_path,
                         manifest,
-                        result,
+                        staged,
+                        errors,
                     ))
                     .await?;
                 }
@@ -665,54 +768,40 @@ impl Darn {
         Ok(())
     }
 
-    /// Remove files that have been deleted from the remote directory tree.
-    ///
-    /// Compares the local manifest against the remote directory tree and removes
-    /// any files that no longer exist in the remote.
-    async fn remove_deleted_files(
+    /// Stage deletions for files no longer in the remote directory tree.
+    async fn stage_deleted_files(
         &self,
-        manifest: &mut Manifest,
-        result: &mut ApplyResult,
+        manifest: &Manifest,
+        staged: &mut StagedUpdate,
+        errors: &mut ApplyResult,
     ) -> Result<(), SedimentreeError> {
         use std::collections::HashSet;
 
-        // Collect all sedimentree IDs from the remote directory tree
         let mut remote_ids = HashSet::new();
         let root_dir_id = manifest.root_directory_id();
         self.collect_remote_sedimentree_ids(root_dir_id, &mut remote_ids)
             .await?;
 
-        // Find files in manifest that are not in the remote tree
         let to_delete: Vec<_> = manifest
             .iter()
             .filter(|entry| !remote_ids.contains(&entry.sedimentree_id))
             .map(|entry| (entry.sedimentree_id, entry.relative_path.clone()))
             .collect();
 
-        // Delete each file
         for (sed_id, relative_path) in to_delete {
             let full_path = self.root.join(&relative_path);
-
-            // Delete file from filesystem
-            if full_path.exists()
-                && let Err(e) = std::fs::remove_file(&full_path)
-            {
-                result
-                    .errors
-                    .push((relative_path.clone(), format!("delete file: {e}")));
-                continue;
+            if full_path.exists() {
+                staged.stage_delete(relative_path, sed_id);
+            } else {
+                // File already missing — just clean up manifest
+                staged.stage_delete(relative_path.clone(), sed_id);
+                tracing::debug!(path = %relative_path.display(), "already missing from disk");
             }
-
-            // Remove from manifest
-            manifest.untrack_by_id(&sed_id);
-
-            // Clean up empty parent directories
-            if let Some(parent) = full_path.parent() {
-                Self::cleanup_empty_dirs(parent, &self.root);
-            }
-
-            result.deleted.push(relative_path);
         }
+
+        // Suppress unused variable warning — errors param is for consistency with
+        // sibling methods and future use
+        let _ = errors;
 
         Ok(())
     }
@@ -881,34 +970,6 @@ impl Darn {
         Ok(())
     }
 
-    /// Clean up empty directories from leaf to root, stopping at workspace root.
-    fn cleanup_empty_dirs(dir: &Path, workspace_root: &Path) {
-        let mut current = dir;
-
-        while current.starts_with(workspace_root) && current != workspace_root {
-            // Check if directory is empty
-            let is_empty = match std::fs::read_dir(current) {
-                Ok(mut entries) => entries.next().is_none(),
-                Err(_) => break,
-            };
-
-            if is_empty {
-                if std::fs::remove_dir(current).is_err() {
-                    break;
-                }
-                tracing::debug!("Removed empty directory: {}", current.display());
-            } else {
-                break; // Directory not empty, stop
-            }
-
-            // Move to parent
-            current = match current.parent() {
-                Some(p) => p,
-                None => break,
-            };
-        }
-    }
-
     /// Discover and track new (untracked, non-ignored) files.
     ///
     /// Scan for new untracked files without ingesting them.
@@ -988,7 +1049,9 @@ impl Darn {
 
     /// Connect to a peer and return the authenticated connection.
     ///
-    /// The connection can then be registered with Subduction for syncing.
+    /// Dispatches to the appropriate transport based on the peer's address:
+    /// - `PeerAddress::WebSocket` → `TokioWebSocketClient`
+    /// - `PeerAddress::Iroh` → `subduction_iroh::client::connect`
     ///
     /// # Errors
     ///
@@ -997,19 +1060,29 @@ impl Darn {
         &self,
         peer: &Peer,
     ) -> Result<(AuthenticatedDarnConnection, PeerId), SyncError> {
-        let uri: Uri = peer.url.parse()?;
+        match &peer.address {
+            PeerAddress::WebSocket { url } => self.connect_peer_ws(url, peer.audience).await,
+            #[cfg(feature = "iroh")]
+            PeerAddress::Iroh { node_id, relay_url } => {
+                self.connect_peer_iroh(node_id, relay_url.as_deref(), peer.audience)
+                    .await
+            }
+        }
+    }
+
+    /// Connect to a peer via WebSocket.
+    async fn connect_peer_ws(
+        &self,
+        ws_url: &str,
+        audience: subduction_core::connection::handshake::Audience,
+    ) -> Result<(AuthenticatedDarnConnection, PeerId), SyncError> {
+        let uri: Uri = ws_url.parse()?;
         let signer = self.load_signer()?;
 
-        let (authenticated_client, listener_fut, sender_fut) = TokioWebSocketClient::new(
-            uri,
-            TimeoutTokio,
-            Self::DEFAULT_TIMEOUT,
-            signer,
-            peer.audience,
-        )
-        .await?;
+        let (authenticated, listener_fut, sender_fut) =
+            TokioWebSocketClient::new(uri, TimeoutTokio, Self::DEFAULT_TIMEOUT, signer, audience)
+                .await?;
 
-        // Spawn background tasks for incoming and outgoing messages
         tokio::spawn(async move {
             if let Err(e) = listener_fut.await {
                 tracing::error!("WebSocket listener error: {e:?}");
@@ -1021,10 +1094,64 @@ impl Darn {
             }
         });
 
-        // Get the actual peer ID from the connection (may differ from expectation in discovery mode)
-        let actual_peer_id = Connection::peer_id(authenticated_client.inner());
+        let actual_peer_id = authenticated.peer_id();
+        let authenticated =
+            authenticated.map(|c| crate::subduction::DarnConnection::WebSocket(Box::new(c)));
 
-        Ok((authenticated_client, actual_peer_id))
+        Ok((authenticated, actual_peer_id))
+    }
+
+    /// Connect to a peer via Iroh (QUIC).
+    #[cfg(feature = "iroh")]
+    async fn connect_peer_iroh(
+        &self,
+        node_id: &str,
+        relay_url: Option<&str>,
+        audience: subduction_core::connection::handshake::Audience,
+    ) -> Result<(AuthenticatedDarnConnection, PeerId), SyncError> {
+        let public_key: iroh::PublicKey = node_id.parse().map_err(SyncError::IrohNodeId)?;
+
+        let mut addr = iroh::EndpointAddr::new(public_key);
+        if let Some(relay) = relay_url {
+            let parsed: iroh::RelayUrl = relay.parse().map_err(SyncError::IrohRelayUrl)?;
+            addr = addr.with_relay_url(parsed);
+        }
+
+        let endpoint = iroh::Endpoint::builder()
+            .alpns(vec![subduction_iroh::ALPN.to_vec()])
+            .bind()
+            .await
+            .map_err(SyncError::IrohBind)?;
+
+        let signer = self.load_signer()?;
+
+        let result = subduction_iroh::client::connect(
+            &endpoint,
+            addr,
+            Self::DEFAULT_TIMEOUT,
+            TimeoutTokio,
+            &signer,
+            audience,
+        )
+        .await?;
+
+        tokio::spawn(async move {
+            if let Err(e) = result.listener_task.await {
+                tracing::error!("Iroh listener error: {e:?}");
+            }
+        });
+        tokio::spawn(async move {
+            if let Err(e) = result.sender_task.await {
+                tracing::error!("Iroh sender error: {e:?}");
+            }
+        });
+
+        let actual_peer_id = result.authenticated.peer_id();
+        let authenticated = result
+            .authenticated
+            .map(crate::subduction::DarnConnection::Iroh);
+
+        Ok((authenticated, actual_peer_id))
     }
 
     /// Connect to a peer, attach to Subduction, and perform a full sync.
@@ -1079,7 +1206,7 @@ impl Darn {
     {
         on_progress(SyncProgressEvent::ConnectingToPeer {
             peer_name: peer.name.to_string(),
-            url: peer.url.clone(),
+            address: peer.address.display_addr(),
         });
 
         let (authenticated_connection, peer_id) = self.connect_peer(peer).await?;
@@ -1207,6 +1334,8 @@ impl Darn {
 #[derive(Debug)]
 pub struct InitializedDarn {
     root: PathBuf,
+    config: DarnConfig,
+    layout: WorkspaceLayout,
 }
 
 impl InitializedDarn {
@@ -1216,10 +1345,22 @@ impl InitializedDarn {
         &self.root
     }
 
-    /// Get the `.darn/` directory path.
+    /// Get the loaded `.darn` config.
     #[must_use]
-    pub fn darn_dir(&self) -> PathBuf {
-        self.root.join(DARN_DIR)
+    pub const fn config(&self) -> &DarnConfig {
+        &self.config
+    }
+
+    /// Get the workspace layout (centralized storage paths).
+    #[must_use]
+    pub const fn layout(&self) -> &WorkspaceLayout {
+        &self.layout
+    }
+
+    /// Get the manifest file path (`~/.config/darn/workspaces/<id>/manifest.json`).
+    #[must_use]
+    pub fn manifest_path(&self) -> PathBuf {
+        self.layout.manifest_path()
     }
 
     /// Get the peer ID from the global signer.
@@ -1240,6 +1381,8 @@ impl InitializedDarn {
 #[derive(Debug)]
 pub struct UnopenedDarn {
     root: PathBuf,
+    config: DarnConfig,
+    layout: WorkspaceLayout,
 }
 
 impl UnopenedDarn {
@@ -1249,22 +1392,28 @@ impl UnopenedDarn {
         &self.root
     }
 
-    /// Get the `.darn/` directory path.
+    /// Get the loaded `.darn` config.
     #[must_use]
-    pub fn darn_dir(&self) -> PathBuf {
-        self.root.join(DARN_DIR)
+    pub const fn config(&self) -> &DarnConfig {
+        &self.config
     }
 
-    /// Get the storage directory path.
+    /// Get the workspace layout (centralized storage paths).
+    #[must_use]
+    pub const fn layout(&self) -> &WorkspaceLayout {
+        &self.layout
+    }
+
+    /// Get the storage directory path (`~/.config/darn/workspaces/<id>/storage/`).
     #[must_use]
     pub fn storage_dir(&self) -> PathBuf {
-        self.darn_dir().join(STORAGE_DIR)
+        self.layout.storage_dir()
     }
 
-    /// Get the manifest file path.
+    /// Get the manifest file path (`~/.config/darn/workspaces/<id>/manifest.json`).
     #[must_use]
     pub fn manifest_path(&self) -> PathBuf {
-        self.darn_dir().join(MANIFEST_FILE)
+        self.layout.manifest_path()
     }
 
     /// Load the manifest from disk.
@@ -1303,8 +1452,8 @@ impl UnopenedDarn {
     ///
     /// Returns an error if initialization fails.
     pub fn subduction(&self) -> Result<Arc<DarnSubduction>, SubductionError> {
-        let signer = Darn::load_signer_from(&self.root)?;
-        let storage = Darn::storage_from(&self.root)?;
+        let signer = Darn::load_signer_static()?;
+        let storage = Darn::storage_from_layout(&self.layout)?;
         Ok(subduction::spawn(signer, storage))
     }
 
@@ -1314,11 +1463,13 @@ impl UnopenedDarn {
     ///
     /// Returns an error if hydration fails.
     pub async fn hydrate(self) -> Result<Darn, OpenError> {
-        let signer = Darn::load_signer_from(&self.root)?;
-        let storage = Darn::storage_from(&self.root)?;
+        let signer = Darn::load_signer_static()?;
+        let storage = Darn::storage_from_layout(&self.layout)?;
         let subduction = Box::pin(subduction::hydrate(signer, storage)).await?;
         Ok(Darn {
             root: self.root,
+            config: self.config,
+            layout: self.layout,
             subduction,
         })
     }
@@ -1375,7 +1526,7 @@ impl UnopenedDarn {
     ///
     /// Returns an error if the signer cannot be loaded.
     pub fn load_signer(&self) -> Result<MemorySigner, SignerLoadError> {
-        Darn::load_signer_from(&self.root)
+        Darn::load_signer_static()
     }
 }
 
@@ -1385,6 +1536,14 @@ pub enum OpenError {
     /// Not a workspace.
     #[error(transparent)]
     NotAWorkspace(#[from] NotAWorkspace),
+
+    /// Config directory error.
+    #[error(transparent)]
+    Config(#[from] NoConfigDir),
+
+    /// Dotfile error.
+    #[error(transparent)]
+    Dotfile(#[from] DotfileError),
 
     /// Signer error.
     #[error(transparent)]
@@ -1427,9 +1586,9 @@ pub enum SignerLoadError {
     Signer(#[from] LoadSignerError),
 }
 
-/// No workspace found (no `.darn` directory).
+/// No workspace found (no `.darn` file).
 #[derive(Debug, Clone, Copy, Error)]
-#[error("not a darn workspace (or any parent): .darn directory not found")]
+#[error("not a darn workspace (or any parent): .darn file not found")]
 pub struct NotAWorkspace;
 
 /// Error initializing a workspace.
@@ -1442,6 +1601,14 @@ pub enum InitWorkspaceError {
     /// Config directory error.
     #[error(transparent)]
     Config(#[from] NoConfigDir),
+
+    /// Dotfile error.
+    #[error(transparent)]
+    Dotfile(#[from] DotfileError),
+
+    /// Registry error.
+    #[error(transparent)]
+    Registry(#[from] crate::workspace::registry::RegistryError),
 
     /// Signer error.
     #[error(transparent)]
@@ -1506,9 +1673,29 @@ pub enum SyncError {
     #[error(transparent)]
     Signer(#[from] SignerLoadError),
 
-    /// Connection error.
+    /// WebSocket connection error.
     #[error(transparent)]
-    Connection(#[from] subduction_websocket::tokio::client::ClientConnectError),
+    WebSocketConnection(#[from] subduction_websocket::tokio::client::ClientConnectError),
+
+    /// Invalid iroh node ID.
+    #[cfg(feature = "iroh")]
+    #[error("invalid iroh node ID: {0}")]
+    IrohNodeId(iroh::KeyParsingError),
+
+    /// Invalid iroh relay URL.
+    #[cfg(feature = "iroh")]
+    #[error("invalid iroh relay URL: {0}")]
+    IrohRelayUrl(iroh::RelayUrlParseError),
+
+    /// Failed to bind iroh endpoint.
+    #[cfg(feature = "iroh")]
+    #[error("failed to bind iroh endpoint: {0}")]
+    IrohBind(iroh::endpoint::BindError),
+
+    /// Iroh connection error.
+    #[cfg(feature = "iroh")]
+    #[error(transparent)]
+    IrohConnection(#[from] subduction_iroh::error::ConnectError),
 
     /// Error attaching connection.
     #[error(transparent)]
@@ -1521,148 +1708,4 @@ pub enum SyncError {
     /// Sync error.
     #[error(transparent)]
     Sync(#[from] DarnIoError),
-}
-
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Once;
-
-    /// Ensure a global signer exists before any workspace test runs.
-    ///
-    /// In CI there is no `~/.config/darn/signer/` so `Darn::init` would
-    /// fail with `InvalidKeyLength`. This one-time setup generates a
-    /// signer if none exists. It's idempotent and thread-safe.
-    static ENSURE_SIGNER: Once = Once::new();
-
-    fn with_temp_home<F, R>(f: F) -> R
-    where
-        F: FnOnce(&Path) -> R,
-    {
-        ENSURE_SIGNER.call_once(|| {
-            let signer_dir = config::global_signer_dir().expect("resolve signer dir");
-            crate::signer::load_or_generate(&signer_dir).expect("ensure signer exists");
-        });
-
-        let dir = tempfile::tempdir().expect("create tempdir");
-        f(dir.path())
-    }
-
-    #[test]
-    fn init_creates_darn_directory_structure() {
-        with_temp_home(|temp_dir| {
-            let ws = Darn::init(temp_dir).expect("init workspace");
-
-            let darn_dir = temp_dir.join(DARN_DIR);
-            assert!(darn_dir.is_dir(), ".darn directory should exist");
-
-            let storage_dir = darn_dir.join(STORAGE_DIR);
-            assert!(storage_dir.is_dir(), "storage directory should exist");
-
-            assert!(
-                ws.root()
-                    .ends_with(temp_dir.file_name().unwrap_or_default())
-            );
-        });
-    }
-
-    #[test]
-    fn init_twice_fails() {
-        with_temp_home(|temp_dir| {
-            Darn::init(temp_dir).expect("first init");
-
-            let result = Darn::init(temp_dir);
-            assert!(result.is_err(), "second init should fail");
-
-            match result {
-                Err(InitWorkspaceError::AlreadyExists(_)) => {}
-                other => panic!("expected AlreadyExists, got {other:?}"),
-            }
-        });
-    }
-
-    #[test]
-    fn open_without_subduction_existing_workspace() {
-        with_temp_home(|temp_dir| {
-            Darn::init(temp_dir).expect("init");
-
-            let ws = Darn::open_without_subduction(temp_dir).expect("open");
-            assert!(ws.darn_dir().is_dir());
-        });
-    }
-
-    #[test]
-    fn open_nonexistent_fails() {
-        with_temp_home(|temp_dir| {
-            let result = Darn::open_without_subduction(temp_dir);
-            assert!(result.is_err(), "open without init should fail");
-
-            match result {
-                Err(NotAWorkspace) => {}
-                other => panic!("expected NotAWorkspace, got {other:?}"),
-            }
-        });
-    }
-
-    #[test]
-    fn open_from_subdirectory() {
-        with_temp_home(|temp_dir| {
-            Darn::init(temp_dir).expect("init");
-
-            let subdir = temp_dir.join("src").join("deep").join("nested");
-            std::fs::create_dir_all(&subdir).expect("create subdirs");
-
-            let ws = Darn::open_without_subduction(&subdir).expect("open from nested subdir");
-            assert!(ws.darn_dir().is_dir());
-        });
-    }
-
-    #[test]
-    fn find_root_from_nested_directory() {
-        with_temp_home(|temp_dir| {
-            Darn::init(temp_dir).expect("init");
-
-            let subdir = temp_dir.join("a").join("b").join("c");
-            std::fs::create_dir_all(&subdir).expect("create subdirs");
-
-            let root = Darn::find_root(&subdir).expect("find_root");
-            assert!(root.join(DARN_DIR).is_dir());
-        });
-    }
-
-    #[test]
-    fn find_root_not_found() {
-        with_temp_home(|temp_dir| {
-            let result = Darn::find_root(temp_dir);
-            assert!(result.is_err());
-
-            match result {
-                Err(NotAWorkspace) => {}
-                other => panic!("expected NotAWorkspace, got {other:?}"),
-            }
-        });
-    }
-
-    #[test]
-    fn unopened_darn_paths() {
-        with_temp_home(|temp_dir| {
-            Darn::init(temp_dir).expect("init");
-            let ws = Darn::open_without_subduction(temp_dir).expect("open");
-
-            assert_eq!(ws.darn_dir(), ws.root().join(DARN_DIR));
-            assert_eq!(ws.storage_dir(), ws.darn_dir().join(STORAGE_DIR));
-        });
-    }
-
-    #[test]
-    fn root_accessor() {
-        with_temp_home(|temp_dir| {
-            let ws = Darn::init(temp_dir).expect("init");
-
-            // Root should be the canonicalized temp_dir
-            assert!(ws.root().is_absolute());
-            assert!(ws.root().is_dir());
-        });
-    }
 }

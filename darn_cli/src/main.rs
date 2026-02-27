@@ -2,6 +2,7 @@
 //!
 //! Directory-based Automerge Replication Node - a filesystem CLI for CRDT-backed files.
 
+#![forbid(unsafe_code)]
 // CLI-specific lint allows
 #![allow(clippy::format_push_string)] // Common pattern for building CLI output
 #![allow(clippy::large_futures)] // Async CLI commands are naturally large
@@ -46,7 +47,11 @@ async fn main() -> Result<()> {
     }
 
     match cli.command {
-        Commands::Init { path } => commands::init(&path, out).await,
+        Commands::Init {
+            path,
+            peer,
+            peer_name,
+        } => commands::init(&path, peer.as_deref(), peer_name.as_deref(), out).await,
         Commands::Clone { root_id, path } => commands::clone_cmd(&root_id, &path, out).await,
         Commands::Ignore { patterns } => commands::ignore(&patterns, out),
         Commands::Unignore { patterns } => commands::unignore(&patterns, out),
@@ -60,9 +65,13 @@ async fn main() -> Result<()> {
         Commands::Watch { interval, no_track } => commands::watch(&interval, no_track, out).await,
         Commands::Info => commands::info(out),
         Commands::Peer { command } => match command {
-            PeerCommands::Add { name, url, peer_id } => {
-                commands::peer_add(&name, &url, peer_id.as_deref(), out)
-            }
+            PeerCommands::Add {
+                name,
+                websocket,
+                iroh,
+                relay,
+                peer_id,
+            } => commands::peer_add(name, websocket, iroh, relay, peer_id, out),
             PeerCommands::List => commands::peer_list(out),
             PeerCommands::Remove { name } => commands::peer_remove(&name, out),
         },
@@ -93,6 +102,14 @@ enum Commands {
         /// Directory to initialize (defaults to current directory)
         #[arg(default_value = ".")]
         path: std::path::PathBuf,
+
+        /// Add a sync server during init (WebSocket URL, e.g. `ws://localhost:9000`)
+        #[arg(long)]
+        peer: Option<String>,
+
+        /// Name for the peer (defaults to hostname from URL)
+        #[arg(long, requires = "peer")]
+        peer_name: Option<String>,
     },
 
     /// Clone a workspace by root directory ID (syncs from global peers)
@@ -105,14 +122,14 @@ enum Commands {
         path: std::path::PathBuf,
     },
 
-    /// Add patterns to .darnignore (excluded from sync)
+    /// Add ignore patterns (excluded from sync)
     Ignore {
         /// Patterns to ignore (gitignore syntax)
         #[arg(required = true)]
         patterns: Vec<String>,
     },
 
-    /// Remove patterns from .darnignore
+    /// Remove ignore patterns
     Unignore {
         /// Patterns to stop ignoring
         #[arg(required = true)]
@@ -165,15 +182,26 @@ enum Commands {
 
 #[derive(Debug, Subcommand)]
 enum PeerCommands {
-    /// Add a peer
+    /// Add a peer (interactive when flags omitted)
     Add {
-        /// Name for this peer (used to identify it)
-        name: String,
+        /// Name for this peer (prompted interactively if omitted)
+        #[arg(long)]
+        name: Option<String>,
 
-        /// Peer URL (WebSocket, e.g., `ws://localhost:9000`)
-        url: String,
+        /// WebSocket URL (e.g., `ws://localhost:9000`)
+        #[arg(long, conflicts_with = "iroh")]
+        websocket: Option<String>,
 
-        /// Peer ID in base58 format (optional; if omitted, uses discovery mode)
+        /// Iroh node ID (base32 public key)
+        #[arg(long, conflicts_with = "websocket")]
+        iroh: Option<String>,
+
+        /// Iroh relay URL for NAT traversal (only with --iroh)
+        #[arg(long, requires = "iroh")]
+        relay: Option<String>,
+
+        /// Peer ID in base58 (optional; if omitted, uses discovery mode)
+        #[arg(long)]
         peer_id: Option<String>,
     },
 
