@@ -3,7 +3,7 @@
 //! Discovers new files in a workspace and processes them in parallel for performance.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     hash::{DefaultHasher, Hash, Hasher},
     path::{Path, PathBuf},
     sync::{
@@ -491,37 +491,112 @@ where
             .unwrap_or_default(),
     };
 
-    // ── Phase 2: update directory tree sequentially ────────────────────
+    // ── Phase 2a: ensure all parent directories exist (sequential) ─────
     //
-    // All directory document mutations (creating parent directories and
-    // adding file entries) happen here, one file at a time. Concurrent
-    // modifications to the same Automerge directory document cause CRDT
-    // map-key conflicts: each concurrent writer creates its own "docs"
-    // list, and the merge picks one winner, losing the other entries.
-    let mut final_results = Vec::with_capacity(all_stored.len());
+    // Walk the set of unique parent paths top-down so intermediate
+    // directories are created before their children. This is lightweight
+    // (just creating empty Automerge directory docs) and must be
+    // sequential because nested directories share ancestor docs.
+    let unique_parents: BTreeSet<PathBuf> = all_stored
+        .iter()
+        .filter_map(|s| s.discovered.relative_path.parent().map(Path::to_path_buf))
+        .collect();
 
-    for stored in &all_stored {
+    // BTreeSet iteration is sorted, so "src" comes before "src/sub".
+    for parent in &unique_parents {
         if cancel.is_cancelled() {
             break;
         }
 
-        if let Err(e) = register_file_in_directory(subduction, root_dir_id, stored).await {
-            tracing::warn!(
-                "Failed to register {} in directory: {e}",
-                stored.discovered.relative_path.display()
-            );
-            final_errors.push((stored.discovered.relative_path.clone(), e.to_string()));
-            continue;
+        // Build a dummy relative path with a placeholder filename so
+        // ensure_parent_directories creates all components of `parent`.
+        let probe = parent.join("__probe__");
+        if let Err(e) =
+            sedimentree::ensure_parent_directories(subduction, root_dir_id, &probe).await
+        {
+            tracing::warn!("Failed to create directory {}: {e}", parent.display());
+            // Errors here will surface per-file in Phase 2b.
         }
-
-        final_results.push(DiscoveredFile {
-            relative_path: stored.discovered.relative_path.clone(),
-            sedimentree_id: stored.discovered.sedimentree_id,
-            file_type: stored.discovered.file_type,
-            file_system_digest: stored.discovered.file_system_digest,
-            sedimentree_digest: stored.discovered.sedimentree_digest,
-        });
     }
+
+    // ── Phase 2b: add files to directories (parallel per parent) ────────
+    //
+    // Files sharing the same parent directory must be registered
+    // sequentially (they mutate the same Automerge document). But files
+    // in *different* directories can be processed concurrently.
+    let mut by_parent: HashMap<PathBuf, Vec<&StoredFile>> = HashMap::new();
+    for stored in &all_stored {
+        let parent = stored
+            .discovered
+            .relative_path
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .to_path_buf();
+        by_parent.entry(parent).or_default().push(stored);
+    }
+
+    let final_results: Arc<Mutex<Vec<DiscoveredFile>>> = Arc::new(Mutex::new(Vec::new()));
+    let shared_errors: Arc<Mutex<Vec<(PathBuf, String)>>> =
+        Arc::new(Mutex::new(std::mem::take(&mut final_errors)));
+
+    stream::iter(by_parent)
+        .for_each_concurrent(concurrency, |(_, files)| {
+            let results = Arc::clone(&final_results);
+            let errors = Arc::clone(&shared_errors);
+
+            async move {
+                for stored in files {
+                    if cancel.is_cancelled() {
+                        break;
+                    }
+
+                    // Parent already exists from Phase 2a, so this only
+                    // looks up the parent ID and adds the file entry.
+                    if let Err(e) =
+                        register_file_in_directory(subduction, root_dir_id, stored).await
+                    {
+                        tracing::warn!(
+                            "Failed to register {} in directory: {e}",
+                            stored.discovered.relative_path.display()
+                        );
+                        if let Ok(mut errs) = errors.lock() {
+                            errs.push((
+                                stored.discovered.relative_path.clone(),
+                                e.to_string(),
+                            ));
+                        }
+                        continue;
+                    }
+
+                    if let Ok(mut r) = results.lock() {
+                        r.push(DiscoveredFile {
+                            relative_path: stored.discovered.relative_path.clone(),
+                            sedimentree_id: stored.discovered.sedimentree_id,
+                            file_type: stored.discovered.file_type,
+                            file_system_digest: stored.discovered.file_system_digest,
+                            sedimentree_digest: stored.discovered.sedimentree_digest,
+                        });
+                    }
+                }
+            }
+        })
+        .await;
+
+    let final_results = match Arc::try_unwrap(final_results) {
+        Ok(mutex) => mutex.into_inner().unwrap_or_default(),
+        Err(arc) => arc
+            .lock()
+            .map(|mut g| std::mem::take(&mut *g))
+            .unwrap_or_default(),
+    };
+
+    let final_errors = match Arc::try_unwrap(shared_errors) {
+        Ok(mutex) => mutex.into_inner().unwrap_or_default(),
+        Err(arc) => arc
+            .lock()
+            .map(|mut g| std::mem::take(&mut *g))
+            .unwrap_or_default(),
+    };
 
     (final_results, final_errors, cancel.is_cancelled())
 }

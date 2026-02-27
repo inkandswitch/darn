@@ -34,6 +34,7 @@ console.workspace = true
 darn_core.workspace = true
 eyre.workspace = true
 future_form.workspace = true
+futures.workspace = true
 getrandom.workspace = true
 sedimentree_core.workspace = true
 sedimentree_fs_storage.workspace = true

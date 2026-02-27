@@ -922,6 +922,7 @@ dependencies = [
  "darn_core",
  "eyre",
  "future_form",
+ "futures",
  "getrandom 0.2.17",
  "predicates",
  "sedimentree_core",

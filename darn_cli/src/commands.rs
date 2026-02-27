@@ -16,6 +16,7 @@ use std::{
 };
 
 use console::Style;
+use futures::StreamExt as _;
 use darn_core::{
     darn::Darn,
     directory::{Directory, entry::EntryType, sedimentree_id_to_url},
@@ -327,31 +328,116 @@ pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path, out: Output) -> ey
     let mut manifest = darn.load_manifest()?;
     let timeout = Some(Duration::from_secs(30));
 
-    let progress = out.progress(100, "Cloning files...");
+    let progress = out.progress(100, "Discovering files...");
 
-    let mut total_received = 0usize;
-    let mut total_sent = 0usize;
-    let mut staged = StagedUpdate::new(&root)?;
+    let total_received = AtomicUsize::new(0);
+    let total_sent = AtomicUsize::new(0);
 
-    let file_count = clone_directory_recursive_with_sync(
+    // Phase 1: Walk directory tree, syncing only directory docs.
+    // Collect file entries for parallel sync.
+    let file_entries = collect_clone_entries(
         darn.subduction(),
         root_dir_id,
-        &root,
-        std::path::PathBuf::new(),
-        &mut staged,
+        PathBuf::new(),
         timeout,
-        &mut total_received,
-        &mut total_sent,
-        &progress,
-        out,
+        &total_received,
+        &total_sent,
     )
     .await?;
 
-    if file_count == 0 {
+    if file_entries.is_empty() {
         progress.stop("No files found");
         out.outro("Clone complete (empty workspace)")?;
         return Ok(());
     }
+
+    progress.stop(format!("Found {} file(s)", file_entries.len()));
+
+    // Phase 2: Sync all file sedimentrees in parallel.
+    #[allow(clippy::cast_possible_truncation)]
+    let sync_progress = out.progress(file_entries.len() as u64, "Syncing files...");
+
+    let concurrency = std::thread::available_parallelism()
+        .map(std::num::NonZero::get)
+        .unwrap_or(4);
+
+    let subduction = darn.subduction().clone();
+
+    futures::stream::iter(&file_entries)
+        .for_each_concurrent(concurrency, |entry| {
+            let total_received = &total_received;
+            let total_sent = &total_sent;
+            let sync_progress = &sync_progress;
+            let subduction = &subduction;
+
+            async move {
+                match subduction.sync_all(entry.sedimentree_id, true, timeout).await {
+                    Ok(sync_result) => {
+                        for (success, stats, _errors) in sync_result.values() {
+                            if *success {
+                                total_received.fetch_add(stats.total_received(), Ordering::Relaxed);
+                                total_sent.fetch_add(stats.total_sent(), Ordering::Relaxed);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %entry.path.display(),
+                            "Failed to sync file: {e}"
+                        );
+                    }
+                }
+                sync_progress.inc(1);
+                sync_progress.set_message(format!("{}", entry.path.display()));
+            }
+        })
+        .await;
+
+    sync_progress.stop(format!("Synced {} file(s)", file_entries.len()));
+
+    // Phase 3: Stage files (local I/O only, sequential for StagedUpdate).
+    #[allow(clippy::cast_possible_truncation)]
+    let stage_progress = out.progress(file_entries.len() as u64, "Staging files...");
+    let mut staged = StagedUpdate::new(&root)?;
+    let mut file_count = 0usize;
+
+    for entry in &file_entries {
+        let Some(am_doc) =
+            sedimentree::load_document(darn.subduction(), entry.sedimentree_id).await?
+        else {
+            tracing::warn!(path = %entry.path.display(), "File empty after sync");
+            continue;
+        };
+
+        let file = match File::from_automerge(&am_doc) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!(path = %entry.path.display(), "Failed to parse file: {e}");
+                continue;
+            }
+        };
+
+        let file_type = if file.content.is_text() {
+            FileType::Text
+        } else {
+            FileType::Binary
+        };
+
+        let sed_digest =
+            sedimentree::compute_digest(darn.subduction(), entry.sedimentree_id).await?;
+
+        staged.stage_create(&file, entry.path.clone(), entry.sedimentree_id, file_type, sed_digest)?;
+        file_count += 1;
+
+        stage_progress.inc(1);
+        if out.is_porcelain() {
+            out.kv("cloned", &entry.path.display().to_string())?;
+        } else {
+            stage_progress.set_message(format!("{}", entry.path.display()));
+        }
+    }
+
+    stage_progress.stop(format!("{file_count} file(s) staged"));
 
     // Commit: parallel renames from staging dir into workspace
     let commit_result = staged.commit(&mut manifest).await?;
@@ -361,9 +447,8 @@ pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path, out: Output) -> ey
         }
     }
 
-    progress.stop(format!(
-        "{file_count} file(s) cloned (▼{total_received} ▲{total_sent})"
-    ));
+    let total_received = total_received.load(Ordering::Relaxed);
+    let total_sent = total_sent.load(Ordering::Relaxed);
 
     darn.save_manifest(&manifest)?;
 
@@ -379,127 +464,78 @@ pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path, out: Output) -> ey
     Ok(())
 }
 
-/// Recursively clone a directory: sync each sedimentree, then stage files.
-///
-/// Files are staged into a [`StagedUpdate`] rather than written directly
-/// to the workspace. The caller commits the staged update after traversal
-/// completes, giving external observers a near-atomic view.
-#[allow(clippy::too_many_arguments)]
-async fn clone_directory_recursive_with_sync(
-    subduction: &std::sync::Arc<darn_core::subduction::DarnSubduction>,
+/// A file discovered during directory tree traversal, pending sync.
+struct CloneEntry {
+    /// Relative path within the workspace.
+    path: PathBuf,
+    /// Sedimentree ID for this file.
+    sedimentree_id: SedimentreeId,
+}
+
+/// Phase 1 of clone: walk the directory tree, syncing only directory
+/// sedimentrees (must be sequential — need parent before child). Collect
+/// file entries for parallel sync in Phase 2.
+async fn collect_clone_entries(
+    subduction: &Arc<darn_core::subduction::DarnSubduction>,
     dir_id: SedimentreeId,
-    workspace_root: &Path,
-    current_path: std::path::PathBuf,
-    staged: &mut StagedUpdate,
-    timeout: Option<std::time::Duration>,
-    total_received: &mut usize,
-    total_sent: &mut usize,
-    progress: &crate::output::Progress,
-    out: Output,
-) -> eyre::Result<usize> {
-    // First, sync this directory's sedimentree from peers
+    current_path: PathBuf,
+    timeout: Option<Duration>,
+    total_received: &AtomicUsize,
+    total_sent: &AtomicUsize,
+) -> eyre::Result<Vec<CloneEntry>> {
+    // Sync this directory's sedimentree from peers
     let sync_result = subduction.sync_all(dir_id, true, timeout).await?;
     for (success, stats, _errors) in sync_result.values() {
         if *success {
-            *total_received += stats.total_received();
-            *total_sent += stats.total_sent();
+            total_received.fetch_add(stats.total_received(), Ordering::Relaxed);
+            total_sent.fetch_add(stats.total_sent(), Ordering::Relaxed);
         }
     }
 
     // Load directory document
     let Some(am_doc) = sedimentree::load_document(subduction, dir_id).await? else {
         info!(?dir_id, "Directory not found after sync");
-        return Ok(0);
+        return Ok(Vec::new());
     };
 
     let dir = match Directory::from_automerge(&am_doc) {
         Ok(d) => d,
         Err(e) => {
             info!(?dir_id, ?e, "Skipping non-directory sedimentree");
-            return Ok(0);
+            return Ok(Vec::new());
         }
     };
 
-    let mut file_count = 0;
+    let mut entries = Vec::new();
 
     for entry in &dir.entries {
         let entry_path = current_path.join(&entry.name);
 
         match entry.entry_type {
             EntryType::File => {
-                // Sync this file's sedimentree
-                let sync_result = subduction
-                    .sync_all(entry.sedimentree_id, true, timeout)
-                    .await?;
-                for (success, stats, _errors) in sync_result.values() {
-                    if *success {
-                        *total_received += stats.total_received();
-                        *total_sent += stats.total_sent();
-                    }
-                }
-
-                // Load file document
-                let Some(am_doc) =
-                    sedimentree::load_document(subduction, entry.sedimentree_id).await?
-                else {
-                    info!(name = %entry.name, "File sedimentree empty after sync");
-                    continue;
-                };
-
-                let file = match File::from_automerge(&am_doc) {
-                    Ok(f) => f,
-                    Err(e) => {
-                        info!(name = %entry.name, ?e, "Failed to parse file");
-                        continue;
-                    }
-                };
-
-                let file_type = if file.content.is_text() {
-                    FileType::Text
-                } else {
-                    FileType::Binary
-                };
-
-                let sed_digest =
-                    sedimentree::compute_digest(subduction, entry.sedimentree_id).await?;
-
-                // Stage the file (written to staging dir, not workspace)
-                staged.stage_create(
-                    &file,
-                    entry_path.clone(),
-                    entry.sedimentree_id,
-                    file_type,
-                    sed_digest,
-                )?;
-
-                file_count += 1;
-                if out.is_porcelain() {
-                    out.kv("cloned", &entry_path.display().to_string())?;
-                } else {
-                    progress.set_message(format!("{}", entry_path.display()));
-                }
+                entries.push(CloneEntry {
+                    path: entry_path,
+                    sedimentree_id: entry.sedimentree_id,
+                });
             }
 
             EntryType::Folder => {
-                // Recurse into subdirectory (Box::pin to avoid infinitely-sized future)
-                file_count += Box::pin(clone_directory_recursive_with_sync(
+                // Recurse into subdirectory (Box::pin for recursive async)
+                let mut sub_entries = Box::pin(collect_clone_entries(
                     subduction,
                     entry.sedimentree_id,
-                    workspace_root,
                     entry_path,
-                    staged,
                     timeout,
                     total_received,
                     total_sent,
-                    progress,
-                    out,
                 ))
                 .await?;
+                entries.append(&mut sub_entries);
             }
         }
     }
 
-    Ok(file_count)
+    Ok(entries)
 }
 
 /// Add ignore patterns to the `.darn` config.
