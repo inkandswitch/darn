@@ -13,6 +13,85 @@ use thiserror::Error;
 
 use crate::{serde_base58, unix_timestamp::UnixTimestamp};
 
+/// Network address for connecting to a peer.
+///
+/// Supports WebSocket (relay) and Iroh (direct QUIC) transports.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "transport")]
+pub enum PeerAddress {
+    /// WebSocket relay connection (ws:// or wss://).
+    #[serde(rename = "websocket")]
+    WebSocket {
+        /// The WebSocket URL.
+        url: String,
+    },
+
+    /// Iroh direct QUIC connection.
+    #[cfg(feature = "iroh")]
+    #[serde(rename = "iroh")]
+    Iroh {
+        /// The iroh node's public key as a base32 string.
+        node_id: String,
+
+        /// Optional relay URL for NAT traversal.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        relay_url: Option<String>,
+    },
+}
+
+impl PeerAddress {
+    /// Create a WebSocket address.
+    #[must_use]
+    pub const fn websocket(url: String) -> Self {
+        Self::WebSocket { url }
+    }
+
+    /// Create an Iroh address.
+    #[cfg(feature = "iroh")]
+    #[must_use]
+    pub const fn iroh(node_id: String, relay_url: Option<String>) -> Self {
+        Self::Iroh { node_id, relay_url }
+    }
+
+    /// Human-readable display of the address for logs and UI.
+    #[must_use]
+    pub fn display_addr(&self) -> String {
+        match self {
+            Self::WebSocket { url } => url.clone(),
+            #[cfg(feature = "iroh")]
+            Self::Iroh { node_id, relay_url } => {
+                if let Some(relay) = relay_url {
+                    format!("iroh:{node_id} (relay: {relay})")
+                } else {
+                    format!("iroh:{node_id}")
+                }
+            }
+        }
+    }
+
+    /// Derive a discovery service name from the address.
+    ///
+    /// For WebSocket, strips the protocol prefix.
+    /// For Iroh, uses the node ID.
+    #[must_use]
+    pub fn service_name(&self) -> &str {
+        match self {
+            Self::WebSocket { url } => url
+                .strip_prefix("wss://")
+                .or_else(|| url.strip_prefix("ws://"))
+                .unwrap_or(url),
+            #[cfg(feature = "iroh")]
+            Self::Iroh { node_id, .. } => node_id,
+        }
+    }
+}
+
+impl fmt::Display for PeerAddress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.display_addr())
+    }
+}
+
 /// A validated peer name.
 ///
 /// Peer names are used as filenames, so they must be valid filesystem names.
@@ -117,15 +196,15 @@ pub enum InvalidPeerName {
 
 /// A configured peer for sync.
 ///
-/// Each peer has a name (used as filename), a WebSocket URL,
+/// Each peer has a name (used as filename), a network address,
 /// and an audience configuration for authentication.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Peer {
     /// Human-readable name for the peer.
     pub name: PeerName,
 
-    /// WebSocket URL for connecting to the peer.
-    pub url: String,
+    /// Network address for reaching this peer.
+    pub address: PeerAddress,
 
     /// Authentication target: Known(PeerId) or Discover(DiscoveryId).
     #[serde(with = "serde_base58::audience")]
@@ -147,27 +226,63 @@ pub struct Peer {
     pub synced_digests: BTreeMap<SedimentreeId, Digest<Sedimentree>>,
 }
 
+/// Raw peer representation for backward-compatible deserialization.
+///
+/// Old format has `"url": "ws://..."`, new format has `"address": { ... }`.
+#[derive(Deserialize)]
+struct PeerRaw {
+    name: PeerName,
+    /// Legacy field — present in old peer JSON files.
+    #[serde(default)]
+    url: Option<String>,
+    /// New field — present in files saved with the new format.
+    #[serde(default)]
+    address: Option<PeerAddress>,
+    #[serde(with = "serde_base58::audience")]
+    audience: Audience,
+    added_at: UnixTimestamp,
+    #[serde(default)]
+    last_synced_at: Option<UnixTimestamp>,
+    #[serde(default, with = "serde_base58::synced_digests")]
+    synced_digests: BTreeMap<SedimentreeId, Digest<Sedimentree>>,
+}
+
+impl From<PeerRaw> for Peer {
+    fn from(raw: PeerRaw) -> Self {
+        let address = match (raw.address, raw.url) {
+            (Some(addr), _) => addr,
+            (None, Some(url)) => PeerAddress::WebSocket { url },
+            (None, None) => PeerAddress::WebSocket { url: String::new() },
+        };
+
+        Self {
+            name: raw.name,
+            address,
+            audience: raw.audience,
+            added_at: raw.added_at,
+            last_synced_at: raw.last_synced_at,
+            synced_digests: raw.synced_digests,
+        }
+    }
+}
+
 impl Peer {
     /// Create a peer with discovery mode.
     ///
-    /// The service name is derived from the URL by stripping the protocol
-    /// (e.g., `ws://relay.example.com:9000` → `relay.example.com:9000`).
-    /// Both sides hash this identifier to create the discovery ID.
+    /// The service name is derived from the address (e.g., stripping `ws://`
+    /// for WebSocket, or using the node ID for Iroh). Both sides hash this
+    /// identifier to create the discovery ID.
     ///
     /// Use this when you don't know the peer's ID ahead of time.
     /// After connecting, the peer's ID will be learned and can be
     /// updated to use `Audience::Known`.
     #[must_use]
-    pub fn discover(name: PeerName, url: String) -> Self {
-        let service_name = url
-            .strip_prefix("wss://")
-            .or_else(|| url.strip_prefix("ws://"))
-            .unwrap_or(&url);
-
+    pub fn discover(name: PeerName, address: PeerAddress) -> Self {
+        let audience = Audience::discover(address.service_name().as_bytes());
         Self {
-            audience: Audience::discover(service_name.as_bytes()),
             name,
-            url,
+            address,
+            audience,
             added_at: UnixTimestamp::now(),
             last_synced_at: None,
             synced_digests: BTreeMap::new(),
@@ -178,11 +293,11 @@ impl Peer {
     ///
     /// Use this when you know the peer's identity ahead of time.
     #[must_use]
-    pub fn known(name: PeerName, url: String, peer_id: PeerId) -> Self {
+    pub fn known(name: PeerName, address: PeerAddress, peer_id: PeerId) -> Self {
         Self {
             audience: Audience::known(peer_id),
             name,
-            url,
+            address,
             added_at: UnixTimestamp::now(),
             last_synced_at: None,
             synced_digests: BTreeMap::new(),
@@ -401,10 +516,14 @@ mod tests {
         });
     }
 
+    fn ws_addr() -> PeerAddress {
+        PeerAddress::websocket("ws://localhost:9000".into())
+    }
+
     #[test]
     fn discover_creates_discovery_audience() -> TestResult {
         let name = PeerName::new("test")?;
-        let peer = Peer::discover(name, "ws://localhost:9000".into());
+        let peer = Peer::discover(name, ws_addr());
         assert!(peer.is_discovery());
         assert!(!peer.is_known());
         assert!(peer.peer_id().is_none());
@@ -415,7 +534,7 @@ mod tests {
     fn known_creates_known_audience() -> TestResult {
         let name = PeerName::new("test")?;
         let peer_id = PeerId::new([1u8; 32]);
-        let peer = Peer::known(name, "ws://localhost:9000".into(), peer_id);
+        let peer = Peer::known(name, ws_addr(), peer_id);
         assert!(peer.is_known());
         assert!(!peer.is_discovery());
         assert_eq!(peer.peer_id(), Some(peer_id));
@@ -425,7 +544,7 @@ mod tests {
     #[test]
     fn set_known_updates_audience() -> TestResult {
         let name = PeerName::new("test")?;
-        let mut peer = Peer::discover(name, "ws://localhost:9000".into());
+        let mut peer = Peer::discover(name, ws_addr());
         assert!(peer.is_discovery());
 
         let peer_id = PeerId::new([2u8; 32]);
@@ -442,18 +561,17 @@ mod tests {
         check!()
             .with_type::<(String, String)>()
             .for_each(|(name_str, url_str)| {
-                // Skip inputs that don't pass PeerName validation
                 let Ok(name) = PeerName::new(name_str) else {
                     return;
                 };
 
-                let peer = Peer::discover(name, url_str.clone());
+                let addr = PeerAddress::websocket(url_str.clone());
+                let peer = Peer::discover(name, addr);
                 let path = dir.path().join("test.json");
                 peer.save(&path).expect("save");
 
                 let loaded = Peer::load(&path).expect("load");
                 assert_eq!(loaded.name.as_str(), peer.name.as_str());
-                assert_eq!(loaded.url, peer.url);
                 assert_eq!(loaded.added_at.as_secs(), peer.added_at.as_secs());
             });
     }
@@ -461,10 +579,9 @@ mod tests {
     #[test]
     fn json_format_discovery() -> TestResult {
         let name = PeerName::new("test")?;
-        let peer = Peer::discover(name, "ws://localhost:9000".into());
+        let peer = Peer::discover(name, ws_addr());
         let json = serde_json::to_string_pretty(&peer)?;
 
-        // Should contain "discover" mode
         assert!(json.contains("\"mode\": \"discover\""));
         Ok(())
     }
@@ -473,10 +590,9 @@ mod tests {
     fn json_format_known() -> TestResult {
         let name = PeerName::new("test")?;
         let peer_id = PeerId::new([1u8; 32]);
-        let peer = Peer::known(name, "ws://localhost:9000".into(), peer_id);
+        let peer = Peer::known(name, ws_addr(), peer_id);
         let json = serde_json::to_string_pretty(&peer)?;
 
-        // Should contain "known" mode
         assert!(json.contains("\"mode\": \"known\""));
         Ok(())
     }

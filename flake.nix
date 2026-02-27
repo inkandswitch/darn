@@ -110,7 +110,6 @@
 
             cargoLock = {
               lockFile = ./Cargo.lock;
-              # outputHashes = {};
             };
 
             buildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.openssl];

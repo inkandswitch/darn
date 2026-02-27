@@ -15,8 +15,8 @@ pub enum SyncProgressEvent {
         /// Name of the peer being connected to.
         peer_name: String,
 
-        /// WebSocket URL of the peer.
-        url: String,
+        /// Display-formatted address of the peer.
+        address: String,
     },
 
     /// Connected to peer.

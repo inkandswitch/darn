@@ -22,7 +22,7 @@ use darn_core::{
     discover::{DiscoverProgress, DiscoverResult},
     file::{File, file_type::FileType, state::FileState},
     manifest::{Manifest, content_hash, tracked::Tracked},
-    peer::{Peer, PeerName},
+    peer::{Peer, PeerAddress, PeerName},
     sedimentree,
     staged_update::StagedUpdate,
     sync_progress::SyncProgressEvent,
@@ -156,7 +156,7 @@ pub(crate) async fn init(
     } else {
         out.outro(&format!(
             "Ready — add a server with {}",
-            cmd("darn peer add <name> <url>")
+            cmd("darn peer add")
         ))?;
     }
 
@@ -195,7 +195,7 @@ fn add_peer_during_init(name: &str, url: &str, out: Output) -> eyre::Result<bool
         return Ok(true);
     }
 
-    let peer = Peer::discover(peer_name, url.to_string());
+    let peer = Peer::discover(peer_name, PeerAddress::websocket(url.to_string()));
     darn_core::peer::add_peer(&peer)?;
 
     if out.is_porcelain() {
@@ -1027,10 +1027,7 @@ async fn continue_sync(
     if peers.is_empty() {
         out.warning("No peers configured")?;
         if !out.is_porcelain() {
-            out.outro(&format!(
-                "Use {} to add peers",
-                cmd("darn peer add <name> <url>")
-            ))?;
+            out.outro(&format!("Use {} to add peers", cmd("darn peer add")))?;
         }
         return Ok(());
     }
@@ -1324,10 +1321,7 @@ fn sync_dry_run(peer_name: Option<&str>, out: Output) -> eyre::Result<()> {
     if peers.is_empty() {
         out.warning("No peers configured")?;
         if !out.is_porcelain() {
-            out.outro(&format!(
-                "Use {} to add peers",
-                cmd("darn peer add <name> <url>")
-            ))?;
+            out.outro(&format!("Use {} to add peers", cmd("darn peer add")))?;
         }
         return Ok(());
     }
@@ -1372,7 +1366,7 @@ fn display_peer_dry_run_status(
         println!(
             "peer\t{}\t{}\t{peer_id_display}\t{last_sync}\t{}",
             peer.name,
-            peer.url,
+            peer.address,
             unsynced.len()
         );
         for path in &unsynced {
@@ -1380,7 +1374,7 @@ fn display_peer_dry_run_status(
         }
     } else {
         // Build peer status content
-        let mut content = format!("URL:       {}\n", peer.url);
+        let mut content = format!("Address:   {}\n", peer.address);
         writeln!(content, "Peer ID:   {peer_id_display}").expect("write to string");
         writeln!(content, "Last sync: {last_sync}").expect("write to string");
 
@@ -1955,26 +1949,65 @@ async fn track_single_file(
 }
 
 /// Add a peer.
+///
+/// Interactive when flags are omitted; fully flag-driven in porcelain mode.
 pub(crate) fn peer_add(
-    name: &str,
-    url: &str,
-    peer_id: Option<&str>,
+    name: Option<String>,
+    websocket: Option<String>,
+    iroh: Option<String>,
+    relay: Option<String>,
+    peer_id: Option<String>,
     out: Output,
 ) -> eyre::Result<()> {
     let darn = Darn::open_without_subduction(Path::new("."))?;
 
-    // Validate peer name
-    let peer_name = PeerName::new(name)?;
+    // -- Name --
+    let name = match name {
+        Some(n) => n,
+        None => out.input("Peer name", "my-relay", None)?,
+    };
+    let peer_name = PeerName::new(&name)?;
 
-    // Check if peer already exists
     if darn.get_peer(&peer_name)?.is_some() {
         out.error(&format!("Peer already exists: {name}"))?;
         return Ok(());
     }
 
+    // -- Address --
+    let address = match (websocket, iroh) {
+        (Some(url), _) => PeerAddress::websocket(url),
+        (_, Some(node_id)) => PeerAddress::iroh(node_id, relay),
+        (None, None) => {
+            let transport: &str = out.select(
+                "Transport",
+                &[
+                    (
+                        "websocket",
+                        "WebSocket",
+                        "relay connection (ws:// or wss://)",
+                    ),
+                    ("iroh", "Iroh", "direct QUIC (NAT-traversing)"),
+                ],
+            )?;
+            if transport == "iroh" {
+                let node_id = out.input("Node ID", "base32 public key", None)?;
+                let relay = out.input(
+                    "Relay URL (optional, press Enter to skip)",
+                    "https://relay.example.com",
+                    None,
+                )?;
+                let relay = if relay.is_empty() { None } else { Some(relay) };
+                PeerAddress::iroh(node_id, relay)
+            } else {
+                let url = out.input("URL", "ws://relay.example.com:9000", None)?;
+                PeerAddress::websocket(url)
+            }
+        }
+    };
+
+    // -- Peer ID (optional, for known mode) --
     let peer = if let Some(id_str) = peer_id {
-        // Parse peer ID from base58
-        let id_bytes = bs58::decode(id_str)
+        let id_bytes = bs58::decode(&id_str)
             .into_vec()
             .map_err(|e| eyre::eyre!("invalid peer ID (expected base58): {e}"))?;
 
@@ -1984,14 +2017,12 @@ pub(crate) fn peer_add(
 
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&id_bytes);
-        let peer_id = PeerId::new(arr);
-
-        Peer::known(peer_name, url.to_string(), peer_id)
+        Peer::known(peer_name, address, PeerId::new(arr))
     } else {
-        // Discovery mode: service name derived from URL (strip ws:// or wss://)
-        Peer::discover(peer_name, url.to_string())
+        Peer::discover(peer_name, address)
     };
 
+    let addr_display = peer.address.display_addr();
     let peer_id_display = if let Some(id) = peer.peer_id() {
         bs58::encode(id.as_bytes()).into_string()
     } else {
@@ -2000,14 +2031,14 @@ pub(crate) fn peer_add(
 
     darn.add_peer(&peer)?;
 
-    info!(%name, %url, "Added peer");
+    info!(%name, %addr_display, "Added peer");
 
     if out.is_porcelain() {
         println!("name\t{name}");
-        println!("url\t{url}");
+        println!("address\t{addr_display}");
         println!("peer_id\t{peer_id_display}");
     } else {
-        out.success(&format!("Added peer: {name} ({url})"))?;
+        out.success(&format!("Added peer: {name} ({addr_display})"))?;
         out.remark(&format!("Peer ID: {peer_id_display}"))?;
     }
 
@@ -2035,7 +2066,7 @@ pub(crate) fn peer_list(out: Output) -> eyre::Result<()> {
                 .map_or_else(|| "never".to_string(), |ts| ts.as_secs().to_string());
             println!(
                 "{}\t{}\t{mode}\t{peer_id_display}\t{last_sync}",
-                peer.name, peer.url
+                peer.name, peer.address
             );
         }
         return Ok(());
@@ -2046,10 +2077,7 @@ pub(crate) fn peer_list(out: Output) -> eyre::Result<()> {
 
     if peers.is_empty() {
         out.remark("No peers configured")?;
-        out.outro(&format!(
-            "Use {} to add peers",
-            cmd("darn peer add <name> <url>")
-        ))?;
+        out.outro(&format!("Use {} to add peers", cmd("darn peer add")))?;
         return Ok(());
     }
 
@@ -2066,7 +2094,7 @@ pub(crate) fn peer_list(out: Output) -> eyre::Result<()> {
             .last_synced_at
             .map_or_else(|| "never".to_string(), format_timestamp);
 
-        let mut content = format!("URL:       {}\n", peer.url);
+        let mut content = format!("Address:   {}\n", peer.address);
         content.push_str(&format!("Peer ID:   {peer_id_display}\n"));
         content.push_str(&format!("Last sync: {last_sync}"));
 
@@ -2134,7 +2162,7 @@ fn info_porcelain(config_dir: &Path, peer_id_str: &str) {
             };
             println!(
                 "peer\t{}\t{}\t{mode}\t{peer_id_display}",
-                peer.name, peer.url
+                peer.name, peer.address
             );
         }
     }
@@ -2220,7 +2248,7 @@ fn info_human(out: Output, config_dir: &Path, peer_id_str: &str) -> eyre::Result
                 table.push_str(&format!(
                     "│ {:<14} │ {:<38} │ {:^8} │\n",
                     truncate_str(peer.name.as_ref(), 14),
-                    truncate_str(&peer.url, 38),
+                    truncate_str(&peer.address.display_addr(), 38),
                     mode
                 ));
             }

@@ -732,13 +732,14 @@ async fn staged_update_handles_mixed_creates_and_deletes() -> TestResult {
 #[test]
 fn peer_add_list_remove() -> TestResult {
     with_env(|_env| {
-        use darn_core::peer::{Peer, PeerName, add_peer, list_peers, remove_peer};
+        use darn_core::peer::{Peer, PeerAddress, PeerName, add_peer, list_peers, remove_peer};
 
         let peers = list_peers()?;
         assert!(peers.is_empty());
 
         let name = PeerName::new("test-relay")?;
-        let peer = Peer::discover(name.clone(), "wss://relay.example.com".to_string());
+        let addr = PeerAddress::websocket("wss://relay.example.com".to_string());
+        let peer = Peer::discover(name.clone(), addr);
         add_peer(&peer)?;
 
         let peers = list_peers()?;

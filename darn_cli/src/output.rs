@@ -168,6 +168,35 @@ impl Output {
         }
     }
 
+    // -- Select --
+
+    /// Prompt the user to select from a list of options.
+    ///
+    /// Each item is `(value, label, hint)`. In porcelain mode, returns the first item.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the interactive prompt fails.
+    pub(crate) fn select<T: Clone + Eq>(
+        self,
+        prompt: &str,
+        items: &[(T, &str, &str)],
+    ) -> eyre::Result<T> {
+        if self.porcelain || items.is_empty() {
+            return items
+                .first()
+                .map(|(v, _, _)| v.clone())
+                .ok_or_else(|| eyre::eyre!("no items to select from"));
+        }
+
+        let mut builder = cliclack::select(prompt);
+        for (value, label, hint) in items {
+            builder = builder.item(value.clone(), label, hint);
+        }
+        let result: T = builder.interact()?;
+        Ok(result)
+    }
+
     // -- Text input --
 
     /// Prompt for text input. In porcelain mode, returns the default or empty string.

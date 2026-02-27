@@ -6,15 +6,26 @@
 //!
 //! Storage is shared globally at `~/.config/darn/storage/` for deduplication
 //! across workspaces.
+//!
+//! The [`DarnConnection`] enum abstracts over WebSocket and Iroh transports,
+//! implementing the `Connection<Sendable>` trait so that the Subduction engine
+//! is transport-agnostic.
 
-use std::{convert::Infallible, path::Path, sync::Arc};
+use std::{convert::Infallible, path::Path, sync::Arc, time::Duration};
 
 use future_form::Sendable;
+use futures::future::BoxFuture;
 use sedimentree_core::commit::CountLeadingZeroBytes;
 use sedimentree_fs_storage::FsStorage;
 
 use subduction_core::{
-    connection::{authenticated::Authenticated, nonce_cache::NonceCache},
+    connection::{
+        Connection,
+        authenticated::Authenticated,
+        message::{BatchSyncRequest, BatchSyncResponse, Message, RequestId},
+        nonce_cache::NonceCache,
+    },
+    peer::id::PeerId,
     policy::open::OpenPolicy,
     sharded_map::ShardedMap,
     subduction::{
@@ -31,10 +42,164 @@ use crate::config::{self, NoConfigDir};
 /// Default number of pending blob requests allowed per connection.
 const DEFAULT_MAX_PENDING_BLOB_REQUESTS: usize = 64;
 
-/// Type alias for the WebSocket client connection used by darn.
-pub type DarnConnection = TokioWebSocketClient<MemorySigner, TimeoutTokio>;
+/// Type alias for the concrete WebSocket client connection.
+pub type WsConnection = TokioWebSocketClient<MemorySigner, TimeoutTokio>;
 
-/// Type alias for an authenticated WebSocket client connection.
+/// Type alias for the concrete Iroh client connection.
+#[cfg(feature = "iroh")]
+pub type IrohConnection = subduction_iroh::connection::IrohConnection<TimeoutTokio>;
+
+/// Transport-agnostic connection for darn.
+///
+/// Wraps either a WebSocket or Iroh connection, dispatching
+/// all [`Connection`] trait methods to the inner variant.
+#[derive(Debug, Clone)]
+pub enum DarnConnection {
+    /// WebSocket relay connection.
+    WebSocket(Box<WsConnection>),
+
+    /// Iroh direct QUIC connection.
+    #[cfg(feature = "iroh")]
+    Iroh(IrohConnection),
+}
+
+impl PartialEq for DarnConnection {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::WebSocket(a), Self::WebSocket(b)) => a == b,
+            #[cfg(feature = "iroh")]
+            (Self::Iroh(a), Self::Iroh(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+/// Unified send error across transports.
+#[derive(Debug, Clone, Copy, Error)]
+pub enum DarnSendError {
+    /// WebSocket send error.
+    #[error("websocket: {0}")]
+    WebSocket(#[from] subduction_websocket::error::SendError),
+
+    /// Iroh send error.
+    #[cfg(feature = "iroh")]
+    #[error("iroh: {0}")]
+    Iroh(#[from] subduction_iroh::error::SendError),
+}
+
+/// Unified receive error across transports.
+#[derive(Debug, Clone, Copy, Error)]
+pub enum DarnRecvError {
+    /// WebSocket receive error.
+    #[error("websocket: {0}")]
+    WebSocket(#[from] subduction_websocket::error::RecvError),
+
+    /// Iroh receive error.
+    #[cfg(feature = "iroh")]
+    #[error("iroh: {0}")]
+    Iroh(#[from] subduction_iroh::error::RecvError),
+}
+
+/// Unified call error across transports.
+#[derive(Debug, Clone, Copy, Error)]
+pub enum DarnCallError {
+    /// WebSocket call error.
+    #[error("websocket: {0}")]
+    WebSocket(#[from] subduction_websocket::error::CallError),
+
+    /// Iroh call error.
+    #[cfg(feature = "iroh")]
+    #[error("iroh: {0}")]
+    Iroh(#[from] subduction_iroh::error::CallError),
+}
+
+/// Unified disconnection error across transports.
+#[derive(Debug, Clone, Copy, Error)]
+pub enum DarnDisconnectionError {
+    /// WebSocket disconnection error.
+    #[error("websocket: {0}")]
+    WebSocket(#[from] subduction_websocket::error::DisconnectionError),
+
+    /// Iroh disconnection error.
+    #[cfg(feature = "iroh")]
+    #[error("iroh: {0}")]
+    Iroh(#[from] subduction_iroh::error::DisconnectionError),
+}
+
+impl Connection<Sendable> for DarnConnection {
+    type SendError = DarnSendError;
+    type RecvError = DarnRecvError;
+    type CallError = DarnCallError;
+    type DisconnectionError = DarnDisconnectionError;
+
+    fn peer_id(&self) -> PeerId {
+        match self {
+            Self::WebSocket(c) => c.peer_id(),
+            #[cfg(feature = "iroh")]
+            Self::Iroh(c) => c.peer_id(),
+        }
+    }
+
+    fn next_request_id(&self) -> BoxFuture<'_, RequestId> {
+        match self {
+            Self::WebSocket(c) => c.next_request_id(),
+            #[cfg(feature = "iroh")]
+            Self::Iroh(c) => c.next_request_id(),
+        }
+    }
+
+    fn disconnect(&self) -> BoxFuture<'_, Result<(), Self::DisconnectionError>> {
+        match self {
+            Self::WebSocket(c) => {
+                Box::pin(async { c.disconnect().await.map_err(DarnDisconnectionError::from) })
+            }
+            #[cfg(feature = "iroh")]
+            Self::Iroh(c) => {
+                Box::pin(async { c.disconnect().await.map_err(DarnDisconnectionError::from) })
+            }
+        }
+    }
+
+    fn send(&self, message: &Message) -> BoxFuture<'_, Result<(), Self::SendError>> {
+        // Clone to decouple the message lifetime from the returned future lifetime.
+        let message = message.clone();
+        match self {
+            Self::WebSocket(c) => {
+                Box::pin(async move { c.send(&message).await.map_err(DarnSendError::from) })
+            }
+            #[cfg(feature = "iroh")]
+            Self::Iroh(c) => {
+                Box::pin(async move { c.send(&message).await.map_err(DarnSendError::from) })
+            }
+        }
+    }
+
+    fn recv(&self) -> BoxFuture<'_, Result<Message, Self::RecvError>> {
+        match self {
+            Self::WebSocket(c) => Box::pin(async { c.recv().await.map_err(DarnRecvError::from) }),
+            #[cfg(feature = "iroh")]
+            Self::Iroh(c) => Box::pin(async { c.recv().await.map_err(DarnRecvError::from) }),
+        }
+    }
+
+    fn call(
+        &self,
+        req: BatchSyncRequest,
+        timeout: Option<Duration>,
+    ) -> BoxFuture<'_, Result<BatchSyncResponse, Self::CallError>> {
+        match self {
+            Self::WebSocket(c) => {
+                Box::pin(async move { c.call(req, timeout).await.map_err(DarnCallError::from) })
+            }
+            #[cfg(feature = "iroh")]
+            Self::Iroh(c) => {
+                Box::pin(async move { c.call(req, timeout).await.map_err(DarnCallError::from) })
+            }
+        }
+    }
+}
+
+/// Type alias for an authenticated darn connection.
 pub type AuthenticatedDarnConnection = Authenticated<DarnConnection, Sendable>;
 
 /// Type alias for the Subduction instance used by darn workspaces.
@@ -42,7 +207,7 @@ pub type AuthenticatedDarnConnection = Authenticated<DarnConnection, Sendable>;
 /// This configures Subduction with:
 /// - `Sendable` future form (thread-safe async)
 /// - `FsStorage` for persistent storage
-/// - `TokioWebSocketClient` for peer connections
+/// - `DarnConnection` for transport-agnostic peer connections
 /// - `OpenPolicy` for permissive access (can be made stricter later)
 /// - `MemorySigner` for ed25519 signing
 /// - `CountLeadingZeroBytes` depth metric for fragment building

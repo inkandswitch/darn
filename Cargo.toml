@@ -36,6 +36,7 @@ getrandom = "0.2"
 globset = "0.4"
 hex = "0.4"
 ignore = "0.4"
+iroh = "0.96"
 minicbor = { version = "2.1", default-features = false, features = ["alloc", "derive", "std"] }
 notify-debouncer-mini = "0.7"
 sedimentree_core = { version = "0.4", features = ["std"] }
@@ -44,6 +45,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 subduction_core = { version = "0.4", features = ["std", "test_utils"] }
 subduction_crypto = { version = "0.1", features = ["std"] }
+subduction_iroh = "0.1"
 subduction_websocket = { version = "0.4", features = ["tokio_client_any"] }
 predicates = "3.1"
 tempfile = "3.16"
@@ -89,13 +91,6 @@ all = { level = "deny", priority = -1 }
 cargo = { level = "deny", priority = -1 }
 multiple_crate_versions = "allow" # various transitive deps
 pedantic = { level = "deny", priority = -1 }
-
-[patch.crates-io]
-sedimentree_core = { git = "https://github.com/inkandswitch/subduction.git", branch = "main" }
-sedimentree_fs_storage = { git = "https://github.com/inkandswitch/subduction.git", branch = "main" }
-subduction_core = { git = "https://github.com/inkandswitch/subduction.git", branch = "main" }
-subduction_crypto = { git = "https://github.com/inkandswitch/subduction.git", branch = "main" }
-subduction_websocket = { git = "https://github.com/inkandswitch/subduction.git", branch = "main" }
 
 [profile.release]
 codegen-units = 1

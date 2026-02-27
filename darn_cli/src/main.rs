@@ -65,9 +65,13 @@ async fn main() -> Result<()> {
         Commands::Watch { interval, no_track } => commands::watch(&interval, no_track, out).await,
         Commands::Info => commands::info(out),
         Commands::Peer { command } => match command {
-            PeerCommands::Add { name, url, peer_id } => {
-                commands::peer_add(&name, &url, peer_id.as_deref(), out)
-            }
+            PeerCommands::Add {
+                name,
+                websocket,
+                iroh,
+                relay,
+                peer_id,
+            } => commands::peer_add(name, websocket, iroh, relay, peer_id, out),
             PeerCommands::List => commands::peer_list(out),
             PeerCommands::Remove { name } => commands::peer_remove(&name, out),
         },
@@ -178,15 +182,26 @@ enum Commands {
 
 #[derive(Debug, Subcommand)]
 enum PeerCommands {
-    /// Add a peer
+    /// Add a peer (interactive when flags omitted)
     Add {
-        /// Name for this peer (used to identify it)
-        name: String,
+        /// Name for this peer (prompted interactively if omitted)
+        #[arg(long)]
+        name: Option<String>,
 
-        /// Peer URL (WebSocket, e.g., `ws://localhost:9000`)
-        url: String,
+        /// WebSocket URL (e.g., `ws://localhost:9000`)
+        #[arg(long, conflicts_with = "iroh")]
+        websocket: Option<String>,
 
-        /// Peer ID in base58 format (optional; if omitted, uses discovery mode)
+        /// Iroh node ID (base32 public key)
+        #[arg(long, conflicts_with = "websocket")]
+        iroh: Option<String>,
+
+        /// Iroh relay URL for NAT traversal (only with --iroh)
+        #[arg(long, requires = "iroh")]
+        relay: Option<String>,
+
+        /// Peer ID in base58 (optional; if omitted, uses discovery mode)
+        #[arg(long)]
         peer_id: Option<String>,
     },
 

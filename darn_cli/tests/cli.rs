@@ -168,7 +168,14 @@ fn peer_lifecycle() {
     f.init();
 
     f.cmd()
-        .args(["peer", "add", "test-relay", "wss://relay.example.com"])
+        .args([
+            "peer",
+            "add",
+            "--name",
+            "test-relay",
+            "--websocket",
+            "wss://relay.example.com",
+        ])
         .assert()
         .success();
 

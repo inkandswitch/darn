@@ -427,13 +427,7 @@ where
 
                 in_flight.fetch_add(1, Ordering::Relaxed);
 
-                let result = store_single_file(
-                    &path,
-                    root,
-                    subduction,
-                    attributes,
-                )
-                .await;
+                let result = store_single_file(&path, root, subduction, attributes).await;
 
                 in_flight.fetch_sub(1, Ordering::Relaxed);
                 completed.fetch_add(1, Ordering::Relaxed);

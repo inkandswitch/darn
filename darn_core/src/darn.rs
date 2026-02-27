@@ -18,6 +18,8 @@ use subduction_websocket::tokio::{TimeoutTokio, client::TokioWebSocketClient};
 use thiserror::Error;
 use tungstenite::http::Uri;
 
+use crate::peer::PeerAddress;
+
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -1047,7 +1049,9 @@ impl Darn {
 
     /// Connect to a peer and return the authenticated connection.
     ///
-    /// The connection can then be registered with Subduction for syncing.
+    /// Dispatches to the appropriate transport based on the peer's address:
+    /// - `PeerAddress::WebSocket` → `TokioWebSocketClient`
+    /// - `PeerAddress::Iroh` → `subduction_iroh::client::connect`
     ///
     /// # Errors
     ///
@@ -1056,19 +1060,29 @@ impl Darn {
         &self,
         peer: &Peer,
     ) -> Result<(AuthenticatedDarnConnection, PeerId), SyncError> {
-        let uri: Uri = peer.url.parse()?;
+        match &peer.address {
+            PeerAddress::WebSocket { url } => self.connect_peer_ws(url, peer.audience).await,
+            #[cfg(feature = "iroh")]
+            PeerAddress::Iroh { node_id, relay_url } => {
+                self.connect_peer_iroh(node_id, relay_url.as_deref(), peer.audience)
+                    .await
+            }
+        }
+    }
+
+    /// Connect to a peer via WebSocket.
+    async fn connect_peer_ws(
+        &self,
+        ws_url: &str,
+        audience: subduction_core::connection::handshake::Audience,
+    ) -> Result<(AuthenticatedDarnConnection, PeerId), SyncError> {
+        let uri: Uri = ws_url.parse()?;
         let signer = self.load_signer()?;
 
-        let (authenticated_client, listener_fut, sender_fut) = TokioWebSocketClient::new(
-            uri,
-            TimeoutTokio,
-            Self::DEFAULT_TIMEOUT,
-            signer,
-            peer.audience,
-        )
-        .await?;
+        let (authenticated, listener_fut, sender_fut) =
+            TokioWebSocketClient::new(uri, TimeoutTokio, Self::DEFAULT_TIMEOUT, signer, audience)
+                .await?;
 
-        // Spawn background tasks for incoming and outgoing messages
         tokio::spawn(async move {
             if let Err(e) = listener_fut.await {
                 tracing::error!("WebSocket listener error: {e:?}");
@@ -1080,10 +1094,64 @@ impl Darn {
             }
         });
 
-        // Get the actual peer ID from the connection (may differ from expectation in discovery mode)
-        let actual_peer_id = Connection::peer_id(authenticated_client.inner());
+        let actual_peer_id = authenticated.peer_id();
+        let authenticated =
+            authenticated.map(|c| crate::subduction::DarnConnection::WebSocket(Box::new(c)));
 
-        Ok((authenticated_client, actual_peer_id))
+        Ok((authenticated, actual_peer_id))
+    }
+
+    /// Connect to a peer via Iroh (QUIC).
+    #[cfg(feature = "iroh")]
+    async fn connect_peer_iroh(
+        &self,
+        node_id: &str,
+        relay_url: Option<&str>,
+        audience: subduction_core::connection::handshake::Audience,
+    ) -> Result<(AuthenticatedDarnConnection, PeerId), SyncError> {
+        let public_key: iroh::PublicKey = node_id.parse().map_err(SyncError::IrohNodeId)?;
+
+        let mut addr = iroh::EndpointAddr::new(public_key);
+        if let Some(relay) = relay_url {
+            let parsed: iroh::RelayUrl = relay.parse().map_err(SyncError::IrohRelayUrl)?;
+            addr = addr.with_relay_url(parsed);
+        }
+
+        let endpoint = iroh::Endpoint::builder()
+            .alpns(vec![subduction_iroh::ALPN.to_vec()])
+            .bind()
+            .await
+            .map_err(SyncError::IrohBind)?;
+
+        let signer = self.load_signer()?;
+
+        let result = subduction_iroh::client::connect(
+            &endpoint,
+            addr,
+            Self::DEFAULT_TIMEOUT,
+            TimeoutTokio,
+            &signer,
+            audience,
+        )
+        .await?;
+
+        tokio::spawn(async move {
+            if let Err(e) = result.listener_task.await {
+                tracing::error!("Iroh listener error: {e:?}");
+            }
+        });
+        tokio::spawn(async move {
+            if let Err(e) = result.sender_task.await {
+                tracing::error!("Iroh sender error: {e:?}");
+            }
+        });
+
+        let actual_peer_id = result.authenticated.peer_id();
+        let authenticated = result
+            .authenticated
+            .map(crate::subduction::DarnConnection::Iroh);
+
+        Ok((authenticated, actual_peer_id))
     }
 
     /// Connect to a peer, attach to Subduction, and perform a full sync.
@@ -1138,7 +1206,7 @@ impl Darn {
     {
         on_progress(SyncProgressEvent::ConnectingToPeer {
             peer_name: peer.name.to_string(),
-            url: peer.url.clone(),
+            address: peer.address.display_addr(),
         });
 
         let (authenticated_connection, peer_id) = self.connect_peer(peer).await?;
@@ -1605,9 +1673,29 @@ pub enum SyncError {
     #[error(transparent)]
     Signer(#[from] SignerLoadError),
 
-    /// Connection error.
+    /// WebSocket connection error.
     #[error(transparent)]
-    Connection(#[from] subduction_websocket::tokio::client::ClientConnectError),
+    WebSocketConnection(#[from] subduction_websocket::tokio::client::ClientConnectError),
+
+    /// Invalid iroh node ID.
+    #[cfg(feature = "iroh")]
+    #[error("invalid iroh node ID: {0}")]
+    IrohNodeId(iroh::KeyParsingError),
+
+    /// Invalid iroh relay URL.
+    #[cfg(feature = "iroh")]
+    #[error("invalid iroh relay URL: {0}")]
+    IrohRelayUrl(iroh::RelayUrlParseError),
+
+    /// Failed to bind iroh endpoint.
+    #[cfg(feature = "iroh")]
+    #[error("failed to bind iroh endpoint: {0}")]
+    IrohBind(iroh::endpoint::BindError),
+
+    /// Iroh connection error.
+    #[cfg(feature = "iroh")]
+    #[error(transparent)]
+    IrohConnection(#[from] subduction_iroh::error::ConnectError),
 
     /// Error attaching connection.
     #[error(transparent)]
@@ -1621,5 +1709,3 @@ pub enum SyncError {
     #[error(transparent)]
     Sync(#[from] DarnIoError),
 }
-
-
