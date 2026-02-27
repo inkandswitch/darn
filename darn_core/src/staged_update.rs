@@ -516,13 +516,15 @@ mod tests {
         let staged = StagedUpdate::new(workspace.path())?;
 
         assert!(staged.staging_dir.path().exists());
-        assert!(staged
-            .staging_dir
-            .path()
-            .file_name()
-            .expect("staging dir has name")
-            .to_string_lossy()
-            .starts_with(STAGING_DIR_PREFIX));
+        assert!(
+            staged
+                .staging_dir
+                .path()
+                .file_name()
+                .expect("staging dir has name")
+                .to_string_lossy()
+                .starts_with(STAGING_DIR_PREFIX)
+        );
         Ok(())
     }
 
@@ -658,7 +660,9 @@ mod tests {
 
         // Manifest should have the entry
         assert!(manifest.get_by_path(Path::new("hello.txt")).is_some());
-        let tracked = manifest.get_by_path(Path::new("hello.txt")).expect("tracked");
+        let tracked = manifest
+            .get_by_path(Path::new("hello.txt"))
+            .expect("tracked");
         assert_eq!(tracked.sedimentree_id, id);
 
         // Result should classify as created

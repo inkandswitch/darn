@@ -216,10 +216,7 @@ fn prompt_peer_during_init(out: Output) -> eyre::Result<bool> {
         "Add a sync server?"
     } else {
         let names: Vec<_> = existing_peers.iter().map(|p| p.name.as_str()).collect();
-        cliclack::log::remark(format!(
-            "Existing server(s): {}",
-            names.join(", ")
-        ))?;
+        cliclack::log::remark(format!("Existing server(s): {}", names.join(", ")))?;
         "Add another sync server?"
     };
 
@@ -227,22 +224,14 @@ fn prompt_peer_during_init(out: Output) -> eyre::Result<bool> {
         return Ok(!existing_peers.is_empty());
     }
 
-    let url: String = out.input(
-        "Server URL",
-        "ws://localhost:9000",
-        None,
-    )?;
+    let url: String = out.input("Server URL", "ws://localhost:9000", None)?;
 
     if url.is_empty() {
         return Ok(!existing_peers.is_empty());
     }
 
     let default_name = peer_name_from_url(&url);
-    let name: String = out.input(
-        "Server name",
-        &default_name,
-        Some(&default_name),
-    )?;
+    let name: String = out.input("Server name", &default_name, Some(&default_name))?;
 
     add_peer_during_init(&name, &url, out)
 }
@@ -527,7 +516,9 @@ pub(crate) fn ignore(patterns: &[String], out: Output) -> eyre::Result<()> {
     }
 
     if !out.is_porcelain() && added_count > 0 {
-        out.info(&format!("{added_count} pattern(s) added to .darn ignore list"))?;
+        out.info(&format!(
+            "{added_count} pattern(s) added to .darn ignore list"
+        ))?;
     }
 
     Ok(())

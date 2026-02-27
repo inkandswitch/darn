@@ -32,7 +32,7 @@ use crate::{
     refresh::{self, RefreshError},
     sedimentree::{self, SedimentreeError},
     signer::{self, LoadSignerError, SignerError},
-    staged_update::{StagedUpdate, StageError},
+    staged_update::{StageError, StagedUpdate},
     subduction::{
         self, AuthenticatedDarnConnection, DarnAttachError, DarnIoError, DarnRegistrationError,
         DarnSubduction, SubductionInitError,

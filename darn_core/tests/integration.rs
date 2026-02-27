@@ -14,12 +14,7 @@ use std::{
     sync::Mutex,
 };
 
-use darn_core::{
-    darn::Darn,
-    file::state::FileState,
-    ignore,
-    staged_update::StagedUpdate,
-};
+use darn_core::{darn::Darn, file::state::FileState, ignore, staged_update::StagedUpdate};
 use testresult::TestResult;
 
 /// Serializes access to `DARN_CONFIG_DIR` across tests in this binary.
@@ -105,7 +100,9 @@ fn with_env<F, R>(f: F) -> R
 where
     F: FnOnce(&TestEnv) -> R,
 {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let env = TestEnv::new();
     f(&env)
 }
@@ -122,7 +119,9 @@ where
     F: FnOnce(TestEnv) -> Fut,
     Fut: std::future::Future<Output = R>,
 {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let env = TestEnv::new();
     f(env).await
 }
@@ -313,7 +312,12 @@ async fn scan_discovers_new_files() -> TestResult {
 
         let names: Vec<_> = new_files
             .iter()
-            .map(|p| p.file_name().expect("has filename").to_string_lossy().to_string())
+            .map(|p| {
+                p.file_name()
+                    .expect("has filename")
+                    .to_string_lossy()
+                    .to_string()
+            })
             .collect();
         assert!(names.contains(&"hello.txt".to_string()));
         assert!(names.contains(&"world.txt".to_string()));
@@ -653,7 +657,7 @@ async fn staged_update_handles_mixed_creates_and_deletes() -> TestResult {
 #[test]
 fn peer_add_list_remove() -> TestResult {
     with_env(|_env| {
-        use darn_core::peer::{add_peer, list_peers, remove_peer, Peer, PeerName};
+        use darn_core::peer::{Peer, PeerName, add_peer, list_peers, remove_peer};
 
         let peers = list_peers()?;
         assert!(peers.is_empty());
@@ -724,7 +728,10 @@ async fn full_local_workflow() -> TestResult {
         }
 
         // 7. Modify a file
-        std::fs::write(env.workspace().join("README.md"), "# My Project\n\nUpdated!")?;
+        std::fs::write(
+            env.workspace().join("README.md"),
+            "# My Project\n\nUpdated!",
+        )?;
 
         let readme = manifest
             .get_by_path(Path::new("README.md"))

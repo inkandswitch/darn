@@ -3,7 +3,6 @@
 //! Directory-based Automerge Replication Node - a filesystem CLI for CRDT-backed files.
 
 #![forbid(unsafe_code)]
-
 // CLI-specific lint allows
 #![allow(clippy::format_push_string)] // Common pattern for building CLI output
 #![allow(clippy::large_futures)] // Async CLI commands are naturally large
