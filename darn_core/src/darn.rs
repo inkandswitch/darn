@@ -11,6 +11,7 @@ use std::{
     time::Duration,
 };
 
+use sedimentree_core::id::SedimentreeId;
 use sedimentree_fs_storage::FsStorage;
 use subduction_core::{connection::Connection, peer::id::PeerId};
 use subduction_crypto::signer::memory::MemorySigner;
@@ -451,31 +452,123 @@ impl Darn {
 
     /// Refreshes all tracked files that have changed.
     ///
+    /// Modified files are processed in parallel (read, diff, store),
+    /// then manifest entries are patched sequentially.
+    ///
     /// Returns a summary of which files were updated, missing, or had errors.
     pub async fn refresh_all(&self, manifest: &mut Manifest) -> RefreshDiff {
+        use futures::{StreamExt, stream};
+        use std::sync::Mutex;
+
         let mut diff = RefreshDiff::default();
 
-        for entry in manifest.iter_mut() {
+        // Phase 1: Classify files (fast — only compares hashes)
+        let mut modified: Vec<RefreshCandidate> = Vec::new();
+
+        for entry in manifest.iter() {
             let path = entry.relative_path.clone();
-            let state = entry.state(&self.root);
-
-            match state {
-                FileState::Clean => continue,
-                FileState::Missing => {
-                    diff.missing.push(path);
-                    continue;
-                }
-                FileState::Modified => {}
+            match entry.state(&self.root) {
+                FileState::Clean => {}
+                FileState::Missing => diff.missing.push(path),
+                FileState::Modified => modified.push(RefreshCandidate {
+                    path,
+                    sedimentree_id: entry.sedimentree_id,
+                    current_fs_digest: entry.file_system_digest,
+                }),
             }
+        }
 
-            match self.refresh_file(entry).await {
-                Ok(true) => diff.updated.push(path),
-                Ok(false) => {}
-                Err(e) => diff.errors.push((path, e)),
+        if modified.is_empty() {
+            return diff;
+        }
+
+        // Phase 2: Refresh files in parallel
+        let concurrency = std::thread::available_parallelism()
+            .map(std::num::NonZero::get)
+            .unwrap_or(4);
+
+        let results: Mutex<Vec<RefreshResult>> = Mutex::new(Vec::new());
+
+        stream::iter(&modified)
+            .for_each_concurrent(concurrency, |candidate| {
+                let results = &results;
+
+                async move {
+                    let outcome = self.refresh_file_by_id(candidate).await;
+                    if let Ok(mut r) = results.lock() {
+                        r.push(RefreshResult {
+                            path: candidate.path.clone(),
+                            sedimentree_id: candidate.sedimentree_id,
+                            outcome,
+                        });
+                    }
+                }
+            })
+            .await;
+
+        let results = results.into_inner().unwrap_or_default();
+
+        // Phase 3: Patch manifest sequentially
+        for result in results {
+            match result.outcome {
+                Ok(Some(digests)) => {
+                    if let Some(entry) = manifest.get_by_id_mut(&result.sedimentree_id) {
+                        entry.file_system_digest = digests.file_system;
+                        entry.sedimentree_digest = digests.sedimentree;
+                    }
+                    diff.updated.push(result.path);
+                }
+                Ok(None) => {} // Not actually modified (race)
+                Err(e) => diff.errors.push((result.path, e)),
             }
         }
 
         diff
+    }
+
+    /// Refresh a single file, returning updated digests.
+    ///
+    /// This is the parallelizable core of refresh: reads the file, loads the
+    /// existing Automerge doc, applies the diff, stores changes, and computes
+    /// new digests. Does not touch the manifest.
+    async fn refresh_file_by_id(
+        &self,
+        candidate: &RefreshCandidate,
+    ) -> Result<Option<RefreshedDigests>, RefreshError> {
+        let path = self.root.join(&candidate.path);
+
+        // Re-check: hash file to confirm it's still modified
+        let new_fs_digest = content_hash::hash_file(&path)?;
+        let sed_id = candidate.sedimentree_id;
+
+        if new_fs_digest == candidate.current_fs_digest {
+            return Ok(None); // Raced — file reverted
+        }
+
+        let attributes = AttributeRules::from_workspace_root(&self.root).ok();
+        let new_file = File::from_path_with_attributes(&path, attributes.as_ref())?;
+
+        // Load existing doc
+        let mut am_doc = sedimentree::load_document(&self.subduction, sed_id)
+            .await
+            .map_err(|e| RefreshError::Storage(Box::new(e)))?
+            .ok_or_else(|| RefreshError::Storage(Box::new(SedimentreeError::NotFound)))?;
+
+        let old_heads = am_doc.get_heads();
+        refresh::update_automerge_content(&mut am_doc, new_file.content)?;
+
+        sedimentree::add_changes(&self.subduction, sed_id, &mut am_doc, &old_heads)
+            .await
+            .map_err(|e| RefreshError::Storage(Box::new(e)))?;
+
+        let new_sed_digest = sedimentree::compute_digest(&self.subduction, sed_id)
+            .await
+            .map_err(|e| RefreshError::Storage(Box::new(e)))?;
+
+        Ok(Some(RefreshedDigests {
+            file_system: new_fs_digest,
+            sedimentree: new_sed_digest,
+        }))
     }
 
     /// Apply remote changes to local files after sync.
@@ -1528,6 +1621,28 @@ impl UnopenedDarn {
     pub fn load_signer(&self) -> Result<MemorySigner, SignerLoadError> {
         Darn::load_signer_static()
     }
+}
+
+/// A file identified as modified during Phase 1 of refresh.
+struct RefreshCandidate {
+    path: PathBuf,
+    sedimentree_id: SedimentreeId,
+    current_fs_digest: sedimentree_core::crypto::digest::Digest<content_hash::FileSystemContent>,
+}
+
+/// Updated digests from a parallel file refresh.
+struct RefreshedDigests {
+    file_system: sedimentree_core::crypto::digest::Digest<content_hash::FileSystemContent>,
+    sedimentree: sedimentree_core::crypto::digest::Digest<
+        sedimentree_core::sedimentree::Sedimentree,
+    >,
+}
+
+/// Result from refreshing a single file in parallel.
+struct RefreshResult {
+    path: PathBuf,
+    sedimentree_id: SedimentreeId,
+    outcome: Result<Option<RefreshedDigests>, RefreshError>,
 }
 
 /// Error opening a workspace.
