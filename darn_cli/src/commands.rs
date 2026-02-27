@@ -24,6 +24,7 @@ use darn_core::{
     manifest::{Manifest, content_hash, tracked::Tracked},
     peer::{Peer, PeerName},
     sedimentree,
+    staged_update::StagedUpdate,
     sync_progress::SyncProgressEvent,
     watcher::{WatchEvent, WatchEventProcessor, Watcher, WatcherConfig},
 };
@@ -316,7 +317,7 @@ pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path, out: Output) -> ey
 
     spinner.stop(format!("Connected to {connected_peers} peer(s)"));
 
-    // Step 6: Sync and traverse directory tree, writing files
+    // Step 6: Sync and traverse directory tree, staging files
     let mut manifest = darn.load_manifest()?;
     let timeout = Some(Duration::from_secs(30));
 
@@ -324,13 +325,14 @@ pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path, out: Output) -> ey
 
     let mut total_received = 0usize;
     let mut total_sent = 0usize;
+    let mut staged = StagedUpdate::new(&root)?;
 
     let file_count = clone_directory_recursive_with_sync(
         darn.subduction(),
         root_dir_id,
         &root,
         std::path::PathBuf::new(),
-        &mut manifest,
+        &mut staged,
         timeout,
         &mut total_received,
         &mut total_sent,
@@ -343,6 +345,14 @@ pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path, out: Output) -> ey
         progress.stop("No files found");
         out.outro("Clone complete (empty workspace)")?;
         return Ok(());
+    }
+
+    // Commit: parallel renames from staging dir into workspace
+    let commit_result = staged.commit(&mut manifest).await?;
+    if !commit_result.errors.is_empty() {
+        for (path, err) in &commit_result.errors {
+            out.warning(&format!("Failed to write {}: {err}", path.display()))?;
+        }
     }
 
     progress.stop(format!(
@@ -363,14 +373,18 @@ pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path, out: Output) -> ey
     Ok(())
 }
 
-/// Recursively clone a directory: sync each sedimentree, then write files.
+/// Recursively clone a directory: sync each sedimentree, then stage files.
+///
+/// Files are staged into a [`StagedUpdate`] rather than written directly
+/// to the workspace. The caller commits the staged update after traversal
+/// completes, giving external observers a near-atomic view.
 #[allow(clippy::too_many_arguments)]
 async fn clone_directory_recursive_with_sync(
     subduction: &std::sync::Arc<darn_core::subduction::DarnSubduction>,
     dir_id: SedimentreeId,
     workspace_root: &Path,
     current_path: std::path::PathBuf,
-    manifest: &mut darn_core::manifest::Manifest,
+    staged: &mut StagedUpdate,
     timeout: Option<std::time::Duration>,
     total_received: &mut usize,
     total_sent: &mut usize,
@@ -434,38 +448,23 @@ async fn clone_directory_recursive_with_sync(
                     }
                 };
 
-                // Full path on disk
-                let full_path = workspace_root.join(&entry_path);
-
-                // Create parent directories if needed
-                if let Some(parent) = full_path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-
-                // Write file to disk
-                file.write_to_path(&full_path)?;
-
-                // Determine file type
                 let file_type = if file.content.is_text() {
                     FileType::Text
                 } else {
                     FileType::Binary
                 };
 
-                // Compute digests
-                let file_system_digest = content_hash::hash_file(&full_path)?;
-                let sedimentree_digest =
+                let sed_digest =
                     sedimentree::compute_digest(subduction, entry.sedimentree_id).await?;
 
-                // Add to manifest
-                let tracked = Tracked::new(
-                    entry.sedimentree_id,
+                // Stage the file (written to staging dir, not workspace)
+                staged.stage_create(
+                    &file,
                     entry_path.clone(),
+                    entry.sedimentree_id,
                     file_type,
-                    file_system_digest,
-                    sedimentree_digest,
-                );
-                manifest.track(tracked);
+                    sed_digest,
+                )?;
 
                 file_count += 1;
                 if out.is_porcelain() {
@@ -482,7 +481,7 @@ async fn clone_directory_recursive_with_sync(
                     entry.sedimentree_id,
                     workspace_root,
                     entry_path,
-                    manifest,
+                    staged,
                     timeout,
                     total_received,
                     total_sent,

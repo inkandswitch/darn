@@ -38,6 +38,9 @@ const DEFAULT_IGNORE: &[&str] = &[
     "target/",
     "node_modules/",
     "",
+    "# Darn internals",
+    ".darn-staging-*/",
+    "",
     "# Environment",
     ".env",
 ];

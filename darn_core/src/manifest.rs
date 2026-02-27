@@ -151,6 +151,12 @@ impl Manifest {
         self.entries.get(id)
     }
 
+    /// Looks up a tracked file by its Sedimentree ID (mutable).
+    #[must_use]
+    pub fn get_by_id_mut(&mut self, id: &SedimentreeId) -> Option<&mut Tracked> {
+        self.entries.get_mut(id)
+    }
+
     /// Returns `true` if no files are tracked.
     #[must_use]
     pub fn is_empty(&self) -> bool {

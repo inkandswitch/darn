@@ -46,6 +46,7 @@ pub mod refresh;
 pub mod sedimentree;
 pub mod serde_base58;
 pub mod signer;
+pub mod staged_update;
 pub mod subduction;
 pub mod sync_progress;
 pub mod unix_timestamp;

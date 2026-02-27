@@ -308,6 +308,31 @@ impl File {
         })
     }
 
+    /// Writes this file to a staging directory (simple direct write).
+    ///
+    /// Unlike [`write_to_path`](Self::write_to_path), this skips the
+    /// atomic temp-file-then-rename pattern since staging directories are
+    /// not observed by external tools. Permissions are still set on Unix.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be written.
+    pub fn write_to_staging(&self, path: &Path) -> Result<(), WriteFileError> {
+        match &self.content {
+            content::Content::Text(text) => std::fs::write(path, text)?,
+            content::Content::Bytes(bytes) => std::fs::write(path, bytes)?,
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(self.metadata.mode());
+            std::fs::set_permissions(path, perms)?;
+        }
+
+        Ok(())
+    }
+
     /// Writes this file document to the filesystem atomically.
     ///
     /// Uses a temp-file-then-rename pattern so readers never see a

@@ -32,6 +32,7 @@ use crate::{
     refresh::{self, RefreshError},
     sedimentree::{self, SedimentreeError},
     signer::{self, LoadSignerError, SignerError},
+    staged_update::{StagedUpdate, StageError},
     subduction::{
         self, AuthenticatedDarnConnection, DarnAttachError, DarnIoError, DarnRegistrationError,
         DarnSubduction, SubductionInitError,
@@ -488,22 +489,40 @@ impl Darn {
     ///
     /// Individual file errors are collected in the result; this method doesn't
     /// fail on individual file errors.
-    pub async fn apply_remote_changes(&self, manifest: &mut Manifest) -> ApplyResult {
-        let mut result = ApplyResult::new();
+    /// Stage all remote changes for batch application to the workspace.
+    ///
+    /// This is the slow "prepare" phase: loads CRDT documents, serializes
+    /// file content, and writes everything to a staging directory. No
+    /// workspace files are modified.
+    ///
+    /// Call [`StagedUpdate::commit`] to apply the changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns errors from individual file operations in `ApplyResult`.
+    /// The `StagedUpdate` contains only the successfully staged operations.
+    #[allow(clippy::too_many_lines)]
+    pub async fn stage_remote_changes(
+        &self,
+        manifest: &Manifest,
+    ) -> Result<(StagedUpdate, ApplyResult), StageError> {
+        let mut staged = StagedUpdate::new(&self.root)?;
+        let mut errors = ApplyResult::new();
 
         tracing::debug!(
             manifest_entries = manifest.iter().count(),
-            "apply_remote_changes: checking for changes"
+            "stage_remote_changes: checking for changes"
         );
 
-        for entry in manifest.iter_mut() {
+        // Step 1: Stage updates to existing tracked files
+        for entry in manifest.iter() {
             let path = entry.relative_path.clone();
 
             let new_sed_digest =
                 match sedimentree::compute_digest(&self.subduction, entry.sedimentree_id).await {
                     Ok(d) => d,
                     Err(e) => {
-                        result.errors.push((path, format!("compute digest: {e}")));
+                        errors.errors.push((path, format!("compute digest: {e}")));
                         continue;
                     }
                 };
@@ -513,7 +532,7 @@ impl Darn {
                 old_digest = %entry.sedimentree_digest,
                 new_digest = %new_sed_digest,
                 changed = new_sed_digest != entry.sedimentree_digest,
-                "apply_remote_changes: checking file"
+                "stage_remote_changes: checking file"
             );
 
             if new_sed_digest == entry.sedimentree_digest {
@@ -526,109 +545,134 @@ impl Darn {
                 match sedimentree::load_document(&self.subduction, entry.sedimentree_id).await {
                     Ok(Some(doc)) => doc,
                     Ok(None) => {
-                        result
+                        errors
                             .errors
                             .push((path, "document not found after sync".into()));
                         continue;
                     }
                     Err(e) => {
-                        result.errors.push((path, format!("load document: {e}")));
+                        errors.errors.push((path, format!("load document: {e}")));
                         continue;
                     }
                 };
 
-            // Parse as File
             let file = match File::from_automerge(&am_doc) {
                 Ok(f) => f,
                 Err(e) => {
-                    result.errors.push((path, format!("parse file: {e}")));
+                    errors.errors.push((path, format!("parse file: {e}")));
                     continue;
                 }
             };
 
-            // Write to disk
-            let full_path = self.root.join(&entry.relative_path);
-            if let Err(e) = file.write_to_path(&full_path) {
-                result.errors.push((path, format!("write file: {e}")));
-                continue;
-            }
-
-            // Update digests
-            match content_hash::hash_file(&full_path) {
-                Ok(fs_digest) => {
-                    entry.file_system_digest = fs_digest;
-                    entry.sedimentree_digest = new_sed_digest;
-                }
-                Err(e) => {
-                    result
-                        .errors
-                        .push((path.clone(), format!("hash file: {e}")));
-                    // Still mark as updated since we wrote it
-                }
-            }
-
-            if local_changed {
-                result.merged.push(path);
+            let file_type = if file.content.is_text() {
+                FileType::Text
             } else {
-                result.updated.push(path);
+                FileType::Binary
+            };
+
+            if let Err(e) = staged.stage_write(
+                &file,
+                path.clone(),
+                entry.sedimentree_id,
+                file_type,
+                new_sed_digest,
+                local_changed,
+            ) {
+                errors.errors.push((path, format!("stage write: {e}")));
             }
         }
 
-        // Step 2: Discover new files from remote directory tree
-        if let Err(e) = self.discover_remote_files(manifest, &mut result).await {
-            tracing::warn!("Error discovering remote files: {e}");
-        }
-
-        // Step 3: Detect and remove files deleted from remote
-        if let Err(e) = self.remove_deleted_files(manifest, &mut result).await {
-            tracing::warn!("Error detecting deleted files: {e}");
-        }
-
-        result
-    }
-
-    /// Discover new files from the remote directory tree that aren't in the local manifest.
-    async fn discover_remote_files(
-        &self,
-        manifest: &mut Manifest,
-        result: &mut ApplyResult,
-    ) -> Result<(), SedimentreeError> {
-        let root_dir_id = manifest.root_directory_id();
-        self.discover_remote_files_recursive(root_dir_id, PathBuf::new(), manifest, result)
+        // Step 2: Stage new files from remote directory tree
+        if let Err(e) = self
+            .stage_remote_files_recursive(
+                manifest.root_directory_id(),
+                PathBuf::new(),
+                manifest,
+                &mut staged,
+                &mut errors,
+            )
             .await
+        {
+            tracing::warn!("Error staging remote files: {e}");
+        }
+
+        // Step 3: Stage deletions (files not in remote tree)
+        if let Err(e) = self
+            .stage_deleted_files(manifest, &mut staged, &mut errors)
+            .await
+        {
+            tracing::warn!("Error staging deleted files: {e}");
+        }
+
+        Ok((staged, errors))
     }
 
-    /// Recursively discover files from a remote directory.
-    #[allow(clippy::only_used_in_recursion)] // manifest is used, clippy is confused by async
-    #[allow(clippy::too_many_lines)] // Complex but coherent file discovery logic
-    async fn discover_remote_files_recursive(
+    /// Convenience wrapper: stage + commit in one call.
+    ///
+    /// Equivalent to calling [`stage_remote_changes`](Self::stage_remote_changes)
+    /// followed by [`StagedUpdate::commit`].
+    pub async fn apply_remote_changes(&self, manifest: &mut Manifest) -> ApplyResult {
+        let (staged, mut stage_errors) = match self.stage_remote_changes(manifest).await {
+            Ok(pair) => pair,
+            Err(e) => {
+                let mut result = ApplyResult::new();
+                result
+                    .errors
+                    .push((PathBuf::new(), format!("staging failed: {e}")));
+                return result;
+            }
+        };
+
+        if staged.is_empty() {
+            return stage_errors;
+        }
+
+        match staged.commit(manifest).await {
+            Ok(mut result) => {
+                // Merge any staging errors into the commit result
+                result.errors.append(&mut stage_errors.errors);
+                result
+            }
+            Err(e) => {
+                stage_errors
+                    .errors
+                    .push((PathBuf::new(), format!("commit failed: {e}")));
+                stage_errors
+            }
+        }
+    }
+
+    /// Recursively stage new files from a remote directory.
+    #[allow(clippy::only_used_in_recursion)]
+    #[allow(clippy::too_many_lines)]
+    async fn stage_remote_files_recursive(
         &self,
         dir_id: sedimentree_core::id::SedimentreeId,
         current_path: PathBuf,
-        manifest: &mut Manifest,
-        result: &mut ApplyResult,
+        manifest: &Manifest,
+        staged: &mut StagedUpdate,
+        errors: &mut ApplyResult,
     ) -> Result<(), SedimentreeError> {
         tracing::debug!(
             ?dir_id,
             path = %current_path.display(),
-            "discover_remote_files_recursive: loading directory"
+            "stage_remote_files_recursive: loading directory"
         );
 
-        // Load directory document
         let Some(am_doc) = sedimentree::load_document(&self.subduction, dir_id).await? else {
-            tracing::debug!(?dir_id, "discover_remote_files_recursive: empty directory");
-            return Ok(()); // Empty directory
+            tracing::debug!(?dir_id, "stage_remote_files_recursive: empty directory");
+            return Ok(());
         };
 
         let Ok(dir) = Directory::from_automerge(&am_doc) else {
-            tracing::debug!(?dir_id, "discover_remote_files_recursive: not a directory");
-            return Ok(()); // Not a directory document
+            tracing::debug!(?dir_id, "stage_remote_files_recursive: not a directory");
+            return Ok(());
         };
 
         tracing::debug!(
             ?dir_id,
             entry_count = dir.entries.len(),
-            "discover_remote_files_recursive: found entries"
+            "stage_remote_files_recursive: found entries"
         );
 
         for entry in &dir.entries {
@@ -638,7 +682,7 @@ impl Darn {
                 name = %entry.name,
                 entry_type = ?entry.entry_type,
                 sed_id = ?entry.sedimentree_id,
-                "discover_remote_files_recursive: processing entry"
+                "stage_remote_files_recursive: processing entry"
             );
 
             match entry.entry_type {
@@ -649,7 +693,7 @@ impl Darn {
                     }
 
                     tracing::info!(name = %entry.name, "discovered new remote file");
-                    // This is a new file from remote
+
                     let am_doc =
                         match sedimentree::load_document(&self.subduction, entry.sedimentree_id)
                             .await
@@ -657,7 +701,7 @@ impl Darn {
                             Ok(Some(doc)) => doc,
                             Ok(None) => continue,
                             Err(e) => {
-                                result
+                                errors
                                     .errors
                                     .push((entry_path.clone(), format!("load file: {e}")));
                                 continue;
@@ -667,30 +711,12 @@ impl Darn {
                     let file = match File::from_automerge(&am_doc) {
                         Ok(f) => f,
                         Err(e) => {
-                            result
+                            errors
                                 .errors
                                 .push((entry_path.clone(), format!("parse file: {e}")));
                             continue;
                         }
                     };
-
-                    let full_path = self.root.join(&entry_path);
-
-                    if let Some(parent) = full_path.parent()
-                        && let Err(e) = std::fs::create_dir_all(parent)
-                    {
-                        result
-                            .errors
-                            .push((entry_path.clone(), format!("create dir: {e}")));
-                        continue;
-                    }
-
-                    if let Err(e) = file.write_to_path(&full_path) {
-                        result
-                            .errors
-                            .push((entry_path.clone(), format!("write file: {e}")));
-                        continue;
-                    }
 
                     let file_type = if file.content.is_text() {
                         FileType::Text
@@ -698,50 +724,39 @@ impl Darn {
                         FileType::Binary
                     };
 
-                    // Compute digests
-                    let file_system_digest = match content_hash::hash_file(&full_path) {
-                        Ok(d) => d,
-                        Err(e) => {
-                            result
-                                .errors
-                                .push((entry_path.clone(), format!("hash file: {e}")));
-                            continue;
-                        }
-                    };
-
-                    let sedimentree_digest =
+                    let sed_digest =
                         match sedimentree::compute_digest(&self.subduction, entry.sedimentree_id)
                             .await
                         {
                             Ok(d) => d,
                             Err(e) => {
-                                result
+                                errors
                                     .errors
                                     .push((entry_path.clone(), format!("compute digest: {e}")));
                                 continue;
                             }
                         };
 
-                    // Add to manifest
-                    let tracked = Tracked::new(
-                        entry.sedimentree_id,
+                    if let Err(e) = staged.stage_create(
+                        &file,
                         entry_path.clone(),
+                        entry.sedimentree_id,
                         file_type,
-                        file_system_digest,
-                        sedimentree_digest,
-                    );
-                    manifest.track(tracked);
-
-                    result.created.push(entry_path);
+                        sed_digest,
+                    ) {
+                        errors
+                            .errors
+                            .push((entry_path, format!("stage create: {e}")));
+                    }
                 }
 
                 EntryType::Folder => {
-                    // Recurse into subdirectory
-                    Box::pin(self.discover_remote_files_recursive(
+                    Box::pin(self.stage_remote_files_recursive(
                         entry.sedimentree_id,
                         entry_path,
                         manifest,
-                        result,
+                        staged,
+                        errors,
                     ))
                     .await?;
                 }
@@ -751,54 +766,40 @@ impl Darn {
         Ok(())
     }
 
-    /// Remove files that have been deleted from the remote directory tree.
-    ///
-    /// Compares the local manifest against the remote directory tree and removes
-    /// any files that no longer exist in the remote.
-    async fn remove_deleted_files(
+    /// Stage deletions for files no longer in the remote directory tree.
+    async fn stage_deleted_files(
         &self,
-        manifest: &mut Manifest,
-        result: &mut ApplyResult,
+        manifest: &Manifest,
+        staged: &mut StagedUpdate,
+        errors: &mut ApplyResult,
     ) -> Result<(), SedimentreeError> {
         use std::collections::HashSet;
 
-        // Collect all sedimentree IDs from the remote directory tree
         let mut remote_ids = HashSet::new();
         let root_dir_id = manifest.root_directory_id();
         self.collect_remote_sedimentree_ids(root_dir_id, &mut remote_ids)
             .await?;
 
-        // Find files in manifest that are not in the remote tree
         let to_delete: Vec<_> = manifest
             .iter()
             .filter(|entry| !remote_ids.contains(&entry.sedimentree_id))
             .map(|entry| (entry.sedimentree_id, entry.relative_path.clone()))
             .collect();
 
-        // Delete each file
         for (sed_id, relative_path) in to_delete {
             let full_path = self.root.join(&relative_path);
-
-            // Delete file from filesystem
-            if full_path.exists()
-                && let Err(e) = std::fs::remove_file(&full_path)
-            {
-                result
-                    .errors
-                    .push((relative_path.clone(), format!("delete file: {e}")));
-                continue;
+            if full_path.exists() {
+                staged.stage_delete(relative_path, sed_id);
+            } else {
+                // File already missing — just clean up manifest
+                staged.stage_delete(relative_path.clone(), sed_id);
+                tracing::debug!(path = %relative_path.display(), "already missing from disk");
             }
-
-            // Remove from manifest
-            manifest.untrack_by_id(&sed_id);
-
-            // Clean up empty parent directories
-            if let Some(parent) = full_path.parent() {
-                Self::cleanup_empty_dirs(parent, &self.root);
-            }
-
-            result.deleted.push(relative_path);
         }
+
+        // Suppress unused variable warning — errors param is for consistency with
+        // sibling methods and future use
+        let _ = errors;
 
         Ok(())
     }
@@ -965,34 +966,6 @@ impl Darn {
         }
 
         Ok(())
-    }
-
-    /// Clean up empty directories from leaf to root, stopping at workspace root.
-    fn cleanup_empty_dirs(dir: &Path, workspace_root: &Path) {
-        let mut current = dir;
-
-        while current.starts_with(workspace_root) && current != workspace_root {
-            // Check if directory is empty
-            let is_empty = match std::fs::read_dir(current) {
-                Ok(mut entries) => entries.next().is_none(),
-                Err(_) => break,
-            };
-
-            if is_empty {
-                if std::fs::remove_dir(current).is_err() {
-                    break;
-                }
-                tracing::debug!("Removed empty directory: {}", current.display());
-            } else {
-                break; // Directory not empty, stop
-            }
-
-            // Move to parent
-            current = match current.parent() {
-                Some(p) => p,
-                None => break,
-            };
-        }
     }
 
     /// Discover and track new (untracked, non-ignored) files.

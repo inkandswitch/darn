@@ -33,7 +33,7 @@ use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode, DebounceEventR
 use thiserror::Error;
 use tokio::sync::mpsc;
 
-use crate::{ignore::IgnoreRules, manifest::Manifest};
+use crate::{ignore::IgnoreRules, manifest::Manifest, staged_update::STAGING_DIR_PREFIX};
 
 /// Default debounce duration for filesystem events.
 const DEFAULT_DEBOUNCE_MS: u64 = 300;
@@ -230,6 +230,17 @@ impl Watcher {
                         .strip_prefix(root)
                         .is_ok_and(|p| p.as_os_str() == ".darn")
                     {
+                        continue;
+                    }
+
+                    // Skip staging directories (and anything inside them)
+                    if path.strip_prefix(root).is_ok_and(|rel| {
+                        rel.components().any(|c| {
+                            c.as_os_str()
+                                .to_string_lossy()
+                                .starts_with(STAGING_DIR_PREFIX)
+                        })
+                    }) {
                         continue;
                     }
 
