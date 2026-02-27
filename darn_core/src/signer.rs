@@ -30,7 +30,9 @@ pub fn generate_and_save(signer_dir: &Path) -> Result<MemorySigner, GenerateSign
 
     let signer = MemorySigner::from_bytes(&key_bytes);
 
-    std::fs::write(&private_key_path, key_bytes)?;
+    // Atomic write prevents a partial key file from blocking recovery via
+    // regeneration (a truncated file _exists_ but is invalid).
+    crate::atomic_write::atomic_write(&private_key_path, &key_bytes)?;
 
     // Clear the key bytes from memory
     key_bytes.fill(0);

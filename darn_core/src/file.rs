@@ -308,22 +308,53 @@ impl File {
         })
     }
 
-    /// Writes this file document to the filesystem.
+    /// Writes this file document to the filesystem atomically.
+    ///
+    /// Uses a temp-file-then-rename pattern so readers never see a
+    /// partially-written file. On Unix, permissions are set on the temp
+    /// file _before_ the rename so the target appears with correct mode.
     ///
     /// # Errors
     ///
     /// Returns an error if the file cannot be written.
     pub fn write_to_path(&self, path: &Path) -> Result<(), WriteFileError> {
+        // Build a unique temp path in the same directory (same filesystem for rename)
+        let tid = std::thread::current().id();
+        let stem = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+        let temp_name = format!(".{stem}.{tid:?}.tmp");
+        let temp_path = path.with_file_name(temp_name);
+
+        // Write content to temp file
         match &self.content {
-            content::Content::Text(text) => std::fs::write(path, text)?,
-            content::Content::Bytes(bytes) => std::fs::write(path, bytes)?,
+            content::Content::Text(text) => std::fs::write(&temp_path, text)?,
+            content::Content::Bytes(bytes) => std::fs::write(&temp_path, bytes)?,
         }
 
+        // Set permissions on temp file before rename so the target appears
+        // with correct mode immediately
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(self.metadata.mode());
-            std::fs::set_permissions(path, perms)?;
+            if let Err(e) = std::fs::set_permissions(&temp_path, perms) {
+                drop(std::fs::remove_file(&temp_path));
+                return Err(e.into());
+            }
+        }
+
+        // On Windows, rename fails if the destination exists
+        #[cfg(target_os = "windows")]
+        if path.exists() {
+            if let Err(e) = std::fs::remove_file(path) {
+                drop(std::fs::remove_file(&temp_path));
+                return Err(e.into());
+            }
+        }
+
+        // Atomic rename
+        if let Err(e) = std::fs::rename(&temp_path, path) {
+            drop(std::fs::remove_file(&temp_path));
+            return Err(e.into());
         }
 
         Ok(())

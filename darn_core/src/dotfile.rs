@@ -140,7 +140,10 @@ impl DarnConfig {
         serde_json::from_str(&content).map_err(DotfileError::Parse)
     }
 
-    /// Save this config to the `.darn` file in the given workspace root.
+    /// Save this config to the `.darn` file in the given workspace root atomically.
+    ///
+    /// Uses a temp-file-then-rename pattern to prevent readers from seeing
+    /// a partially-written file.
     ///
     /// # Errors
     ///
@@ -148,7 +151,8 @@ impl DarnConfig {
     pub fn save(&self, root: &Path) -> Result<(), DotfileError> {
         let path = root.join(DOTFILE_NAME);
         let content = serde_json::to_string_pretty(self).map_err(DotfileError::Parse)?;
-        std::fs::write(&path, content + "\n").map_err(DotfileError::Io)
+        crate::atomic_write::atomic_write(&path, (content + "\n").as_bytes())
+            .map_err(DotfileError::Io)
     }
 
     /// Create a new `.darn` file with defaults and save it.

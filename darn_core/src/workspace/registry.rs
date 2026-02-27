@@ -89,34 +89,9 @@ impl WorkspaceRegistry {
     ///
     /// Returns an error if the file cannot be written.
     pub fn save_to(&self, path: &Path) -> Result<(), RegistryError> {
-        // Ensure parent directory exists
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(RegistryError::Write)?;
-        }
-
-        // Write atomically via temp file (unique suffix avoids parallel test races).
-        // On Windows, `fs::rename` fails when the destination exists, so we
-        // remove the target first. This makes the operation non-atomic on
-        // Windows but avoids half-written files.
-        let tid = std::thread::current().id();
-        let temp_name = format!(
-            "{}.{tid:?}.tmp",
-            path.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("registry")
-        );
-        let temp_path = path.with_file_name(temp_name);
         let contents = serde_json::to_string_pretty(self).map_err(RegistryError::Parse)?;
-        fs::write(&temp_path, &contents).map_err(RegistryError::Write)?;
-
-        // Remove existing file on Windows before rename.
-        #[cfg(target_os = "windows")]
-        if path.exists() {
-            fs::remove_file(path).map_err(RegistryError::Write)?;
-        }
-
-        fs::rename(&temp_path, path).map_err(RegistryError::Write)?;
-
+        crate::atomic_write::atomic_write(path, contents.as_bytes())
+            .map_err(RegistryError::Write)?;
         Ok(())
     }
 

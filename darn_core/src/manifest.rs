@@ -84,19 +84,17 @@ impl Manifest {
         }
     }
 
-    /// Saves the manifest to the given path.
+    /// Saves the manifest to the given path atomically.
+    ///
+    /// Uses a temp-file-then-rename pattern to prevent readers from seeing
+    /// a partially-written file.
     ///
     /// # Errors
     ///
     /// Returns an error if the file cannot be written.
     pub fn save(&self, path: &Path) -> Result<(), ManifestError> {
         let json = serde_json::to_string_pretty(self)?;
-
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        std::fs::write(path, json)?;
+        crate::atomic_write::atomic_write(path, json.as_bytes())?;
         Ok(())
     }
 

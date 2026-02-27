@@ -199,14 +199,17 @@ impl Peer {
         Ok(serde_json::from_str(&json)?)
     }
 
-    /// Save a peer to a JSON file.
+    /// Save a peer to a JSON file atomically.
+    ///
+    /// Uses a temp-file-then-rename pattern to prevent readers from seeing
+    /// a partially-written file.
     ///
     /// # Errors
     ///
     /// Returns an error if the file cannot be written.
     pub fn save(&self, path: &Path) -> Result<(), PeerError> {
         let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, json)?;
+        crate::atomic_write::atomic_write(path, json.as_bytes())?;
         Ok(())
     }
 
