@@ -117,8 +117,7 @@ enum Commands {
         /// Automerge URL or base58 ID - get this from `darn info` on the source workspace
         root_id: String,
 
-        /// Directory to clone into (defaults to current directory)
-        #[arg(default_value = ".")]
+        /// Directory to clone into (created if it doesn't exist)
         path: std::path::PathBuf,
     },
 

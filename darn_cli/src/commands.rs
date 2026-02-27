@@ -258,7 +258,24 @@ pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path, out: Output) -> ey
         cliclack::log::info(format!("Root directory: {}", dim.apply_to(&display_url)))?;
     }
 
-    // Step 2: Check we have peers configured
+    // Step 2: Create target directory (like git clone)
+    if path.exists() {
+        // If directory exists, it must be empty
+        let is_empty = path
+            .read_dir()
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(false);
+        if !is_empty {
+            eyre::bail!(
+                "destination path '{}' already exists and is not empty",
+                path.display()
+            );
+        }
+    } else {
+        std::fs::create_dir_all(path)?;
+    }
+
+    // Step 3: Check we have peers configured
     let peers = darn_core::peer::list_peers()?;
     if peers.is_empty() {
         eyre::bail!("No peers configured. Use `darn peer add` first.");
@@ -270,15 +287,15 @@ pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path, out: Output) -> ey
         peer_names.join(", ")
     ))?;
 
-    // Step 3: Initialize workspace with the provided root directory ID
+    // Step 4: Initialize workspace with the provided root directory ID
     let initialized = Darn::init_with_root_id(path, root_dir_id)?;
     let root = initialized.root().to_path_buf();
     out.success(&format!("Initialized workspace at {}", root.display()))?;
 
-    // Step 4: Open workspace with Subduction
+    // Step 5: Open workspace with Subduction
     let darn = Darn::open(&root).await?;
 
-    // Step 5: Connect to all peers (but don't sync yet - we'll sync specific sedimentrees)
+    // Step 6: Connect to all peers (but don't sync yet - we'll sync specific sedimentrees)
     let spinner = out.spinner("Connecting to peers...");
 
     let mut connected_peers = 0;
@@ -306,7 +323,7 @@ pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path, out: Output) -> ey
 
     spinner.stop(format!("Connected to {connected_peers} peer(s)"));
 
-    // Step 6: Sync and traverse directory tree, staging files
+    // Step 7: Sync and traverse directory tree, staging files
     let mut manifest = darn.load_manifest()?;
     let timeout = Some(Duration::from_secs(30));
 

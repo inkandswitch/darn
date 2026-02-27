@@ -6,11 +6,13 @@ Core library for darn - CRDT-backed filesystem management.
 
 `darn_core` provides the foundational types and logic for managing files as Automerge CRDT documents. It handles:
 
-- **Workspace management** - `.darn/` directory structure
-- **File ↔ document mapping** - Converting files to/from Automerge documents
-- **Manifest tracking** - Mapping file paths to Sedimentree IDs
-- **Change detection** - BLAKE3 content hashing for efficient diffing
-- **Ignore patterns** - `.darnignore` support (gitignore syntax)
+- _Workspace management_ - `.darn` marker file and centralized storage
+- _File-to-document mapping_ - Converting files to/from Automerge documents
+- _Manifest tracking_ - Mapping file paths to Sedimentree IDs
+- _Change detection_ - BLAKE3 content hashing for efficient diffing
+- _Ignore patterns_ - Gitignore-style patterns stored in `.darn` config
+- _Directory tree sync_ - Patchwork-style directory structure as Automerge docs
+- _Staged batch writes_ - Two-phase commit for atomic workspace updates
 
 ## Architecture
 
@@ -18,17 +20,40 @@ Core library for darn - CRDT-backed filesystem management.
 ┌──────────────────────────────────────────────────────────┐
 │                        darn_core                         │
 ├──────────────────────────────────────────────────────────┤
-│  workspace.rs   │ .darn/ directory management            │
-│  file.rs        │ File ↔ Automerge conversion            │
-│  manifest.rs    │ Tracked, ContentHash, FileState        │
-│  refresh.rs     │ Change detection & incremental commits │
-│  signer.rs      │ Ed25519 key management                 │
-│  config.rs      │ Global config (~/.config/darn/)        │
-│  ignore.rs      │ .darnignore pattern matching           │
+│  darn.rs          │ Workspace management + sync methods  │
+│  file.rs          │ File ↔ Automerge conversion          │
+│  directory.rs     │ Directory tree (Patchwork-style)     │
+│  manifest.rs      │ Tracked, ContentHash, FileState      │
+│  dotfile.rs       │ .darn config file (JSON)             │
+│  ignore.rs        │ Ignore pattern matching              │
+│  staged_update.rs │ Two-phase batch file writes          │
+│  refresh.rs       │ Change detection & incremental sync  │
+│  peer.rs          │ Peer config (JSON)                   │
+│  signer.rs        │ Ed25519 key management               │
+│  config.rs        │ Global config (~/.config/darn/)      │
+│  watcher.rs       │ Filesystem watcher for auto-sync     │
 └──────────────────────────────────────────────────────────┘
 ```
 
 ## Key Types
+
+### Darn
+
+Workspace management and sync orchestration:
+
+```rust
+use darn_core::darn::Darn;
+
+// Initialize new workspace
+let ws = Darn::init(Path::new("my-project"))?;
+
+// Open existing
+let darn = Darn::open(Path::new("my-project")).await?;
+
+// Access components
+let manifest = darn.load_manifest()?;
+let subduction = darn.subduction();
+```
 
 ### File
 
@@ -48,31 +73,12 @@ let mut am_doc = doc.to_automerge()?;
 let bytes = am_doc.save();
 ```
 
-### Workspace
-
-Manages the `.darn/` directory:
-
-```rust
-use darn_core::workspace::Workspace;
-
-// Initialize new workspace
-let ws = Workspace::init(".")?;
-
-// Open existing
-let ws = Workspace::open(".")?;
-
-// Access components
-let manifest = ws.load_manifest()?;
-let storage = ws.storage()?;
-let peer_id = ws.peer_id()?;
-```
-
 ### `Tracked` & `FileState`
 
 Track files with change detection:
 
 ```rust
-use darn_core::manifest::{Tracked, FileState, ContentHash};
+use darn_core::manifest::tracked::{Tracked, FileState};
 
 // Check file state
 match entry.state(workspace_root) {
@@ -93,15 +99,17 @@ Patchwork-inspired schema:
 | `metadata`    | `Metadata`        | Permissions (u32, rwx display)    |
 
 Content encoding:
-- **Text files** → `Text` object (character-level CRDT merging)
-- **Binary files** → `Bytes` scalar (last-writer-wins)
+- _Text files_ → `Text` object (character-level CRDT merging)
+- _Binary files_ → `Bytes` scalar (last-writer-wins)
 
 ## Serialization
 
 | Data              | Format    | Notes                                      |
 |-------------------|-----------|--------------------------------------------|
 | File documents    | Automerge | Direct API (`put`, `get`), not serde       |
-| Manifest          | CBOR      | Via `minicbor` for `Tracked` entries   |
+| Manifest          | JSON      | Via `serde_json`, base58 for 32-byte types |
+| Peer config       | JSON      | One file per peer in `~/.config/darn/peers/`|
+| Sedimentree data  | CBOR      | Via `minicbor`, managed by Subduction      |
 
 File documents use Automerge's direct API rather than serde integration. This gives explicit control over CRDT types (e.g., `ObjType::Text` for character-level merging vs `ScalarValue::Bytes` for LWW semantics).
 
@@ -112,8 +120,9 @@ File documents use Automerge's direct API rather than serde integration. This gi
 | `automerge`        | CRDT document storage          |
 | `sedimentree_core` | Content-addressed partitioning |
 | `sedimentree_fs`   | Filesystem storage backend     |
+| `subduction_core`  | Sync protocol                  |
 | `blake3`           | Content hashing                |
-| `minicbor`         | CBOR serialization             |
+| `serde` / `serde_json` | JSON serialization        |
 
 ## License
 

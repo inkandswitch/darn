@@ -22,40 +22,11 @@ cargo run -- --help
 
 ```
 darn/
-├── darn_core/           # Library crate
-│   └── src/
-│       ├── config.rs        # Global config (~/.config/darn/)
-│       ├── file.rs          # File type (Patchwork schema)
-│       ├── file/
-│       │   ├── content.rs       # Content enum (Text/Bytes)
-│       │   ├── file_type.rs     # FileType enum (merge strategy)
-│       │   ├── metadata.rs      # Metadata struct
-│       │   ├── metadata/
-│       │   │   └── permissions.rs
-│       │   ├── name.rs          # Name newtype
-│       │   └── state.rs         # FileState enum
-│       ├── ignore.rs        # .darnignore patterns
-│       ├── manifest.rs      # Manifest, ContentHash
-│       ├── manifest/
-│       │   ├── content_hash.rs
-│       │   └── tracked.rs       # Tracked entry
-│       ├── path.rs          # Path utilities
-│       ├── refresh.rs       # RefreshError
-│       ├── signer.rs        # Ed25519 key management
-│       ├── sync_progress.rs # Sync progress tracking
-│       ├── unix_timestamp.rs
-│       ├── watcher.rs       # Filesystem watcher
-│       ├── workspace.rs     # .darn/ directory management
-│       └── workspace/
-│           └── refresh_diff.rs
-│
-└── darn_cli/            # Binary crate
-    └── src/
-        ├── main.rs          # CLI with clap + tokio
-        ├── commands.rs      # Command implementations
-        ├── setup.rs         # First-run signer setup
-        └── theme.rs         # Catppuccin Mocha theme
+├── darn_core/    # Library crate (workspace management, file types, sync logic)
+└── darn_cli/     # Binary crate (CLI commands, interactive prompts, theme)
 ```
+
+See `cargo doc --open` for detailed module documentation.
 
 ## Logging
 
@@ -114,13 +85,15 @@ cargo run -- init .
 
 - `~/.config/darn/signer/` — Ed25519 keypair via `subduction_core::MemorySigner`
 - `~/.config/darn/peers/` — Peer configurations (shared across workspaces)
-- Peer ID displayed as base58
+- `~/.config/darn/workspaces.json` — Auto-healing workspace registry
+- `~/.config/darn/workspaces/<id>/` — Per-workspace manifest + sedimentree storage
+- Override with `DARN_CONFIG_DIR` env var
 
 ### Workspace
 
-- `.darn/` directory at workspace root
-- `manifest.json` — Tracked entries (SedimentreeId ↔ path)
-- `storage/` — Automerge documents (via sedimentree)
+- `.darn` JSON marker file at workspace root (not a directory)
+- Contains workspace ID, ignore patterns, and attribute overrides
+- Manifest and storage live under `~/.config/darn/workspaces/<id>/`
 
 ### File Documents
 
