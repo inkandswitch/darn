@@ -911,123 +911,150 @@ pub(crate) async fn sync_cmd(
     let mut manifest = darn.load_manifest()?;
     spinner.stop("Workspace loaded");
 
-    // Phase 1: Scan for new files (fast, no side effects)
+    // Phase 1: Discover and optionally ingest new files
+    if let Err(early) = sync_discover_files(&darn, &mut manifest, force, &out).await {
+        // scan_new_files failed — continue straight to sync
+        out.warning(&format!("File scan error: {early}"))?;
+    }
+
+    continue_sync(darn, manifest, peer_name, out).await
+}
+
+/// Discover new files and optionally ingest them.
+///
+/// Returns `Ok(())` when discovery/ingestion completed (or was skipped),
+/// `Err` with the scan error message to let the caller decide what to do.
+async fn sync_discover_files(
+    darn: &Darn,
+    manifest: &mut Manifest,
+    force: bool,
+    out: &Output,
+) -> Result<(), String> {
     let spinner = out.spinner("Scanning for new files...");
 
-    let candidates = match darn.scan_new_files(&manifest) {
+    let candidates = match darn.scan_new_files(manifest) {
         Ok(c) => c,
         Err(e) => {
             spinner.stop("Scan failed");
-            out.warning(&format!("File scan error: {e}"))?;
-            return continue_sync(darn, manifest, peer_name, out).await;
+            return Err(e.to_string());
         }
     };
 
     spinner.stop(format!("Found {} new file(s)", candidates.len()));
 
-    // Show candidates and ask for confirmation before ingesting
-    if !candidates.is_empty() {
-        // Convert absolute paths to relative for display
-        let relative_paths: Vec<PathBuf> = candidates
-            .iter()
-            .filter_map(|p| p.strip_prefix(darn.root()).ok().map(Path::to_path_buf))
-            .collect();
+    if candidates.is_empty() {
+        return Ok(());
+    }
 
-        if out.is_porcelain() {
-            for p in &relative_paths {
-                out.kv("new_file", &p.display().to_string())?;
-            }
-        } else {
-            let tree = format_paths_as_tree(&relative_paths);
-            cliclack::note(format!("Found {} new file(s)", candidates.len()), &tree)?;
+    // Convert absolute paths to relative for display
+    let relative_paths: Vec<PathBuf> = candidates
+        .iter()
+        .filter_map(|p| p.strip_prefix(darn.root()).ok().map(Path::to_path_buf))
+        .collect();
+
+    if out.is_porcelain() {
+        for p in &relative_paths {
+            out.kv("new_file", &p.display().to_string())
+                .map_err(|e| e.to_string())?;
+        }
+    } else {
+        let tree = format_paths_as_tree(&relative_paths);
+        cliclack::note(format!("Found {} new file(s)", candidates.len()), &tree)
+            .map_err(|e| e.to_string())?;
+    }
+
+    // Confirm unless --force (porcelain always forces)
+    let should_track = force || out.confirm("Track these files?", true).unwrap_or(false);
+
+    if should_track {
+        sync_ingest_files(darn, manifest, candidates, out)
+            .await
+            .map_err(|e| e.to_string())?;
+    } else {
+        out.remark("Skipped. Use 'darn ignore <pattern>' to ignore them.")
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+/// Ingest discovered files with a progress bar.
+async fn sync_ingest_files(
+    darn: &Darn,
+    manifest: &mut Manifest,
+    candidates: Vec<PathBuf>,
+    out: &Output,
+) -> eyre::Result<()> {
+    let total_files = candidates.len();
+    let progress_bar = out.progress(total_files as u64, "Processing files...");
+
+    let cancel_token = CancellationToken::new();
+    let cancel_token_clone = cancel_token.clone();
+
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            cancel_token_clone.cancel();
+        }
+    });
+
+    let last_completed = std::sync::atomic::AtomicUsize::new(0);
+
+    let progress_callback = |progress: DiscoverProgress<'_>| {
+        let prev = last_completed.swap(progress.completed, std::sync::atomic::Ordering::Relaxed);
+        let newly_completed = progress.completed.saturating_sub(prev);
+        for _ in 0..newly_completed {
+            progress_bar.inc(newly_completed as u64);
         }
 
-        // Confirm unless --force (porcelain always forces)
-        let should_track = force || out.confirm("Track these files?", true)?;
+        let msg = match progress.last_completed {
+            Some(file) => format!("{}", file.display()),
+            None => "Processing...".to_string(),
+        };
+        progress_bar.set_message(msg);
+    };
 
-        if should_track {
-            // Phase 2: Ingest files (only after confirmation)
-            let total_files = candidates.len();
-            let progress_bar = out.progress(total_files as u64, "Processing files...");
+    let result = darn
+        .ingest_files(candidates, manifest, progress_callback, &cancel_token)
+        .await;
 
-            // Set up cancellation token for Ctrl+C
-            let cancel_token = CancellationToken::new();
-            let cancel_token_clone = cancel_token.clone();
+    match result {
+        Ok(DiscoverResult {
+            new_files,
+            errors,
+            cancelled,
+        }) => {
+            progress_bar.stop(format!("Processed {total_files} file(s)"));
 
-            tokio::spawn(async move {
-                if tokio::signal::ctrl_c().await.is_ok() {
-                    cancel_token_clone.cancel();
-                }
-            });
+            if cancelled {
+                out.warning("Processing cancelled")?;
+                return Ok(());
+            }
 
-            // Track last position to know when to increment
-            let last_completed = std::sync::atomic::AtomicUsize::new(0);
+            for (path, err) in &errors {
+                out.warning(&format!("{}: {}", path.display(), err))?;
+            }
 
-            // Progress callback updates progress bar
-            let progress_callback = |progress: DiscoverProgress<'_>| {
-                // Increment progress bar for each newly completed file
-                let prev =
-                    last_completed.swap(progress.completed, std::sync::atomic::Ordering::Relaxed);
-                let newly_completed = progress.completed.saturating_sub(prev);
-                for _ in 0..newly_completed {
-                    progress_bar.inc(newly_completed as u64);
-                }
-
-                // Update message with current file
-                let msg = match progress.last_completed {
-                    Some(file) => format!("{}", file.display()),
-                    None => "Processing...".to_string(),
-                };
-                progress_bar.set_message(msg);
-            };
-
-            let result = darn
-                .ingest_files(candidates, &mut manifest, progress_callback, &cancel_token)
-                .await;
-
-            match result {
-                Ok(DiscoverResult {
-                    new_files,
-                    errors,
-                    cancelled,
-                }) => {
-                    progress_bar.stop(format!("Processed {total_files} file(s)"));
-
-                    if cancelled {
-                        out.warning("Processing cancelled")?;
-                        return Ok(());
+            if !new_files.is_empty() {
+                darn.save_manifest(manifest)?;
+                if out.is_porcelain() {
+                    for path in &new_files {
+                        out.kv("tracked", &path.display().to_string())?;
                     }
-
-                    // Report any errors
-                    for (path, err) in &errors {
-                        out.warning(&format!("{}: {}", path.display(), err))?;
-                    }
-
-                    if !new_files.is_empty() {
-                        darn.save_manifest(&manifest)?;
-                        if out.is_porcelain() {
-                            for path in &new_files {
-                                out.kv("tracked", &path.display().to_string())?;
-                            }
-                        } else {
-                            out.success(&format!("Tracking {} new file(s)", new_files.len()))?;
-                        }
-                        for path in &new_files {
-                            info!(path = %path.display(), "Tracked file");
-                        }
-                    }
+                } else {
+                    out.success(&format!("Tracking {} new file(s)", new_files.len()))?;
                 }
-                Err(e) => {
-                    progress_bar.stop("Processing failed");
-                    out.warning(&format!("Processing error: {e}"))?;
+                for path in &new_files {
+                    info!(path = %path.display(), "Tracked file");
                 }
             }
-        } else {
-            out.remark("Skipped. Use 'darn ignore <pattern>' to ignore them.")?;
+        }
+        Err(e) => {
+            progress_bar.stop("Processing failed");
+            out.warning(&format!("Processing error: {e}"))?;
         }
     }
 
-    continue_sync(darn, manifest, peer_name, out).await
+    Ok(())
 }
 
 /// Continue sync after file discovery.
