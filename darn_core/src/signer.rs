@@ -105,6 +105,45 @@ pub fn peer_id(signer_dir: &Path) -> Result<PeerId, LoadSignerError> {
     Ok(signer.verifying_key().into())
 }
 
+/// Load the raw 32-byte signing key from disk.
+///
+/// This is the Ed25519 seed, usable as both a Subduction signer key and
+/// an Iroh secret key (both are Ed25519).
+///
+/// # Errors
+///
+/// Returns an error if the key file cannot be read or has the wrong length.
+pub fn load_key_bytes(signer_dir: &Path) -> Result<[u8; 32], LoadSignerError> {
+    let private_key_path = signer_dir.join(SIGNING_KEY_FILENAME);
+    let key_bytes = std::fs::read(&private_key_path)?;
+
+    if key_bytes.len() != 32 {
+        return Err(LoadSignerError::InvalidKeyLength {
+            expected: 32,
+            actual: key_bytes.len(),
+        });
+    }
+
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&key_bytes);
+    Ok(arr)
+}
+
+/// Get the Iroh node ID string from the signing key bytes.
+///
+/// The Iroh node ID is the public key derived from the Ed25519 signing key,
+/// formatted as a z-base-32 string (Iroh's `PublicKey` display format).
+///
+/// # Errors
+///
+/// Returns an error if the key cannot be loaded.
+#[cfg(feature = "iroh")]
+pub fn iroh_node_id_string(signer_dir: &Path) -> Result<String, LoadSignerError> {
+    let key_bytes = load_key_bytes(signer_dir)?;
+    let secret_key = iroh::SecretKey::from_bytes(&key_bytes);
+    Ok(secret_key.public().to_string())
+}
+
 /// Error generating and saving a new signer.
 #[derive(Debug, Error)]
 pub enum GenerateSignerError {

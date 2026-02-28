@@ -1,4 +1,4 @@
-# darn
+# darn CLI
 
 **D**irectory-based **A**utomerge **R**eplication **N**ode
 
@@ -16,24 +16,28 @@ Or from the workspace root:
 cargo install --path darn_cli
 ```
 
+## Sync Model
+
+Unlike git, darn uses a Dropbox-like model: _everything syncs by default_. New files are auto-discovered on `darn sync` and tracked automatically. Use `darn ignore` to exclude files you don't want synced.
+
 ## Commands
 
 ### Initialize a Workspace
 
 ```bash
 darn init
+darn init my-project
 ```
 
-Creates a `.darn/` directory in the current folder. On first run, also sets up your global signer key at `~/.config/darn/signer/`.
+Creates a `.darn` marker file in the target directory. On first run, also sets up your global signer key at `~/.config/darn/signer/`.
 
-### Track Files
+### Clone a Workspace
 
 ```bash
-darn track myfile.txt
-darn track src/*.rs
+darn clone <root_id> my-project
 ```
 
-Converts files to Automerge documents and stores them in `.darn/storage/`.
+Clones a workspace from configured peers by root directory ID (get this from `darn info` on the source machine). Creates the target directory if it doesn't exist, or uses an existing empty directory.
 
 ### View Tracked Files
 
@@ -46,9 +50,9 @@ Shows all tracked files with state indicators:
 ```
 Workspace: /home/user/project
 
-    src/main.rs
-  M src/lib.rs
-  ! deleted_file.txt
+    src/main.rs  7Hj2fXy...
+  M src/lib.rs   9Yz4wAb...
+  ! deleted.txt  3Qm5xYz...
 
 3 tracked: 1 clean, 1 modified, 1 missing
 ```
@@ -59,83 +63,113 @@ Workspace: /home/user/project
 | `M` | Modified - file changed on disk |
 | `!` | Missing - file deleted from disk |
 
-### Stop Tracking
-
-```bash
-darn untrack myfile.txt
-```
-
-Removes from manifest but keeps the local file.
-
 ### Sync with Peers
 
 ```bash
 # Sync with all peers
 darn sync
 
-# Sync with specific peer
-darn sync --peer ws://192.168.1.50:8080
+# Sync with a specific peer
+darn sync relay
+
+# Preview what would be synced
+darn sync --dry-run
+
+# Skip confirmation for new files
+darn sync --force
 ```
 
-Automatically commits any local changes before syncing.
-
-### Manage Peers
-
-```bash
-darn peer add ws://192.168.1.50:8080
-darn peer list
-darn peer remove ws://192.168.1.50:8080
-```
+Auto-discovers new files and commits local changes before syncing.
 
 ### Watch for Changes
 
 ```bash
+# Watch with default 60s poll interval
 darn watch
+
+# Custom interval
+darn watch -i 30s
+
+# Push-only (no polling)
+darn watch -i 0
+
+# Disable auto-tracking of new files
+darn watch --no-track
 ```
 
-_(Not yet implemented)_ Auto-sync when files change.
+Watches the filesystem for changes and auto-syncs. Incoming changes from peers are applied via WebSocket push within 1 second.
 
-## Ignore Patterns
+### Manage Peers
 
-Create a `.darnignore` file (gitignore syntax):
+```bash
+# Add a WebSocket peer (discovery mode)
+darn peer add --name relay --websocket wss://relay.example.com
 
-```gitignore
-.git/
+# Add with known peer ID
+darn peer add --name friend --websocket ws://192.168.1.50:9000 --peer-id <base58_id>
 
-# Build artifacts
-target/
-*.o
+# Add an Iroh peer
+darn peer add --name direct --iroh <node_id>
 
-# Editor files
-*.swp
-*~
+# List peers
+darn peer list
 
-# Secrets
-.env
-*.key
+# Remove a peer
+darn peer remove relay
 ```
 
-The `.darn/` directory is always ignored.
+### Ignore Patterns
+
+```bash
+# Add ignore patterns
+darn ignore "*.log" "build/"
+
+# Remove ignore patterns
+darn unignore "*.log"
+```
+
+Patterns use gitignore syntax and are stored in the `.darn` config file. Default patterns (`.git/`, `target/`, `.env`, etc.) are created on init.
+
+### Workspace Info
+
+```bash
+darn info
+```
+
+Shows global config and workspace details including the root directory ID (needed for `darn clone` on other machines).
+
+### File Stats
+
+```bash
+darn stat src/main.rs
+darn stat <sedimentree_id>
+```
+
+Shows statistics for a tracked file (commits, fragments, sync state).
 
 ## Environment Variables
 
-| Variable   | Purpose                                     |
-|------------|---------------------------------------------|
-| `RUST_LOG` | Logging level (e.g., `RUST_LOG=debug`) |
+| Variable          | Purpose                                              |
+|-------------------|------------------------------------------------------|
+| `RUST_LOG`        | Logging level (e.g., `RUST_LOG=debug`)               |
+| `DARN_CONFIG_DIR` | Override global config directory (`~/.config/darn/`)  |
 
 ## Storage Layout
 
 ```
-.darn/
-├── manifest.cbor       # Tracked file mappings
-├── storage/
-│   ├── blobs/          # Content-addressed blobs
-│   └── trees/{id}/     # Per-document sedimentree
-└── peers/              # Peer information (future)
+~/.config/darn/                     # Global config
+├── signer/
+│   └── signing_key.ed25519         # Ed25519 identity
+├── peers/
+│   └── {name}.json                 # Peer configurations
+├── workspaces.json                 # Registry: id → path
+└── workspaces/<id>/
+    ├── manifest.json               # Tracked files
+    └── storage/                    # Sedimentree data
 
-~/.config/darn/
-└── signer/
-    └── private.key     # Ed25519 signing key
+project/
+├── .darn                           # JSON marker file
+└── ...                             # Your files
 ```
 
 ## License

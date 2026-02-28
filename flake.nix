@@ -87,7 +87,7 @@
         packages = {
           darn = pkgs.rustPlatform.buildRustPackage {
             pname = "darn";
-            version = "0.3.1";
+            version = "0.4.0";
             meta = {
               description = "Distributed Automerge Resource Navigator";
               longDescription = ''

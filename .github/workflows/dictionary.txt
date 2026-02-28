@@ -18,14 +18,19 @@ CRDTs
 Ctrl
 darn
 darnignore
+dir
+dirs
 Dropbox
 Homebrew
 Ed25519
+env
 enum
 eplication
 filesystem
 fmt
 gitignore
+IDEs
+init
 irectory-based
 json
 keypair
@@ -57,6 +62,7 @@ seps
 serde
 Strata
 struct
+subdirectories
 Subduction
 subduction
 symlink

@@ -28,6 +28,7 @@ use darn_core::{
     sync_progress::SyncProgressEvent,
     watcher::{WatchEvent, WatchEventProcessor, Watcher, WatcherConfig},
 };
+use futures::StreamExt as _;
 use sedimentree_core::id::SedimentreeId;
 use subduction_core::{peer::id::PeerId, storage::traits::Storage};
 use tokio_util::sync::CancellationToken;
@@ -258,7 +259,24 @@ pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path, out: Output) -> ey
         cliclack::log::info(format!("Root directory: {}", dim.apply_to(&display_url)))?;
     }
 
-    // Step 2: Check we have peers configured
+    // Step 2: Create target directory (like git clone)
+    if path.exists() {
+        // If directory exists, it must be empty
+        let is_empty = path
+            .read_dir()
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(false);
+        if !is_empty {
+            eyre::bail!(
+                "destination path '{}' already exists and is not empty",
+                path.display()
+            );
+        }
+    } else {
+        std::fs::create_dir_all(path)?;
+    }
+
+    // Step 3: Check we have peers configured
     let peers = darn_core::peer::list_peers()?;
     if peers.is_empty() {
         eyre::bail!("No peers configured. Use `darn peer add` first.");
@@ -270,15 +288,17 @@ pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path, out: Output) -> ey
         peer_names.join(", ")
     ))?;
 
-    // Step 3: Initialize workspace with the provided root directory ID
+    // Step 4: Initialize workspace with the provided root directory ID
     let initialized = Darn::init_with_root_id(path, root_dir_id)?;
     let root = initialized.root().to_path_buf();
     out.success(&format!("Initialized workspace at {}", root.display()))?;
 
-    // Step 4: Open workspace with Subduction
+    // Step 5: Open workspace with Subduction
+    let spinner = out.spinner("Loading workspace...");
     let darn = Darn::open(&root).await?;
+    spinner.stop("Workspace loaded");
 
-    // Step 5: Connect to all peers (but don't sync yet - we'll sync specific sedimentrees)
+    // Step 6: Connect to all peers (but don't sync yet - we'll sync specific sedimentrees)
     let spinner = out.spinner("Connecting to peers...");
 
     let mut connected_peers = 0;
@@ -306,35 +326,129 @@ pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path, out: Output) -> ey
 
     spinner.stop(format!("Connected to {connected_peers} peer(s)"));
 
-    // Step 6: Sync and traverse directory tree, staging files
+    // Step 7: Sync and traverse directory tree, staging files
     let mut manifest = darn.load_manifest()?;
     let timeout = Some(Duration::from_secs(30));
 
-    let progress = out.progress(100, "Cloning files...");
+    let progress = out.progress(100, "Discovering files...");
 
-    let mut total_received = 0usize;
-    let mut total_sent = 0usize;
-    let mut staged = StagedUpdate::new(&root)?;
+    let total_received = AtomicUsize::new(0);
+    let total_sent = AtomicUsize::new(0);
 
-    let file_count = clone_directory_recursive_with_sync(
+    // Phase 1: Walk directory tree, syncing only directory docs.
+    // Collect file entries for parallel sync.
+    let file_entries = collect_clone_entries(
         darn.subduction(),
         root_dir_id,
-        &root,
-        std::path::PathBuf::new(),
-        &mut staged,
+        PathBuf::new(),
         timeout,
-        &mut total_received,
-        &mut total_sent,
-        &progress,
-        out,
+        &total_received,
+        &total_sent,
     )
     .await?;
 
-    if file_count == 0 {
+    if file_entries.is_empty() {
         progress.stop("No files found");
         out.outro("Clone complete (empty workspace)")?;
         return Ok(());
     }
+
+    progress.stop(format!("Found {} file(s)", file_entries.len()));
+
+    // Phase 2: Sync all file sedimentrees in parallel.
+    #[allow(clippy::cast_possible_truncation)]
+    let sync_progress = out.progress(file_entries.len() as u64, "Syncing files...");
+
+    let concurrency = std::thread::available_parallelism()
+        .map(std::num::NonZero::get)
+        .unwrap_or(4);
+
+    let subduction = darn.subduction().clone();
+
+    futures::stream::iter(&file_entries)
+        .for_each_concurrent(concurrency, |entry| {
+            let total_received = &total_received;
+            let total_sent = &total_sent;
+            let sync_progress = &sync_progress;
+            let subduction = &subduction;
+
+            async move {
+                match subduction
+                    .sync_all(entry.sedimentree_id, true, timeout)
+                    .await
+                {
+                    Ok(sync_result) => {
+                        for (success, stats, _errors) in sync_result.values() {
+                            if *success {
+                                total_received.fetch_add(stats.total_received(), Ordering::Relaxed);
+                                total_sent.fetch_add(stats.total_sent(), Ordering::Relaxed);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %entry.path.display(),
+                            "Failed to sync file: {e}"
+                        );
+                    }
+                }
+                sync_progress.inc(1);
+                sync_progress.set_message(format!("{}", entry.path.display()));
+            }
+        })
+        .await;
+
+    sync_progress.stop(format!("Synced {} file(s)", file_entries.len()));
+
+    // Phase 3: Stage files (local I/O only, sequential for StagedUpdate).
+    #[allow(clippy::cast_possible_truncation)]
+    let stage_progress = out.progress(file_entries.len() as u64, "Staging files...");
+    let mut staged = StagedUpdate::new(&root)?;
+    let mut file_count = 0usize;
+
+    for entry in &file_entries {
+        let Some(am_doc) =
+            sedimentree::load_document(darn.subduction(), entry.sedimentree_id).await?
+        else {
+            tracing::warn!(path = %entry.path.display(), "File empty after sync");
+            continue;
+        };
+
+        let file = match File::from_automerge(&am_doc) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!(path = %entry.path.display(), "Failed to parse file: {e}");
+                continue;
+            }
+        };
+
+        let file_type = if file.content.is_text() {
+            FileType::Text
+        } else {
+            FileType::Binary
+        };
+
+        let sed_digest =
+            sedimentree::compute_digest(darn.subduction(), entry.sedimentree_id).await?;
+
+        staged.stage_create(
+            &file,
+            entry.path.clone(),
+            entry.sedimentree_id,
+            file_type,
+            sed_digest,
+        )?;
+        file_count += 1;
+
+        stage_progress.inc(1);
+        if out.is_porcelain() {
+            out.kv("cloned", &entry.path.display().to_string())?;
+        } else {
+            stage_progress.set_message(format!("{}", entry.path.display()));
+        }
+    }
+
+    stage_progress.stop(format!("{file_count} file(s) staged"));
 
     // Commit: parallel renames from staging dir into workspace
     let commit_result = staged.commit(&mut manifest).await?;
@@ -344,9 +458,8 @@ pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path, out: Output) -> ey
         }
     }
 
-    progress.stop(format!(
-        "{file_count} file(s) cloned (▼{total_received} ▲{total_sent})"
-    ));
+    let total_received = total_received.load(Ordering::Relaxed);
+    let total_sent = total_sent.load(Ordering::Relaxed);
 
     darn.save_manifest(&manifest)?;
 
@@ -362,127 +475,78 @@ pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path, out: Output) -> ey
     Ok(())
 }
 
-/// Recursively clone a directory: sync each sedimentree, then stage files.
-///
-/// Files are staged into a [`StagedUpdate`] rather than written directly
-/// to the workspace. The caller commits the staged update after traversal
-/// completes, giving external observers a near-atomic view.
-#[allow(clippy::too_many_arguments)]
-async fn clone_directory_recursive_with_sync(
-    subduction: &std::sync::Arc<darn_core::subduction::DarnSubduction>,
+/// A file discovered during directory tree traversal, pending sync.
+struct CloneEntry {
+    /// Relative path within the workspace.
+    path: PathBuf,
+    /// Sedimentree ID for this file.
+    sedimentree_id: SedimentreeId,
+}
+
+/// Phase 1 of clone: walk the directory tree, syncing only directory
+/// sedimentrees (must be sequential — need parent before child). Collect
+/// file entries for parallel sync in Phase 2.
+async fn collect_clone_entries(
+    subduction: &Arc<darn_core::subduction::DarnSubduction>,
     dir_id: SedimentreeId,
-    workspace_root: &Path,
-    current_path: std::path::PathBuf,
-    staged: &mut StagedUpdate,
-    timeout: Option<std::time::Duration>,
-    total_received: &mut usize,
-    total_sent: &mut usize,
-    progress: &crate::output::Progress,
-    out: Output,
-) -> eyre::Result<usize> {
-    // First, sync this directory's sedimentree from peers
+    current_path: PathBuf,
+    timeout: Option<Duration>,
+    total_received: &AtomicUsize,
+    total_sent: &AtomicUsize,
+) -> eyre::Result<Vec<CloneEntry>> {
+    // Sync this directory's sedimentree from peers
     let sync_result = subduction.sync_all(dir_id, true, timeout).await?;
     for (success, stats, _errors) in sync_result.values() {
         if *success {
-            *total_received += stats.total_received();
-            *total_sent += stats.total_sent();
+            total_received.fetch_add(stats.total_received(), Ordering::Relaxed);
+            total_sent.fetch_add(stats.total_sent(), Ordering::Relaxed);
         }
     }
 
     // Load directory document
     let Some(am_doc) = sedimentree::load_document(subduction, dir_id).await? else {
         info!(?dir_id, "Directory not found after sync");
-        return Ok(0);
+        return Ok(Vec::new());
     };
 
     let dir = match Directory::from_automerge(&am_doc) {
         Ok(d) => d,
         Err(e) => {
             info!(?dir_id, ?e, "Skipping non-directory sedimentree");
-            return Ok(0);
+            return Ok(Vec::new());
         }
     };
 
-    let mut file_count = 0;
+    let mut entries = Vec::new();
 
     for entry in &dir.entries {
         let entry_path = current_path.join(&entry.name);
 
         match entry.entry_type {
             EntryType::File => {
-                // Sync this file's sedimentree
-                let sync_result = subduction
-                    .sync_all(entry.sedimentree_id, true, timeout)
-                    .await?;
-                for (success, stats, _errors) in sync_result.values() {
-                    if *success {
-                        *total_received += stats.total_received();
-                        *total_sent += stats.total_sent();
-                    }
-                }
-
-                // Load file document
-                let Some(am_doc) =
-                    sedimentree::load_document(subduction, entry.sedimentree_id).await?
-                else {
-                    info!(name = %entry.name, "File sedimentree empty after sync");
-                    continue;
-                };
-
-                let file = match File::from_automerge(&am_doc) {
-                    Ok(f) => f,
-                    Err(e) => {
-                        info!(name = %entry.name, ?e, "Failed to parse file");
-                        continue;
-                    }
-                };
-
-                let file_type = if file.content.is_text() {
-                    FileType::Text
-                } else {
-                    FileType::Binary
-                };
-
-                let sed_digest =
-                    sedimentree::compute_digest(subduction, entry.sedimentree_id).await?;
-
-                // Stage the file (written to staging dir, not workspace)
-                staged.stage_create(
-                    &file,
-                    entry_path.clone(),
-                    entry.sedimentree_id,
-                    file_type,
-                    sed_digest,
-                )?;
-
-                file_count += 1;
-                if out.is_porcelain() {
-                    out.kv("cloned", &entry_path.display().to_string())?;
-                } else {
-                    progress.set_message(format!("{}", entry_path.display()));
-                }
+                entries.push(CloneEntry {
+                    path: entry_path,
+                    sedimentree_id: entry.sedimentree_id,
+                });
             }
 
             EntryType::Folder => {
-                // Recurse into subdirectory (Box::pin to avoid infinitely-sized future)
-                file_count += Box::pin(clone_directory_recursive_with_sync(
+                // Recurse into subdirectory (Box::pin for recursive async)
+                let mut sub_entries = Box::pin(collect_clone_entries(
                     subduction,
                     entry.sedimentree_id,
-                    workspace_root,
                     entry_path,
-                    staged,
                     timeout,
                     total_received,
                     total_sent,
-                    progress,
-                    out,
                 ))
                 .await?;
+                entries.append(&mut sub_entries);
             }
         }
     }
 
-    Ok(file_count)
+    Ok(entries)
 }
 
 /// Add ignore patterns to the `.darn` config.
@@ -672,8 +736,10 @@ pub(crate) fn tree(out: Output) -> eyre::Result<()> {
 
 /// Show stats for a tracked file.
 pub(crate) async fn stat(target: &str, out: Output) -> eyre::Result<()> {
+    let spinner = out.spinner("Loading workspace...");
     let darn = Darn::open(Path::new(".")).await?;
     let manifest = darn.load_manifest()?;
+    spinner.clear();
     let root = darn.root();
 
     // Try to find by path first, then by Sedimentree ID
@@ -840,126 +906,155 @@ pub(crate) async fn sync_cmd(
 
     out.intro("darn sync")?;
 
+    let spinner = out.spinner("Loading workspace...");
     let darn = Darn::open(Path::new(".")).await?;
     let mut manifest = darn.load_manifest()?;
+    spinner.stop("Workspace loaded");
 
-    // Phase 1: Scan for new files (fast, no side effects)
+    // Phase 1: Discover and optionally ingest new files
+    if let Err(early) = sync_discover_files(&darn, &mut manifest, force, &out).await {
+        // scan_new_files failed — continue straight to sync
+        out.warning(&format!("File scan error: {early}"))?;
+    }
+
+    continue_sync(darn, manifest, peer_name, out).await
+}
+
+/// Discover new files and optionally ingest them.
+///
+/// Returns `Ok(())` when discovery/ingestion completed (or was skipped),
+/// `Err` with the scan error message to let the caller decide what to do.
+async fn sync_discover_files(
+    darn: &Darn,
+    manifest: &mut Manifest,
+    force: bool,
+    out: &Output,
+) -> Result<(), String> {
     let spinner = out.spinner("Scanning for new files...");
 
-    let candidates = match darn.scan_new_files(&manifest) {
+    let candidates = match darn.scan_new_files(manifest) {
         Ok(c) => c,
         Err(e) => {
             spinner.stop("Scan failed");
-            out.warning(&format!("File scan error: {e}"))?;
-            return continue_sync(darn, manifest, peer_name, out).await;
+            return Err(e.to_string());
         }
     };
 
     spinner.stop(format!("Found {} new file(s)", candidates.len()));
 
-    // Show candidates and ask for confirmation before ingesting
-    if !candidates.is_empty() {
-        // Convert absolute paths to relative for display
-        let relative_paths: Vec<PathBuf> = candidates
-            .iter()
-            .filter_map(|p| p.strip_prefix(darn.root()).ok().map(Path::to_path_buf))
-            .collect();
+    if candidates.is_empty() {
+        return Ok(());
+    }
 
-        if out.is_porcelain() {
-            for p in &relative_paths {
-                out.kv("new_file", &p.display().to_string())?;
-            }
-        } else {
-            let tree = format_paths_as_tree(&relative_paths);
-            cliclack::note(format!("Found {} new file(s)", candidates.len()), &tree)?;
+    // Convert absolute paths to relative for display
+    let relative_paths: Vec<PathBuf> = candidates
+        .iter()
+        .filter_map(|p| p.strip_prefix(darn.root()).ok().map(Path::to_path_buf))
+        .collect();
+
+    if out.is_porcelain() {
+        for p in &relative_paths {
+            out.kv("new_file", &p.display().to_string())
+                .map_err(|e| e.to_string())?;
+        }
+    } else {
+        let tree = format_paths_as_tree(&relative_paths);
+        cliclack::note(format!("Found {} new file(s)", candidates.len()), &tree)
+            .map_err(|e| e.to_string())?;
+    }
+
+    // Confirm unless --force (porcelain always forces)
+    let should_track = force || out.confirm("Track these files?", true).unwrap_or(false);
+
+    if should_track {
+        sync_ingest_files(darn, manifest, candidates, out)
+            .await
+            .map_err(|e| e.to_string())?;
+    } else {
+        out.remark("Skipped. Use 'darn ignore <pattern>' to ignore them.")
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+/// Ingest discovered files with a progress bar.
+async fn sync_ingest_files(
+    darn: &Darn,
+    manifest: &mut Manifest,
+    candidates: Vec<PathBuf>,
+    out: &Output,
+) -> eyre::Result<()> {
+    let total_files = candidates.len();
+    let progress_bar = out.progress(total_files as u64, "Processing files...");
+
+    let cancel_token = CancellationToken::new();
+    let cancel_token_clone = cancel_token.clone();
+
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            cancel_token_clone.cancel();
+        }
+    });
+
+    let last_completed = std::sync::atomic::AtomicUsize::new(0);
+
+    let progress_callback = |progress: DiscoverProgress<'_>| {
+        let prev = last_completed.swap(progress.completed, std::sync::atomic::Ordering::Relaxed);
+        let newly_completed = progress.completed.saturating_sub(prev);
+        for _ in 0..newly_completed {
+            progress_bar.inc(newly_completed as u64);
         }
 
-        // Confirm unless --force (porcelain always forces)
-        let should_track = force || out.confirm("Track these files?", true)?;
+        let msg = match progress.last_completed {
+            Some(file) => format!("{}", file.display()),
+            None => "Processing...".to_string(),
+        };
+        progress_bar.set_message(msg);
+    };
 
-        if should_track {
-            // Phase 2: Ingest files (only after confirmation)
-            let total_files = candidates.len();
-            let progress_bar = out.progress(total_files as u64, "Processing files...");
+    let result = darn
+        .ingest_files(candidates, manifest, progress_callback, &cancel_token)
+        .await;
 
-            // Set up cancellation token for Ctrl+C
-            let cancel_token = CancellationToken::new();
-            let cancel_token_clone = cancel_token.clone();
+    match result {
+        Ok(DiscoverResult {
+            new_files,
+            errors,
+            cancelled,
+        }) => {
+            progress_bar.stop(format!("Processed {total_files} file(s)"));
 
-            tokio::spawn(async move {
-                if tokio::signal::ctrl_c().await.is_ok() {
-                    cancel_token_clone.cancel();
-                }
-            });
+            if cancelled {
+                out.warning("Processing cancelled")?;
+                return Ok(());
+            }
 
-            // Track last position to know when to increment
-            let last_completed = std::sync::atomic::AtomicUsize::new(0);
+            for (path, err) in &errors {
+                out.warning(&format!("{}: {}", path.display(), err))?;
+            }
 
-            // Progress callback updates progress bar
-            let progress_callback = |progress: DiscoverProgress<'_>| {
-                // Increment progress bar for each newly completed file
-                let prev =
-                    last_completed.swap(progress.completed, std::sync::atomic::Ordering::Relaxed);
-                let newly_completed = progress.completed.saturating_sub(prev);
-                for _ in 0..newly_completed {
-                    progress_bar.inc(newly_completed as u64);
-                }
-
-                // Update message with current file
-                let msg = match progress.last_completed {
-                    Some(file) => format!("{}", file.display()),
-                    None => "Processing...".to_string(),
-                };
-                progress_bar.set_message(msg);
-            };
-
-            let result = darn
-                .ingest_files(candidates, &mut manifest, progress_callback, &cancel_token)
-                .await;
-
-            match result {
-                Ok(DiscoverResult {
-                    new_files,
-                    errors,
-                    cancelled,
-                }) => {
-                    progress_bar.stop(format!("Processed {total_files} file(s)"));
-
-                    if cancelled {
-                        out.warning("Processing cancelled")?;
-                        return Ok(());
+            if !new_files.is_empty() {
+                darn.save_manifest(manifest)?;
+                if out.is_porcelain() {
+                    for path in &new_files {
+                        out.kv("tracked", &path.display().to_string())?;
                     }
-
-                    // Report any errors
-                    for (path, err) in &errors {
-                        out.warning(&format!("{}: {}", path.display(), err))?;
-                    }
-
-                    if !new_files.is_empty() {
-                        darn.save_manifest(&manifest)?;
-                        if out.is_porcelain() {
-                            for path in &new_files {
-                                out.kv("tracked", &path.display().to_string())?;
-                            }
-                        } else {
-                            out.success(&format!("Tracking {} new file(s)", new_files.len()))?;
-                        }
-                        for path in &new_files {
-                            info!(path = %path.display(), "Tracked file");
-                        }
-                    }
+                } else {
+                    out.success(&format!("Tracking {} new file(s)", new_files.len()))?;
                 }
-                Err(e) => {
-                    progress_bar.stop("Processing failed");
-                    out.warning(&format!("Processing error: {e}"))?;
+                for path in &new_files {
+                    info!(path = %path.display(), "Tracked file");
                 }
             }
-        } else {
-            out.remark("Skipped. Use 'darn ignore <pattern>' to ignore them.")?;
+        }
+        Err(e) => {
+            progress_bar.stop("Processing failed");
+            out.warning(&format!("Processing error: {e}"))?;
         }
     }
 
-    continue_sync(darn, manifest, peer_name, out).await
+    Ok(())
 }
 
 /// Continue sync after file discovery.
@@ -1058,10 +1153,10 @@ async fn continue_sync(
                         );
                     } else {
                         let green = Style::new().green();
+                        let file_count = manifest.len();
                         out.success(&format!(
-                            "{} synced {} files (▼{} ▲{})",
+                            "{} synced {file_count} file(s) (▼{} ▲{})",
                             green.apply_to(&peer.name),
-                            summary.sedimentrees_synced,
                             summary.total_received(),
                             summary.total_sent()
                         ))?;
@@ -1453,13 +1548,15 @@ pub(crate) async fn watch(
     no_track: bool,
     out: Output,
 ) -> eyre::Result<()> {
+    out.intro("darn watch")?;
+
+    let spinner = out.spinner("Loading workspace...");
     let darn = Darn::open(Path::new(".")).await?;
     let root = darn.root().to_path_buf();
     let mut manifest = darn.load_manifest()?;
+    spinner.stop("Workspace loaded");
 
     info!(root = %root.display(), ?sync_interval, no_track, "Starting watch");
-
-    out.intro("darn watch")?;
     out.info(&format!("Watching {}", root.display()))?;
 
     if !no_track {
@@ -1490,6 +1587,28 @@ pub(crate) async fn watch(
 
     watcher.start()?;
     out.success("Watcher started")?;
+
+    // Start Iroh accept loop for incoming peer-to-peer connections.
+    // We wrap `darn` in an Arc so the accept loop can share it.
+    let darn = std::sync::Arc::new(darn);
+
+    #[cfg(feature = "iroh")]
+    let iroh_cancel = tokio_util::sync::CancellationToken::new();
+    #[cfg(feature = "iroh")]
+    let _iroh_accept_handle = {
+        let iroh_cancel_clone = iroh_cancel.clone();
+        let darn_accept = darn.clone();
+        let handle = tokio::spawn(async move {
+            darn_accept.accept_iroh_connections(iroh_cancel_clone).await;
+        });
+        let iroh_addr = darn.iroh_addr();
+        out.remark(&format!("Iroh node ID: {}", darn.iroh_public_key()))?;
+        for relay in iroh_addr.relay_urls() {
+            out.remark(&format!("Iroh relay:   {relay}"))?;
+        }
+        handle
+    };
+
     out.remark("Press Ctrl+C to stop")?;
     if !out.is_porcelain() {
         println!(); // Blank line before events
@@ -1882,6 +2001,8 @@ pub(crate) async fn watch(
     }
 
     watcher.stop();
+    #[cfg(feature = "iroh")]
+    iroh_cancel.cancel();
     out.outro("Watch stopped")?;
 
     Ok(())
@@ -2153,18 +2274,31 @@ pub(crate) fn info(out: Output) -> eyre::Result<()> {
         Err(e) => format!("(error: {e})"),
     };
 
+    #[cfg(feature = "iroh")]
+    let iroh_node_id_str: Option<String> =
+        Some(match darn_core::signer::iroh_node_id_string(&signer_dir) {
+            Ok(id) => id,
+            Err(e) => format!("(error: {e})"),
+        });
+
+    #[cfg(not(feature = "iroh"))]
+    let iroh_node_id_str: Option<String> = None;
+
     if out.is_porcelain() {
-        info_porcelain(&config_dir, &peer_id_str);
+        info_porcelain(&config_dir, &peer_id_str, iroh_node_id_str.as_deref());
         return Ok(());
     }
 
-    info_human(out, &config_dir, &peer_id_str)
+    info_human(out, &config_dir, &peer_id_str, iroh_node_id_str.as_deref())
 }
 
 /// Porcelain output for `darn info`.
-fn info_porcelain(config_dir: &Path, peer_id_str: &str) {
+fn info_porcelain(config_dir: &Path, peer_id_str: &str, iroh_node_id_str: Option<&str>) {
     println!("config_dir\t{}", config_dir.display());
     println!("peer_id\t{peer_id_str}");
+    if let Some(iroh_id) = iroh_node_id_str {
+        println!("iroh_node_id\t{iroh_id}");
+    }
 
     // Peers
     if let Ok(peers) = darn_core::peer::list_peers() {
@@ -2221,25 +2355,39 @@ fn info_porcelain(config_dir: &Path, peer_id_str: &str) {
 }
 
 /// Human-friendly output for `darn info`.
-fn info_human(out: Output, config_dir: &Path, peer_id_str: &str) -> eyre::Result<()> {
+fn info_human(
+    out: Output,
+    config_dir: &Path,
+    peer_id_str: &str,
+    iroh_node_id_str: Option<&str>,
+) -> eyre::Result<()> {
     let dim = Style::new().dim();
 
     out.intro("darn info")?;
 
-    let global_table = format!(
+    let mut global_table = format!(
         "\
-┌─────────────┬──────────────────────────────────────────────────────────────┐
-│ {:^11} │ {:^60} │
-├─────────────┼──────────────────────────────────────────────────────────────┤
-│ {:<11} │ {:<60} │
-│ {:<11} │ {:<60} │
-└─────────────┴──────────────────────────────────────────────────────────────┘",
+┌──────────────┬──────────────────────────────────────────────────────────────┐
+│ {:^12} │ {:^60} │
+├──────────────┼──────────────────────────────────────────────────────────────┤
+│ {:<12} │ {:<60} │
+│ {:<12} │ {:<60} │",
         "Field",
         "Value",
         "Config",
         truncate_path(&config_dir.display().to_string(), 60),
         "Peer ID",
-        peer_id_str
+        peer_id_str,
+    );
+    if let Some(iroh_id) = iroh_node_id_str {
+        global_table.push_str(&format!(
+            "\n│ {:<12} │ {:<60} │",
+            "Iroh Node ID",
+            truncate_str(iroh_id, 60),
+        ));
+    }
+    global_table.push_str(
+        "\n└──────────────┴──────────────────────────────────────────────────────────────┘",
     );
     cliclack::note("Global Configuration", global_table)?;
 

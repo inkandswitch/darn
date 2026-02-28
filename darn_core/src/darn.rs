@@ -11,6 +11,7 @@ use std::{
     time::Duration,
 };
 
+use sedimentree_core::id::SedimentreeId;
 use sedimentree_fs_storage::FsStorage;
 use subduction_core::{connection::Connection, peer::id::PeerId};
 use subduction_crypto::signer::memory::MemorySigner;
@@ -51,6 +52,7 @@ use refresh_diff::RefreshDiff;
 /// - Centralized storage under `~/.config/darn/workspaces/<id>/`
 /// - Automerge document storage via Subduction
 /// - Peer configuration for sync
+/// - An Iroh endpoint for peer-to-peer QUIC transport (when the `iroh` feature is enabled)
 #[derive(Debug)]
 pub struct Darn {
     /// The root directory of the workspace (contains `.darn` file).
@@ -64,6 +66,14 @@ pub struct Darn {
 
     /// The Subduction instance for this workspace.
     subduction: Arc<DarnSubduction>,
+
+    /// Long-lived Iroh endpoint for QUIC transport.
+    ///
+    /// Created once at open time using the persistent Ed25519 signing key,
+    /// giving this node a stable Iroh node ID. Used for both outgoing
+    /// connections and accepting incoming ones.
+    #[cfg(feature = "iroh")]
+    iroh_endpoint: iroh::Endpoint,
 }
 
 impl Darn {
@@ -259,11 +269,26 @@ impl Darn {
         let storage = Self::storage_from_layout(&layout)?;
         let subduction = Box::pin(subduction::hydrate(signer, storage)).await?;
 
+        #[cfg(feature = "iroh")]
+        let iroh_endpoint = {
+            let signer_dir = config::global_signer_dir()?;
+            let key_bytes = signer::load_key_bytes(&signer_dir).map_err(SignerLoadError::from)?;
+            let secret_key = iroh::SecretKey::from_bytes(&key_bytes);
+            iroh::Endpoint::builder()
+                .secret_key(secret_key)
+                .alpns(vec![subduction_iroh::ALPN.to_vec()])
+                .bind()
+                .await
+                .map_err(|e| OpenError::IrohBind(e.to_string()))?
+        };
+
         Ok(Self {
             root,
             config,
             layout,
             subduction,
+            #[cfg(feature = "iroh")]
+            iroh_endpoint,
         })
     }
 
@@ -347,6 +372,34 @@ impl Darn {
     pub fn peer_id(&self) -> Result<PeerId, SignerLoadError> {
         let signer_dir = config::global_signer_dir()?;
         Ok(signer::peer_id(&signer_dir)?)
+    }
+
+    /// Get a reference to the long-lived Iroh endpoint.
+    ///
+    /// This endpoint uses the persistent Ed25519 signing key, giving
+    /// this node a stable Iroh node ID across restarts. Use it for
+    /// both outgoing connections and accepting incoming ones.
+    #[cfg(feature = "iroh")]
+    #[must_use]
+    pub const fn iroh_endpoint(&self) -> &iroh::Endpoint {
+        &self.iroh_endpoint
+    }
+
+    /// Get the Iroh public key derived from the persistent signing key.
+    ///
+    /// This is the public identity other Iroh peers use to address
+    /// this node.
+    #[cfg(feature = "iroh")]
+    #[must_use]
+    pub fn iroh_public_key(&self) -> iroh::PublicKey {
+        self.iroh_endpoint.secret_key().public()
+    }
+
+    /// Get the full Iroh endpoint address (public key + relay URL + direct addresses).
+    #[cfg(feature = "iroh")]
+    #[must_use]
+    pub fn iroh_addr(&self) -> iroh::EndpointAddr {
+        self.iroh_endpoint.addr()
     }
 
     /// Create storage from a workspace layout.
@@ -451,31 +504,123 @@ impl Darn {
 
     /// Refreshes all tracked files that have changed.
     ///
+    /// Modified files are processed in parallel (read, diff, store),
+    /// then manifest entries are patched sequentially.
+    ///
     /// Returns a summary of which files were updated, missing, or had errors.
     pub async fn refresh_all(&self, manifest: &mut Manifest) -> RefreshDiff {
+        use futures::{StreamExt, stream};
+        use std::sync::Mutex;
+
         let mut diff = RefreshDiff::default();
 
-        for entry in manifest.iter_mut() {
+        // Phase 1: Classify files (fast — only compares hashes)
+        let mut modified: Vec<RefreshCandidate> = Vec::new();
+
+        for entry in manifest.iter() {
             let path = entry.relative_path.clone();
-            let state = entry.state(&self.root);
-
-            match state {
-                FileState::Clean => continue,
-                FileState::Missing => {
-                    diff.missing.push(path);
-                    continue;
-                }
-                FileState::Modified => {}
+            match entry.state(&self.root) {
+                FileState::Clean => {}
+                FileState::Missing => diff.missing.push(path),
+                FileState::Modified => modified.push(RefreshCandidate {
+                    path,
+                    sedimentree_id: entry.sedimentree_id,
+                    current_fs_digest: entry.file_system_digest,
+                }),
             }
+        }
 
-            match self.refresh_file(entry).await {
-                Ok(true) => diff.updated.push(path),
-                Ok(false) => {}
-                Err(e) => diff.errors.push((path, e)),
+        if modified.is_empty() {
+            return diff;
+        }
+
+        // Phase 2: Refresh files in parallel
+        let concurrency = std::thread::available_parallelism()
+            .map(std::num::NonZero::get)
+            .unwrap_or(4);
+
+        let results: Mutex<Vec<RefreshResult>> = Mutex::new(Vec::new());
+
+        stream::iter(&modified)
+            .for_each_concurrent(concurrency, |candidate| {
+                let results = &results;
+
+                async move {
+                    let outcome = self.refresh_file_by_id(candidate).await;
+                    if let Ok(mut r) = results.lock() {
+                        r.push(RefreshResult {
+                            path: candidate.path.clone(),
+                            sedimentree_id: candidate.sedimentree_id,
+                            outcome,
+                        });
+                    }
+                }
+            })
+            .await;
+
+        let results = results.into_inner().unwrap_or_default();
+
+        // Phase 3: Patch manifest sequentially
+        for result in results {
+            match result.outcome {
+                Ok(Some(digests)) => {
+                    if let Some(entry) = manifest.get_by_id_mut(&result.sedimentree_id) {
+                        entry.file_system_digest = digests.file_system;
+                        entry.sedimentree_digest = digests.sedimentree;
+                    }
+                    diff.updated.push(result.path);
+                }
+                Ok(None) => {} // Not actually modified (race)
+                Err(e) => diff.errors.push((result.path, e)),
             }
         }
 
         diff
+    }
+
+    /// Refresh a single file, returning updated digests.
+    ///
+    /// This is the parallelizable core of refresh: reads the file, loads the
+    /// existing Automerge doc, applies the diff, stores changes, and computes
+    /// new digests. Does not touch the manifest.
+    async fn refresh_file_by_id(
+        &self,
+        candidate: &RefreshCandidate,
+    ) -> Result<Option<RefreshedDigests>, RefreshError> {
+        let path = self.root.join(&candidate.path);
+
+        // Re-check: hash file to confirm it's still modified
+        let new_fs_digest = content_hash::hash_file(&path)?;
+        let sed_id = candidate.sedimentree_id;
+
+        if new_fs_digest == candidate.current_fs_digest {
+            return Ok(None); // Raced — file reverted
+        }
+
+        let attributes = AttributeRules::from_workspace_root(&self.root).ok();
+        let new_file = File::from_path_with_attributes(&path, attributes.as_ref())?;
+
+        // Load existing doc
+        let mut am_doc = sedimentree::load_document(&self.subduction, sed_id)
+            .await
+            .map_err(|e| RefreshError::Storage(Box::new(e)))?
+            .ok_or_else(|| RefreshError::Storage(Box::new(SedimentreeError::NotFound)))?;
+
+        let old_heads = am_doc.get_heads();
+        refresh::update_automerge_content(&mut am_doc, new_file.content)?;
+
+        sedimentree::add_changes(&self.subduction, sed_id, &mut am_doc, &old_heads)
+            .await
+            .map_err(|e| RefreshError::Storage(Box::new(e)))?;
+
+        let new_sed_digest = sedimentree::compute_digest(&self.subduction, sed_id)
+            .await
+            .map_err(|e| RefreshError::Storage(Box::new(e)))?;
+
+        Ok(Some(RefreshedDigests {
+            file_system: new_fs_digest,
+            sedimentree: new_sed_digest,
+        }))
     }
 
     /// Apply remote changes to local files after sync.
@@ -1117,16 +1262,10 @@ impl Darn {
             addr = addr.with_relay_url(parsed);
         }
 
-        let endpoint = iroh::Endpoint::builder()
-            .alpns(vec![subduction_iroh::ALPN.to_vec()])
-            .bind()
-            .await
-            .map_err(SyncError::IrohBind)?;
-
         let signer = self.load_signer()?;
 
         let result = subduction_iroh::client::connect(
-            &endpoint,
+            &self.iroh_endpoint,
             addr,
             Self::DEFAULT_TIMEOUT,
             TimeoutTokio,
@@ -1152,6 +1291,89 @@ impl Darn {
             .map(crate::subduction::DarnConnection::Iroh);
 
         Ok((authenticated, actual_peer_id))
+    }
+
+    /// Accept incoming Iroh connections in a loop until cancelled.
+    ///
+    /// Each accepted connection is authenticated via the Subduction handshake
+    /// and registered with the Subduction instance, enabling bidirectional sync.
+    /// Background listener/sender tasks are spawned for each connection.
+    ///
+    /// The loop runs until the `cancel` token is triggered (e.g., on Ctrl+C).
+    #[cfg(feature = "iroh")]
+    pub async fn accept_iroh_connections(&self, cancel: CancellationToken) {
+        use subduction_core::connection::{handshake::Audience, nonce_cache::NonceCache};
+
+        let signer = match self.load_signer() {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("Failed to load signer for Iroh accept loop: {e}");
+                return;
+            }
+        };
+
+        let our_peer_id: PeerId = signer.verifying_key().into();
+        let nonce_cache = NonceCache::default();
+        let handshake_max_drift = Duration::from_secs(600);
+
+        // Clients in discovery mode derive their audience from the Iroh node ID
+        // string (the service name for PeerAddress::Iroh). We must accept that
+        // same audience on the server side.
+        let iroh_public_key_str = self.iroh_endpoint.secret_key().public().to_string();
+        let discovery_audience = Audience::discover(iroh_public_key_str.as_bytes());
+
+        tracing::info!(
+            iroh_public_key = %iroh_public_key_str,
+            "Iroh accept loop started"
+        );
+
+        loop {
+            tokio::select! {
+                () = cancel.cancelled() => {
+                    tracing::info!("Iroh accept loop cancelled");
+                    break;
+                }
+                result = subduction_iroh::server::accept_one(
+                    &self.iroh_endpoint,
+                    Self::DEFAULT_TIMEOUT,
+                    TimeoutTokio,
+                    &signer,
+                    &nonce_cache,
+                    our_peer_id,
+                    Some(discovery_audience),
+                    handshake_max_drift,
+                ) => {
+                    match result {
+                        Ok(accept_result) => {
+                            let peer_id = accept_result.peer_id;
+                            tracing::info!(%peer_id, "Accepted incoming Iroh connection");
+
+                            tokio::spawn(async move {
+                                if let Err(e) = accept_result.listener_task.await {
+                                    tracing::error!(%peer_id, "Iroh listener error: {e:?}");
+                                }
+                            });
+                            tokio::spawn(async move {
+                                if let Err(e) = accept_result.sender_task.await {
+                                    tracing::error!(%peer_id, "Iroh sender error: {e:?}");
+                                }
+                            });
+
+                            let authenticated = accept_result
+                                .authenticated
+                                .map(crate::subduction::DarnConnection::Iroh);
+
+                            if let Err(e) = self.subduction.register(authenticated).await {
+                                tracing::error!(%peer_id, "Failed to register Iroh connection: {e:?}");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Iroh accept error: {e:?}");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Connect to a peer, attach to Subduction, and perform a full sync.
@@ -1466,11 +1688,27 @@ impl UnopenedDarn {
         let signer = Darn::load_signer_static()?;
         let storage = Darn::storage_from_layout(&self.layout)?;
         let subduction = Box::pin(subduction::hydrate(signer, storage)).await?;
+
+        #[cfg(feature = "iroh")]
+        let iroh_endpoint = {
+            let signer_dir = config::global_signer_dir()?;
+            let key_bytes = signer::load_key_bytes(&signer_dir).map_err(SignerLoadError::from)?;
+            let secret_key = iroh::SecretKey::from_bytes(&key_bytes);
+            iroh::Endpoint::builder()
+                .secret_key(secret_key)
+                .alpns(vec![subduction_iroh::ALPN.to_vec()])
+                .bind()
+                .await
+                .map_err(|e| OpenError::IrohBind(e.to_string()))?
+        };
+
         Ok(Darn {
             root: self.root,
             config: self.config,
             layout: self.layout,
             subduction,
+            #[cfg(feature = "iroh")]
+            iroh_endpoint,
         })
     }
 
@@ -1530,6 +1768,27 @@ impl UnopenedDarn {
     }
 }
 
+/// A file identified as modified during Phase 1 of refresh.
+struct RefreshCandidate {
+    path: PathBuf,
+    sedimentree_id: SedimentreeId,
+    current_fs_digest: sedimentree_core::crypto::digest::Digest<content_hash::FileSystemContent>,
+}
+
+/// Updated digests from a parallel file refresh.
+struct RefreshedDigests {
+    file_system: sedimentree_core::crypto::digest::Digest<content_hash::FileSystemContent>,
+    sedimentree:
+        sedimentree_core::crypto::digest::Digest<sedimentree_core::sedimentree::Sedimentree>,
+}
+
+/// Result from refreshing a single file in parallel.
+struct RefreshResult {
+    path: PathBuf,
+    sedimentree_id: SedimentreeId,
+    outcome: Result<Option<RefreshedDigests>, RefreshError>,
+}
+
 /// Error opening a workspace.
 #[derive(Debug, Error)]
 pub enum OpenError {
@@ -1556,6 +1815,11 @@ pub enum OpenError {
     /// Subduction initialization error.
     #[error(transparent)]
     Init(#[from] SubductionInitError),
+
+    /// Iroh endpoint failed to bind.
+    #[cfg(feature = "iroh")]
+    #[error("iroh endpoint bind failed: {0}")]
+    IrohBind(String),
 }
 
 /// Error creating Subduction instance.
