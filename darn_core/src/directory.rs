@@ -217,12 +217,14 @@ impl Directory {
         let mut doc = Automerge::new();
 
         doc.transact::<_, _, AutomergeError>(|tx| {
-            tx.put(ROOT, "title", self.name.as_str())?;
+            let title = tx.put_object(ROOT, "title", ObjType::Text)?;
+            tx.splice_text(&title, 0, 0, self.name.as_str())?;
 
             let docs = tx.put_object(ROOT, "docs", ObjType::List)?;
             for (idx, entry) in self.entries.iter().enumerate() {
                 let entry_obj = tx.insert_object(&docs, idx, ObjType::Map)?;
-                tx.put(&entry_obj, "name", entry.name.as_str())?;
+                let name = tx.put_object(&entry_obj, "name", ObjType::Text)?;
+                tx.splice_text(&name, 0, 0, entry.name.as_str())?;
                 tx.put(&entry_obj, "type", entry.entry_type.as_str())?;
                 tx.put(
                     &entry_obj,
@@ -378,17 +380,30 @@ impl Directory {
                 },
             };
 
-            // Check if entry with same name already exists, remove it
+            // Check if entry with same name already exists, remove it.
+            // Handles both Text (new) and Str (legacy) name fields.
             let mut to_remove = None;
             for idx in 0..tx.length(&docs_id) {
                 if let Some((automerge::Value::Object(ObjType::Map), entry_id)) =
                     tx.get(&docs_id, idx)?
-                    && let Some((automerge::Value::Scalar(s), _)) = tx.get(&entry_id, "name")?
-                    && let automerge::ScalarValue::Str(existing_name) = s.as_ref()
-                    && existing_name == &name
                 {
-                    to_remove = Some(idx);
-                    break;
+                    let existing_name = match tx.get(&entry_id, "name")? {
+                        Some((automerge::Value::Object(ObjType::Text), id)) => {
+                            Some(tx.text(&id)?)
+                        }
+                        Some((automerge::Value::Scalar(s), _)) => {
+                            if let automerge::ScalarValue::Str(s) = s.as_ref() {
+                                Some(s.to_string())
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
+                    if existing_name.as_deref() == Some(&name) {
+                        to_remove = Some(idx);
+                        break;
+                    }
                 }
             }
 
@@ -399,7 +414,8 @@ impl Directory {
             // Add new entry at the end
             let length = tx.length(&docs_id);
             let entry_obj = tx.insert_object(&docs_id, length, ObjType::Map)?;
-            tx.put(&entry_obj, "name", name.as_str())?;
+            let entry_name = tx.put_object(&entry_obj, "name", ObjType::Text)?;
+            tx.splice_text(&entry_name, 0, 0, name.as_str())?;
             tx.put(&entry_obj, "type", entry_type_str)?;
             tx.put(&entry_obj, "url", url.as_str())?;
 
@@ -432,12 +448,24 @@ impl Directory {
             for idx in 0..doc.length(&docs_id) {
                 if let Some((automerge::Value::Object(ObjType::Map), entry_id)) =
                     doc.get(&docs_id, idx)?
-                    && let Some((automerge::Value::Scalar(s), _)) = doc.get(&entry_id, "name")?
-                    && let automerge::ScalarValue::Str(existing_name) = s.as_ref()
-                    && existing_name == name
                 {
-                    found = Some(idx);
-                    break;
+                    let existing_name = match doc.get(&entry_id, "name")? {
+                        Some((automerge::Value::Object(ObjType::Text), id)) => {
+                            Some(doc.text(&id)?)
+                        }
+                        Some((automerge::Value::Scalar(s), _)) => {
+                            if let automerge::ScalarValue::Str(s) = s.as_ref() {
+                                Some(s.to_string())
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
+                    if existing_name.as_deref() == Some(name) {
+                        found = Some(idx);
+                        break;
+                    }
                 }
             }
             found
@@ -476,7 +504,8 @@ impl Directory {
         if doc.get(ROOT, "title")?.is_none() && doc.get(ROOT, "@patchwork")?.is_none() {
             let name = name.to_string();
             doc.transact::<_, _, AutomergeError>(|tx| {
-                tx.put(ROOT, "title", name.as_str())?;
+                let title = tx.put_object(ROOT, "title", ObjType::Text)?;
+                tx.splice_text(&title, 0, 0, name.as_str())?;
                 tx.put_object(ROOT, "docs", ObjType::List)?;
                 Ok(())
             })
@@ -487,13 +516,16 @@ impl Directory {
 }
 
 /// Helper to get a string value from an Automerge document.
-#[allow(clippy::wildcard_enum_match_arm)] // only Str is valid; all other variants are the same error
+///
+/// Accepts both `ObjType::Text` (character-level CRDT) and `ScalarValue::Str` (LWW scalar)
+/// for backward compatibility.
 fn get_string(
     doc: &Automerge,
     obj: automerge::ObjId,
     key: &str,
 ) -> Result<String, DeserializeError> {
     match doc.get(obj, key)? {
+        Some((automerge::Value::Object(ObjType::Text), id)) => Ok(doc.text(&id)?),
         Some((automerge::Value::Scalar(s), _)) => match s.as_ref() {
             automerge::ScalarValue::Str(s) => Ok(s.to_string()),
             _ => Err(DeserializeError::InvalidSchema(format!(

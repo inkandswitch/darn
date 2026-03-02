@@ -35,10 +35,10 @@ Darn brings version control semantics to local-first file sync. It tracks files 
                             │
                             ▼
 ┌───────────────────────────────────────────────────────────────────┐
-│                    Centralized Storage                             │
+│                       Centralized Storage                         │
 │   ~/.config/darn/workspaces/<id>/                                 │
 │   ├── manifest.json                                               │
-│   └── storage/                                                    │
+│   └── storage/                  (via sedimentree_fs_storage)      │
 └───────────────────────────────────────────────────────────────────┘
 ```
 

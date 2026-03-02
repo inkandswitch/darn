@@ -17,9 +17,7 @@ project/
 ├── workspaces.json                 # Registry: workspace ID → path
 └── workspaces/<id>/
     ├── manifest.json               # Tracked file metadata
-    └── storage/                    # Content-addressed storage (CBOR)
-        └── <sedimentree_id>/
-            └── blobs/
+    └── storage/                    # Managed by sedimentree_fs_storage
 ```
 
 ### The `.darn` File

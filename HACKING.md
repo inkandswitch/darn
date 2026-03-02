@@ -86,7 +86,7 @@ cargo run -- init .
 - `~/.config/darn/signer/` — Ed25519 keypair via `subduction_core::MemorySigner`
 - `~/.config/darn/peers/` — Peer configurations (shared across workspaces)
 - `~/.config/darn/workspaces.json` — Auto-healing workspace registry
-- `~/.config/darn/workspaces/<id>/` — Per-workspace manifest + sedimentree storage
+- `~/.config/darn/workspaces/<id>/` — Per-workspace manifest + sedimentree storage (layout managed by `sedimentree_fs_storage`)
 - Override with `DARN_CONFIG_DIR` env var
 
 ### Workspace
