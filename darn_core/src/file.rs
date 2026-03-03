@@ -3,18 +3,19 @@
 //! Files in `darn` are stored as Automerge documents following the Patchwork convention:
 //!
 //! ```ignore
-//! UnixFileEntry {
+//! FileDocument {
+//!   "@patchwork": { type: "file" },
 //!   name: string,
 //!   content: Text | Bytes,
 //!   extension: string,
 //!   mimeType: string,
+//!   metadata: { permissions: number },
 //! }
 //! ```
 //!
 //! - Text files use `Text` (character-level CRDT with automatic merging)
 //! - Binary files use `Bytes` (last-writer-wins semantics)
-//!
-//! Note: Unix permissions are stored as a darn-specific extension field `_darn_mode`.
+//! - `metadata.permissions` stores the Unix file mode (e.g. `0o644`)
 
 pub mod content;
 pub mod file_type;
@@ -169,6 +170,10 @@ impl File {
         let mode = self.metadata.mode();
 
         doc.transact::<_, _, AutomergeError>(|tx| {
+            // Patchwork metadata
+            let patchwork = tx.put_object(ROOT, "@patchwork", ObjType::Map)?;
+            tx.put(&patchwork, "type", "file")?;
+
             tx.put(ROOT, "name", self.name.as_str())?;
 
             match &self.content {
@@ -187,7 +192,9 @@ impl File {
 
             tx.put(ROOT, "extension", extension.as_str())?;
             tx.put(ROOT, "mimeType", mime_type.as_str())?;
-            tx.put(ROOT, "_darn_mode", i64::from(mode))?;
+
+            let metadata_obj = tx.put_object(ROOT, "metadata", ObjType::Map)?;
+            tx.put(&metadata_obj, "permissions", i64::from(mode))?;
 
             Ok(())
         })
@@ -214,6 +221,10 @@ impl File {
         let content = self.content;
 
         doc.transact::<_, _, AutomergeError>(|tx| {
+            // Patchwork metadata
+            let patchwork = tx.put_object(ROOT, "@patchwork", ObjType::Map)?;
+            tx.put(&patchwork, "type", "file")?;
+
             tx.put(ROOT, "name", name.as_str())?;
 
             match content {
@@ -232,7 +243,9 @@ impl File {
 
             tx.put(ROOT, "extension", extension.as_str())?;
             tx.put(ROOT, "mimeType", mime_type.as_str())?;
-            tx.put(ROOT, "_darn_mode", i64::from(mode))?;
+
+            let metadata_obj = tx.put_object(ROOT, "metadata", ObjType::Map)?;
+            tx.put(&metadata_obj, "permissions", i64::from(mode))?;
 
             Ok(())
         })
@@ -271,13 +284,18 @@ impl File {
         };
 
         #[allow(clippy::wildcard_enum_match_arm)]
-        // only Int/Uint carry mode; rest defaults to 0o644
-        let permissions = match doc.get(ROOT, "_darn_mode")? {
-            Some((automerge::Value::Scalar(s), _)) => match s.as_ref() {
-                automerge::ScalarValue::Int(i) => u32::try_from(*i).unwrap_or(0o644),
-                automerge::ScalarValue::Uint(u) => u32::try_from(*u).unwrap_or(0o644),
-                _ => 0o644,
-            },
+        // Read permissions from metadata.permissions (Patchwork convention)
+        let permissions = match doc.get(ROOT, "metadata")? {
+            Some((automerge::Value::Object(ObjType::Map), metadata_id)) => {
+                match doc.get(&metadata_id, "permissions")? {
+                    Some((automerge::Value::Scalar(s), _)) => match s.as_ref() {
+                        automerge::ScalarValue::Int(i) => u32::try_from(*i).unwrap_or(0o644),
+                        automerge::ScalarValue::Uint(u) => u32::try_from(*u).unwrap_or(0o644),
+                        _ => 0o644,
+                    },
+                    _ => 0o644,
+                }
+            }
             _ => 0o644,
         };
 

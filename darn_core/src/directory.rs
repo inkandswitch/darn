@@ -4,9 +4,10 @@
 //!
 //! ```ignore
 //! FolderDoc {
+//!   "@patchwork": { type: "folder" },
 //!   title: string,
 //!   docs: [
-//!     { name: string, type: "file" | "folder", url: "automerge:<base58>" },
+//!     { name: string, type: "file" | "folder", url: "automerge:<bs58check>" },
 //!     ...
 //!   ],
 //! }
@@ -195,6 +196,10 @@ impl Directory {
         let mut doc = Automerge::new();
 
         doc.transact::<_, _, AutomergeError>(|tx| {
+            // Patchwork metadata
+            let patchwork = tx.put_object(ROOT, "@patchwork", ObjType::Map)?;
+            tx.put(&patchwork, "type", "folder")?;
+
             let title = tx.put_object(ROOT, "title", ObjType::Text)?;
             tx.splice_text(&title, 0, 0, self.name.as_str())?;
 
@@ -422,6 +427,9 @@ impl Directory {
         if doc.get(ROOT, "title")?.is_none() {
             let name = name.to_string();
             doc.transact::<_, _, AutomergeError>(|tx| {
+                let patchwork = tx.put_object(ROOT, "@patchwork", ObjType::Map)?;
+                tx.put(&patchwork, "type", "folder")?;
+
                 let title = tx.put_object(ROOT, "title", ObjType::Text)?;
                 tx.splice_text(&title, 0, 0, name.as_str())?;
                 tx.put_object(ROOT, "docs", ObjType::List)?;
