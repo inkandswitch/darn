@@ -25,23 +25,8 @@ impl Serialize for WorkspaceId {
 
 impl<'de> Deserialize<'de> for WorkspaceId {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        // Accept both hex strings (new format) and byte arrays (legacy format).
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum IdRepr {
-            Hex(String),
-            Bytes(Vec<u8>),
-        }
-
-        match IdRepr::deserialize(deserializer)? {
-            IdRepr::Hex(s) => s.parse().map_err(serde::de::Error::custom),
-            IdRepr::Bytes(bytes) => {
-                let arr: [u8; 16] = bytes
-                    .try_into()
-                    .map_err(|_| serde::de::Error::custom("expected 16 bytes"))?;
-                Ok(Self(arr))
-            }
-        }
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
     }
 }
 

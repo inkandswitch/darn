@@ -751,7 +751,7 @@ pub(crate) async fn stat(target: &str, out: Output) -> eyre::Result<()> {
         entry
     } else {
         out.error(&format!("Not found: {target}"))?;
-        out.remark("Specify a tracked file path or Sedimentree ID (base58)")?;
+        out.remark("Specify a tracked file path or automerge URL (automerge:<bs58check>)")?;
         return Ok(());
     };
 
@@ -832,51 +832,31 @@ pub(crate) async fn stat(target: &str, out: Output) -> eyre::Result<()> {
     Ok(())
 }
 
-/// Parse an automerge URL or plain base58 into a 32-byte ID.
+/// Parse an `automerge:<bs58check>` URL into a 32-byte ID.
 ///
-/// Accepts:
-/// - `automerge:<base58check>` (with checksum validation)
-/// - Plain base58 (no checksum, for backward compatibility)
+/// Expects a 16-byte document ID encoded as bs58check, zero-padded to 32 bytes.
 ///
 /// # Errors
 ///
-/// Returns an error if the input is invalid or not 32 bytes.
+/// Returns an error if the input is not a valid automerge URL.
 fn parse_automerge_url(s: &str) -> eyre::Result<[u8; 32]> {
-    let bytes = if let Some(encoded) = s.strip_prefix("automerge:") {
-        // Try JS-compatible bs58check first, then Rust's with_check, then plain bs58
-        darn_core::directory::bs58check_decode(encoded)
-            .or_else(|_| {
-                bs58::decode(encoded)
-                    .with_check(None)
-                    .into_vec()
-                    .map_err(|e| e.to_string())
-            })
-            .or_else(|_| bs58::decode(encoded).into_vec().map_err(|e| e.to_string()))
-            .map_err(|e| eyre::eyre!("invalid automerge URL: {e}"))?
-    } else {
-        // Plain base58 (no checksum)
-        bs58::decode(s)
-            .into_vec()
-            .map_err(|e| eyre::eyre!("invalid base58: {e}"))?
-    };
+    let encoded = s
+        .strip_prefix("automerge:")
+        .ok_or_else(|| eyre::eyre!("expected 'automerge:' prefix, got: {s}"))?;
 
-    // Accept 16-byte IDs (zero-pad to 32) or 32-byte IDs
-    match bytes.len() {
-        16 => {
-            let mut arr = [0u8; 32];
-            arr[..16].copy_from_slice(&bytes);
-            Ok(arr)
-        }
-        32 => {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&bytes);
-            Ok(arr)
-        }
-        n => eyre::bail!("ID must be 16 or 32 bytes (got {n})"),
+    let bytes = darn_core::directory::bs58check_decode(encoded)
+        .map_err(|e| eyre::eyre!("invalid automerge URL: {e}"))?;
+
+    if bytes.len() != 16 {
+        eyre::bail!("ID must be 16 bytes (got {})", bytes.len());
     }
+
+    let mut arr = [0u8; 32];
+    arr[..16].copy_from_slice(&bytes);
+    Ok(arr)
 }
 
-/// Try to parse a sedimentree ID from an automerge URL or plain base58.
+/// Try to parse a sedimentree ID from an `automerge:<bs58check>` URL.
 fn try_parse_sedimentree_id(s: &str) -> Option<SedimentreeId> {
     parse_automerge_url(s).ok().map(SedimentreeId::new)
 }

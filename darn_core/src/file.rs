@@ -27,7 +27,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use automerge::{Automerge, AutomergeError, ObjType, ROOT, ReadDoc, transaction::Transactable};
+use automerge::{transaction::Transactable, Automerge, AutomergeError, ObjType, ReadDoc, ROOT};
 use thiserror::Error;
 
 use crate::attributes::AttributeRules;
@@ -270,7 +270,6 @@ impl File {
             }
         };
 
-        // Read permissions from _darn_mode (new) or metadata.permissions (legacy)
         #[allow(clippy::wildcard_enum_match_arm)]
         // only Int/Uint carry mode; rest defaults to 0o644
         let permissions = match doc.get(ROOT, "_darn_mode")? {
@@ -279,26 +278,7 @@ impl File {
                 automerge::ScalarValue::Uint(u) => u32::try_from(*u).unwrap_or(0o644),
                 _ => 0o644,
             },
-            _ => {
-                // Fall back to legacy metadata.permissions
-                match doc.get(ROOT, "metadata")? {
-                    Some((automerge::Value::Object(ObjType::Map), metadata_id)) => {
-                        match doc.get(&metadata_id, "permissions")? {
-                            Some((automerge::Value::Scalar(s), _)) => match s.as_ref() {
-                                automerge::ScalarValue::Int(i) => {
-                                    u32::try_from(*i).unwrap_or(0o644)
-                                }
-                                automerge::ScalarValue::Uint(u) => {
-                                    u32::try_from(*u).unwrap_or(0o644)
-                                }
-                                _ => 0o644,
-                            },
-                            _ => 0o644,
-                        }
-                    }
-                    _ => 0o644,
-                }
-            }
+            _ => 0o644,
         };
 
         Ok(Self {
