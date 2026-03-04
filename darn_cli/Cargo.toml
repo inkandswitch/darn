@@ -41,10 +41,10 @@ sedimentree_fs_storage.workspace = true
 subduction_core.workspace = true
 subduction_websocket.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
 tokio-util.workspace = true
-tracing.workspace = true
+tokio.workspace = true
 tracing-subscriber.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true

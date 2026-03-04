@@ -165,7 +165,7 @@ Shows statistics for a tracked file (commits, fragments, sync state).
 ├── workspaces.json                 # Registry: id → path
 └── workspaces/<id>/
     ├── manifest.json               # Tracked files
-    └── storage/                    # Sedimentree data
+    └── storage/                    # Managed by sedimentree_fs_storage
 
 project/
 ├── .darn                           # JSON marker file

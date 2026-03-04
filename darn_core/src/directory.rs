@@ -4,9 +4,10 @@
 //!
 //! ```ignore
 //! FolderDoc {
+//!   "@patchwork": { type: "folder" },
 //!   title: string,
 //!   docs: [
-//!     { name: string, type: "file" | "folder", url: "automerge:<base58>" },
+//!     { name: string, type: "file" | "folder", url: "automerge:<bs58check>" },
 //!     ...
 //!   ],
 //! }
@@ -71,9 +72,8 @@ pub fn bs58check_decode(encoded: &str) -> Result<Vec<u8>, String> {
 
 /// Convert a `SedimentreeId` to an Automerge URL string.
 ///
-/// Uses bs58check encoding of the first 16 bytes for compatibility with automerge-repo,
-/// which expects 16-byte document IDs. The remaining 16 bytes of the sedimentree ID
-/// are assumed to be zero-padding.
+/// Uses bs58check encoding of the first 16 bytes (automerge-repo convention).
+/// The remaining 16 bytes of the sedimentree ID are zero-padding.
 #[must_use]
 pub fn sedimentree_id_to_url(id: SedimentreeId) -> String {
     let bytes = id.as_bytes();
@@ -82,46 +82,25 @@ pub fn sedimentree_id_to_url(id: SedimentreeId) -> String {
 
 /// Parse an Automerge URL string to a `SedimentreeId`.
 ///
-/// Accepts both 16-byte (automerge-repo style) and 32-byte (legacy darn) IDs.
-/// For 16-byte IDs, zero-pads to 32 bytes for `SedimentreeId`.
+/// Expects `automerge:<bs58check>` encoding a 16-byte document ID,
+/// which is zero-padded to 32 bytes for `SedimentreeId`.
 fn url_to_sedimentree_id(url: &str) -> Result<SedimentreeId, DeserializeError> {
     let encoded = url.strip_prefix("automerge:").ok_or_else(|| {
         DeserializeError::InvalidSchema(format!("url must start with 'automerge:': {url}"))
     })?;
 
-    // Try JS-compatible bs58check first, then Rust's bs58check (version byte),
-    // then plain bs58 for backward compatibility
     let bytes = bs58check_decode(encoded)
-        .or_else(|_| {
-            bs58::decode(encoded)
-                .with_check(None)
-                .into_vec()
-                .map_err(|e| e.to_string())
-        })
-        .or_else(|_| bs58::decode(encoded).into_vec().map_err(|e| e.to_string()))
-        .map_err(|e| DeserializeError::InvalidSchema(format!("invalid base58 in url: {e}")))?;
+        .map_err(|e| DeserializeError::InvalidSchema(format!("invalid bs58check in url: {e}")))?;
 
-    let arr: [u8; 32] = match bytes.len() {
-        16 => {
-            // 16-byte automerge-repo style ID: zero-pad to 32 bytes
-            let mut arr = [0u8; 32];
-            arr[..16].copy_from_slice(&bytes);
-            arr
-        }
-        32 => {
-            // 32-byte legacy darn ID
-            bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| DeserializeError::InvalidSchema("invalid 32-byte id".into()))?
-        }
-        n => {
-            return Err(DeserializeError::InvalidSchema(format!(
-                "url must encode 16 or 32 bytes, got {n}"
-            )));
-        }
-    };
+    if bytes.len() != 16 {
+        return Err(DeserializeError::InvalidSchema(format!(
+            "url must encode 16 bytes, got {}",
+            bytes.len()
+        )));
+    }
 
+    let mut arr = [0u8; 32];
+    arr[..16].copy_from_slice(&bytes);
     Ok(SedimentreeId::new(arr))
 }
 
@@ -217,18 +196,23 @@ impl Directory {
         let mut doc = Automerge::new();
 
         doc.transact::<_, _, AutomergeError>(|tx| {
-            tx.put(ROOT, "title", self.name.as_str())?;
+            // Patchwork metadata
+            let patchwork = tx.put_object(ROOT, "@patchwork", ObjType::Map)?;
+            let pw_type = tx.put_object(&patchwork, "type", ObjType::Text)?;
+            tx.splice_text(&pw_type, 0, 0, "folder")?;
+
+            let title = tx.put_object(ROOT, "title", ObjType::Text)?;
+            tx.splice_text(&title, 0, 0, self.name.as_str())?;
 
             let docs = tx.put_object(ROOT, "docs", ObjType::List)?;
             for (idx, entry) in self.entries.iter().enumerate() {
                 let entry_obj = tx.insert_object(&docs, idx, ObjType::Map)?;
-                tx.put(&entry_obj, "name", entry.name.as_str())?;
-                tx.put(&entry_obj, "type", entry.entry_type.as_str())?;
-                tx.put(
-                    &entry_obj,
-                    "url",
-                    sedimentree_id_to_url(entry.sedimentree_id),
-                )?;
+                let name = tx.put_object(&entry_obj, "name", ObjType::Text)?;
+                tx.splice_text(&name, 0, 0, entry.name.as_str())?;
+                let entry_type = tx.put_object(&entry_obj, "type", ObjType::Text)?;
+                tx.splice_text(&entry_type, 0, 0, entry.entry_type.as_str())?;
+                let url = tx.put_object(&entry_obj, "url", ObjType::Text)?;
+                tx.splice_text(&url, 0, 0, &sedimentree_id_to_url(entry.sedimentree_id))?;
             }
 
             Ok(())
@@ -244,21 +228,11 @@ impl Directory {
     ///
     /// Returns an error if the document doesn't match the expected schema.
     pub fn from_automerge(doc: &Automerge) -> Result<Self, DeserializeError> {
-        // Read title (patchwork-next uses "title", fall back to "name" for compatibility)
-        let name = get_string(doc, ROOT, "title").or_else(|_| get_string(doc, ROOT, "name"))?;
+        let name = get_text(doc, ROOT, "title")?;
 
-        // Read docs array (patchwork-next uses "docs", fall back to "entries" for compatibility)
-        let docs_id = match doc.get(ROOT, "docs")? {
-            Some((automerge::Value::Object(ObjType::List), id)) => id,
-            _ => {
-                // Fall back to "entries" for backward compatibility
-                match doc.get(ROOT, "entries")? {
-                    Some((automerge::Value::Object(ObjType::List), id)) => id,
-                    _ => {
-                        return Err(DeserializeError::InvalidSchema("missing docs array".into()));
-                    }
-                }
-            }
+        let Some((automerge::Value::Object(ObjType::List), docs_id)) = doc.get(ROOT, "docs")?
+        else {
+            return Err(DeserializeError::InvalidSchema("missing docs array".into()));
         };
 
         let mut entries = Vec::new();
@@ -271,49 +245,15 @@ impl Directory {
                 )));
             };
 
-            let entry_name = get_string(doc, entry_id.clone(), "name")?;
+            let entry_name = get_text(doc, entry_id.clone(), "name")?;
 
-            let entry_type_str = get_string(doc, entry_id.clone(), "type")?;
+            let entry_type_str = get_text(doc, entry_id.clone(), "type")?;
             let entry_type = EntryType::parse(&entry_type_str).ok_or_else(|| {
                 DeserializeError::InvalidSchema(format!("invalid entry type: {entry_type_str}"))
             })?;
 
-            // Try new "url" field first, fall back to legacy "sedimentree_id" bytes
-            let sedimentree_id = match doc.get(&entry_id, "url")? {
-                Some((automerge::Value::Scalar(s), _)) => {
-                    if let automerge::ScalarValue::Str(url) = s.as_ref() {
-                        url_to_sedimentree_id(url)?
-                    } else {
-                        return Err(DeserializeError::InvalidSchema(
-                            "url must be a string".into(),
-                        ));
-                    }
-                }
-                _ => {
-                    // Fall back to legacy sedimentree_id bytes
-                    match doc.get(&entry_id, "sedimentree_id")? {
-                        Some((automerge::Value::Scalar(s), _)) => {
-                            if let automerge::ScalarValue::Bytes(bytes) = s.as_ref() {
-                                let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
-                                    DeserializeError::InvalidSchema(
-                                        "sedimentree_id must be 32 bytes".into(),
-                                    )
-                                })?;
-                                SedimentreeId::new(arr)
-                            } else {
-                                return Err(DeserializeError::InvalidSchema(
-                                    "sedimentree_id must be bytes".into(),
-                                ));
-                            }
-                        }
-                        _ => {
-                            return Err(DeserializeError::InvalidSchema(
-                                "missing url field".into(),
-                            ));
-                        }
-                    }
-                }
-            };
+            let url_str = get_text(doc, entry_id, "url")?;
+            let sedimentree_id = url_to_sedimentree_id(&url_str)?;
 
             entries.push(DirectoryEntry {
                 name: entry_name,
@@ -369,26 +309,25 @@ impl Directory {
         let entry_type_str = entry_type.as_str();
 
         doc.transact::<_, _, AutomergeError>(|tx| {
-            // Get docs array (use "docs" for patchwork-next, fall back to "entries")
             let docs_id = match tx.get(ROOT, "docs")? {
                 Some((automerge::Value::Object(ObjType::List), id)) => id,
-                _ => match tx.get(ROOT, "entries")? {
-                    Some((automerge::Value::Object(ObjType::List), id)) => id,
-                    _ => tx.put_object(ROOT, "docs", ObjType::List)?,
-                },
+                _ => tx.put_object(ROOT, "docs", ObjType::List)?,
             };
 
-            // Check if entry with same name already exists, remove it
+            // Check if entry with same name already exists, remove it.
             let mut to_remove = None;
             for idx in 0..tx.length(&docs_id) {
                 if let Some((automerge::Value::Object(ObjType::Map), entry_id)) =
                     tx.get(&docs_id, idx)?
-                    && let Some((automerge::Value::Scalar(s), _)) = tx.get(&entry_id, "name")?
-                    && let automerge::ScalarValue::Str(existing_name) = s.as_ref()
-                    && existing_name == &name
                 {
-                    to_remove = Some(idx);
-                    break;
+                    let existing_name = match tx.get(&entry_id, "name")? {
+                        Some((automerge::Value::Object(ObjType::Text), id)) => Some(tx.text(&id)?),
+                        _ => None,
+                    };
+                    if existing_name.as_deref() == Some(&name) {
+                        to_remove = Some(idx);
+                        break;
+                    }
                 }
             }
 
@@ -399,9 +338,12 @@ impl Directory {
             // Add new entry at the end
             let length = tx.length(&docs_id);
             let entry_obj = tx.insert_object(&docs_id, length, ObjType::Map)?;
-            tx.put(&entry_obj, "name", name.as_str())?;
-            tx.put(&entry_obj, "type", entry_type_str)?;
-            tx.put(&entry_obj, "url", url.as_str())?;
+            let entry_name = tx.put_object(&entry_obj, "name", ObjType::Text)?;
+            tx.splice_text(&entry_name, 0, 0, name.as_str())?;
+            let entry_type = tx.put_object(&entry_obj, "type", ObjType::Text)?;
+            tx.splice_text(&entry_type, 0, 0, entry_type_str)?;
+            let entry_url = tx.put_object(&entry_obj, "url", ObjType::Text)?;
+            tx.splice_text(&entry_url, 0, 0, url.as_str())?;
 
             Ok(())
         })
@@ -420,24 +362,24 @@ impl Directory {
     pub fn remove_entry_from_doc(doc: &mut Automerge, name: &str) -> Result<bool, SerializeError> {
         // First, find the index to remove (read-only)
         let to_remove = {
-            let docs_id = match doc.get(ROOT, "docs")? {
-                Some((automerge::Value::Object(ObjType::List), id)) => id,
-                _ => match doc.get(ROOT, "entries")? {
-                    Some((automerge::Value::Object(ObjType::List), id)) => id,
-                    _ => return Ok(false),
-                },
+            let Some((automerge::Value::Object(ObjType::List), docs_id)) = doc.get(ROOT, "docs")?
+            else {
+                return Ok(false);
             };
 
             let mut found = None;
             for idx in 0..doc.length(&docs_id) {
                 if let Some((automerge::Value::Object(ObjType::Map), entry_id)) =
                     doc.get(&docs_id, idx)?
-                    && let Some((automerge::Value::Scalar(s), _)) = doc.get(&entry_id, "name")?
-                    && let automerge::ScalarValue::Str(existing_name) = s.as_ref()
-                    && existing_name == name
                 {
-                    found = Some(idx);
-                    break;
+                    let existing_name = match doc.get(&entry_id, "name")? {
+                        Some((automerge::Value::Object(ObjType::Text), id)) => Some(doc.text(&id)?),
+                        _ => None,
+                    };
+                    if existing_name.as_deref() == Some(name) {
+                        found = Some(idx);
+                        break;
+                    }
                 }
             }
             found
@@ -446,12 +388,10 @@ impl Directory {
         // If found, delete in a transaction
         if let Some(idx) = to_remove {
             doc.transact::<_, _, AutomergeError>(|tx| {
-                let docs_id = match tx.get(ROOT, "docs")? {
-                    Some((automerge::Value::Object(ObjType::List), id)) => id,
-                    _ => match tx.get(ROOT, "entries")? {
-                        Some((automerge::Value::Object(ObjType::List), id)) => id,
-                        _ => return Ok(()),
-                    },
+                let Some((automerge::Value::Object(ObjType::List), docs_id)) =
+                    tx.get(ROOT, "docs")?
+                else {
+                    return Ok(());
                 };
                 tx.delete(&docs_id, idx)?;
                 Ok(())
@@ -472,11 +412,16 @@ impl Directory {
     ///
     /// Returns an error if Automerge operations fail.
     pub fn init_doc(doc: &mut Automerge, name: &str) -> Result<(), SerializeError> {
-        // Only initialize if not already a directory (check for "title" or legacy "@patchwork")
-        if doc.get(ROOT, "title")?.is_none() && doc.get(ROOT, "@patchwork")?.is_none() {
+        // Only initialize if not already a directory
+        if doc.get(ROOT, "title")?.is_none() {
             let name = name.to_string();
             doc.transact::<_, _, AutomergeError>(|tx| {
-                tx.put(ROOT, "title", name.as_str())?;
+                let patchwork = tx.put_object(ROOT, "@patchwork", ObjType::Map)?;
+                let pw_type = tx.put_object(&patchwork, "type", ObjType::Text)?;
+                tx.splice_text(&pw_type, 0, 0, "folder")?;
+
+                let title = tx.put_object(ROOT, "title", ObjType::Text)?;
+                tx.splice_text(&title, 0, 0, name.as_str())?;
                 tx.put_object(ROOT, "docs", ObjType::List)?;
                 Ok(())
             })
@@ -486,22 +431,12 @@ impl Directory {
     }
 }
 
-/// Helper to get a string value from an Automerge document.
-#[allow(clippy::wildcard_enum_match_arm)] // only Str is valid; all other variants are the same error
-fn get_string(
-    doc: &Automerge,
-    obj: automerge::ObjId,
-    key: &str,
-) -> Result<String, DeserializeError> {
+/// Get a Text CRDT string value from an Automerge document.
+fn get_text(doc: &Automerge, obj: automerge::ObjId, key: &str) -> Result<String, DeserializeError> {
     match doc.get(obj, key)? {
-        Some((automerge::Value::Scalar(s), _)) => match s.as_ref() {
-            automerge::ScalarValue::Str(s) => Ok(s.to_string()),
-            _ => Err(DeserializeError::InvalidSchema(format!(
-                "{key} must be a string"
-            ))),
-        },
+        Some((automerge::Value::Object(ObjType::Text), id)) => Ok(doc.text(&id)?),
         _ => Err(DeserializeError::InvalidSchema(format!(
-            "missing {key} field"
+            "missing {key} Text field"
         ))),
     }
 }
@@ -707,7 +642,7 @@ mod tests {
             panic!("entry should be a map")
         };
 
-        let url = get_string(&am, entry_id, "url")?;
+        let url = get_text(&am, entry_id, "url")?;
         assert!(
             url.starts_with("automerge:"),
             "url should start with 'automerge:'"

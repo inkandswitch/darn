@@ -3,18 +3,19 @@
 //! Files in `darn` are stored as Automerge documents following the Patchwork convention:
 //!
 //! ```ignore
-//! UnixFileEntry {
+//! FileDocument {
+//!   "@patchwork": { type: "file" },
 //!   name: string,
 //!   content: Text | Bytes,
 //!   extension: string,
 //!   mimeType: string,
+//!   metadata: { permissions: number },
 //! }
 //! ```
 //!
 //! - Text files use `Text` (character-level CRDT with automatic merging)
 //! - Binary files use `Bytes` (last-writer-wins semantics)
-//!
-//! Note: Unix permissions are stored as a darn-specific extension field `_darn_mode`.
+//! - `metadata.permissions` stores the Unix file mode (e.g. `0o644`)
 
 pub mod content;
 pub mod file_type;
@@ -169,7 +170,13 @@ impl File {
         let mode = self.metadata.mode();
 
         doc.transact::<_, _, AutomergeError>(|tx| {
-            tx.put(ROOT, "name", self.name.as_str())?;
+            // Patchwork metadata
+            let patchwork = tx.put_object(ROOT, "@patchwork", ObjType::Map)?;
+            let pw_type = tx.put_object(&patchwork, "type", ObjType::Text)?;
+            tx.splice_text(&pw_type, 0, 0, "file")?;
+
+            let name_obj = tx.put_object(ROOT, "name", ObjType::Text)?;
+            tx.splice_text(&name_obj, 0, 0, self.name.as_str())?;
 
             match &self.content {
                 content::Content::Text(text) => {
@@ -185,9 +192,13 @@ impl File {
                 }
             }
 
-            tx.put(ROOT, "extension", extension.as_str())?;
-            tx.put(ROOT, "mimeType", mime_type.as_str())?;
-            tx.put(ROOT, "_darn_mode", i64::from(mode))?;
+            let ext_obj = tx.put_object(ROOT, "extension", ObjType::Text)?;
+            tx.splice_text(&ext_obj, 0, 0, extension.as_str())?;
+            let mime_obj = tx.put_object(ROOT, "mimeType", ObjType::Text)?;
+            tx.splice_text(&mime_obj, 0, 0, mime_type.as_str())?;
+
+            let metadata_obj = tx.put_object(ROOT, "metadata", ObjType::Map)?;
+            tx.put(&metadata_obj, "permissions", i64::from(mode))?;
 
             Ok(())
         })
@@ -214,7 +225,13 @@ impl File {
         let content = self.content;
 
         doc.transact::<_, _, AutomergeError>(|tx| {
-            tx.put(ROOT, "name", name.as_str())?;
+            // Patchwork metadata
+            let patchwork = tx.put_object(ROOT, "@patchwork", ObjType::Map)?;
+            let pw_type = tx.put_object(&patchwork, "type", ObjType::Text)?;
+            tx.splice_text(&pw_type, 0, 0, "file")?;
+
+            let name_obj = tx.put_object(ROOT, "name", ObjType::Text)?;
+            tx.splice_text(&name_obj, 0, 0, name.as_str())?;
 
             match content {
                 content::Content::Text(ref text) => {
@@ -230,9 +247,13 @@ impl File {
                 }
             }
 
-            tx.put(ROOT, "extension", extension.as_str())?;
-            tx.put(ROOT, "mimeType", mime_type.as_str())?;
-            tx.put(ROOT, "_darn_mode", i64::from(mode))?;
+            let ext_obj = tx.put_object(ROOT, "extension", ObjType::Text)?;
+            tx.splice_text(&ext_obj, 0, 0, extension.as_str())?;
+            let mime_obj = tx.put_object(ROOT, "mimeType", ObjType::Text)?;
+            tx.splice_text(&mime_obj, 0, 0, mime_type.as_str())?;
+
+            let metadata_obj = tx.put_object(ROOT, "metadata", ObjType::Map)?;
+            tx.put(&metadata_obj, "permissions", i64::from(mode))?;
 
             Ok(())
         })
@@ -247,7 +268,7 @@ impl File {
     ///
     /// Returns an error if the document doesn't match the expected schema.
     pub fn from_automerge(doc: &Automerge) -> Result<Self, DeserializeError> {
-        let name = name::Name::new(get_string(doc, ROOT, "name")?);
+        let name = name::Name::new(get_text(doc, ROOT, "name")?);
 
         let file_content = match doc.get(ROOT, "content")? {
             Some((automerge::Value::Object(ObjType::Text), id)) => {
@@ -270,35 +291,20 @@ impl File {
             }
         };
 
-        // Read permissions from _darn_mode (new) or metadata.permissions (legacy)
         #[allow(clippy::wildcard_enum_match_arm)]
-        // only Int/Uint carry mode; rest defaults to 0o644
-        let permissions = match doc.get(ROOT, "_darn_mode")? {
-            Some((automerge::Value::Scalar(s), _)) => match s.as_ref() {
-                automerge::ScalarValue::Int(i) => u32::try_from(*i).unwrap_or(0o644),
-                automerge::ScalarValue::Uint(u) => u32::try_from(*u).unwrap_or(0o644),
-                _ => 0o644,
-            },
-            _ => {
-                // Fall back to legacy metadata.permissions
-                match doc.get(ROOT, "metadata")? {
-                    Some((automerge::Value::Object(ObjType::Map), metadata_id)) => {
-                        match doc.get(&metadata_id, "permissions")? {
-                            Some((automerge::Value::Scalar(s), _)) => match s.as_ref() {
-                                automerge::ScalarValue::Int(i) => {
-                                    u32::try_from(*i).unwrap_or(0o644)
-                                }
-                                automerge::ScalarValue::Uint(u) => {
-                                    u32::try_from(*u).unwrap_or(0o644)
-                                }
-                                _ => 0o644,
-                            },
-                            _ => 0o644,
-                        }
-                    }
+        // Read permissions from metadata.permissions (Patchwork convention)
+        let permissions = match doc.get(ROOT, "metadata")? {
+            Some((automerge::Value::Object(ObjType::Map), metadata_id)) => {
+                match doc.get(&metadata_id, "permissions")? {
+                    Some((automerge::Value::Scalar(s), _)) => match s.as_ref() {
+                        automerge::ScalarValue::Int(i) => u32::try_from(*i).unwrap_or(0o644),
+                        automerge::ScalarValue::Uint(u) => u32::try_from(*u).unwrap_or(0o644),
+                        _ => 0o644,
+                    },
                     _ => 0o644,
                 }
             }
+            _ => 0o644,
         };
 
         Ok(Self {
@@ -441,22 +447,12 @@ fn mime_type_for_extension(extension: &str, is_text: bool) -> String {
     .to_string()
 }
 
-/// Helper to get a string value from an Automerge document.
-#[allow(clippy::wildcard_enum_match_arm)] // only Str is valid; all other variants are the same error
-fn get_string(
-    doc: &Automerge,
-    obj: automerge::ObjId,
-    key: &str,
-) -> Result<String, DeserializeError> {
+/// Get a Text CRDT string value from an Automerge document.
+fn get_text(doc: &Automerge, obj: automerge::ObjId, key: &str) -> Result<String, DeserializeError> {
     match doc.get(obj, key)? {
-        Some((automerge::Value::Scalar(s), _)) => match s.as_ref() {
-            automerge::ScalarValue::Str(s) => Ok(s.to_string()),
-            _ => Err(DeserializeError::InvalidSchema(format!(
-                "{key} must be a string"
-            ))),
-        },
+        Some((automerge::Value::Object(ObjType::Text), id)) => Ok(doc.text(&id)?),
         _ => Err(DeserializeError::InvalidSchema(format!(
-            "missing {key} field"
+            "missing {key} Text field"
         ))),
     }
 }
@@ -698,11 +694,11 @@ mod tests {
         let am = doc.to_automerge()?;
 
         // Check extension
-        let ext = get_string(&am, ROOT, "extension")?;
+        let ext = get_text(&am, ROOT, "extension")?;
         assert_eq!(ext, "js");
 
         // Check mimeType
-        let mime = get_string(&am, ROOT, "mimeType")?;
+        let mime = get_text(&am, ROOT, "mimeType")?;
         assert_eq!(mime, "text/javascript");
         Ok(())
     }

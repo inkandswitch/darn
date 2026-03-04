@@ -226,46 +226,6 @@ pub struct Peer {
     pub synced_digests: BTreeMap<SedimentreeId, Digest<Sedimentree>>,
 }
 
-/// Raw peer representation for backward-compatible deserialization.
-///
-/// Old format has `"url": "ws://..."`, new format has `"address": { ... }`.
-#[derive(Deserialize)]
-struct PeerRaw {
-    name: PeerName,
-    /// Legacy field — present in old peer JSON files.
-    #[serde(default)]
-    url: Option<String>,
-    /// New field — present in files saved with the new format.
-    #[serde(default)]
-    address: Option<PeerAddress>,
-    #[serde(with = "serde_base58::audience")]
-    audience: Audience,
-    added_at: UnixTimestamp,
-    #[serde(default)]
-    last_synced_at: Option<UnixTimestamp>,
-    #[serde(default, with = "serde_base58::synced_digests")]
-    synced_digests: BTreeMap<SedimentreeId, Digest<Sedimentree>>,
-}
-
-impl From<PeerRaw> for Peer {
-    fn from(raw: PeerRaw) -> Self {
-        let address = match (raw.address, raw.url) {
-            (Some(addr), _) => addr,
-            (None, Some(url)) => PeerAddress::WebSocket { url },
-            (None, None) => PeerAddress::WebSocket { url: String::new() },
-        };
-
-        Self {
-            name: raw.name,
-            address,
-            audience: raw.audience,
-            added_at: raw.added_at,
-            last_synced_at: raw.last_synced_at,
-            synced_digests: raw.synced_digests,
-        }
-    }
-}
-
 impl Peer {
     /// Create a peer with discovery mode.
     ///
