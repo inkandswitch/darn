@@ -20,7 +20,7 @@
 pub mod entry;
 
 use self::entry::{DirectoryEntry, EntryType};
-use automerge::{transaction::Transactable, Automerge, AutomergeError, ObjType, ReadDoc, ROOT};
+use automerge::{Automerge, AutomergeError, ObjType, ROOT, ReadDoc, transaction::Transactable};
 use sedimentree_core::id::SedimentreeId;
 use sha2::{Digest, Sha256};
 use thiserror::Error;

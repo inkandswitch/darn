@@ -177,7 +177,6 @@ enum Commands {
         #[command(subcommand)]
         command: PeerCommands,
     },
-
 }
 
 #[derive(Debug, Subcommand)]
