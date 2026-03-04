@@ -53,7 +53,7 @@ jobs:
             artifact-name: darn-macos-aarch64
             cargo-flags: ""
             binary-ext: ""
-          - os: macos-13
+          - os: macos-latest
             target: x86_64-apple-darwin
             artifact-name: darn-macos-x86_64
             cargo-flags: ""
