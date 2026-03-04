@@ -923,7 +923,6 @@ name = "darn_cli"
 version = "0.4.0"
 dependencies = [
  "assert_cmd",
- "automerge",
  "bs58",
  "clap",
  "cliclack",
@@ -937,7 +936,6 @@ dependencies = [
  "predicates",
  "sedimentree_core",
  "sedimentree_fs_storage",
- "serde_json",
  "subduction_core",
  "subduction_websocket",
  "tempfile",
@@ -947,7 +945,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
- "tungstenite",
 ]
 
 [[package]]
