@@ -26,6 +26,7 @@ rustls = ["darn_core/rustls"]
 workspace = true
 
 [dependencies]
+automerge.workspace = true
 bs58.workspace = true
 clap.workspace = true
 cliclack.workspace = true
@@ -38,13 +39,15 @@ futures.workspace = true
 getrandom.workspace = true
 sedimentree_core.workspace = true
 sedimentree_fs_storage.workspace = true
+serde_json.workspace = true
 subduction_core.workspace = true
 subduction_websocket.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
 tokio-util.workspace = true
-tracing.workspace = true
+tokio.workspace = true
 tracing-subscriber.workspace = true
+tracing.workspace = true
+tungstenite.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true

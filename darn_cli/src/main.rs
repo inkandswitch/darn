@@ -75,6 +75,7 @@ async fn main() -> Result<()> {
             PeerCommands::List => commands::peer_list(out),
             PeerCommands::Remove { name } => commands::peer_remove(&name, out),
         },
+        Commands::PushDoc { json, peer } => commands::push_doc(&json, &peer, out).await,
     }
 }
 
@@ -176,6 +177,23 @@ enum Commands {
     Peer {
         #[command(subcommand)]
         command: PeerCommands,
+    },
+
+    /// Create an Automerge doc from JSON and sync it to a peer
+    ///
+    /// Creates a standalone Automerge document (not tied to any workspace),
+    /// stores it in global Subduction storage, syncs it to the specified peer,
+    /// and prints the automerge URL.
+    ///
+    /// String values in the JSON are stored as Automerge Text objects for
+    /// CRDT compatibility with automerge-repo.
+    PushDoc {
+        /// Path to a JSON file, or "-" to read from stdin
+        json: String,
+
+        /// Peer name to sync with (must be configured globally via `darn peer add`)
+        #[arg(long)]
+        peer: String,
     },
 }
 

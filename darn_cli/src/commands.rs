@@ -2503,6 +2503,296 @@ fn truncate_str(s: &str, max_len: usize) -> String {
     }
 }
 
+/// Create an Automerge doc from JSON and sync it to a peer.
+///
+/// This is a workspace-independent command: it uses global storage and global peers.
+/// String values in the JSON are stored as Automerge Text objects for CRDT
+/// compatibility with automerge-repo's JS representation.
+pub(crate) async fn push_doc(json_source: &str, peer_name: &str, out: Output) -> eyre::Result<()> {
+    out.intro("darn push-doc")?;
+
+    // Step 1: Read and parse JSON
+    let json_str = if json_source == "-" {
+        use std::io::Read as _;
+        let mut buf = String::new();
+        std::io::stdin().read_to_string(&mut buf)?;
+        buf
+    } else {
+        std::fs::read_to_string(json_source)
+            .map_err(|e| eyre::eyre!("failed to read {json_source}: {e}"))?
+    };
+
+    let json_value: serde_json::Value =
+        serde_json::from_str(&json_str).map_err(|e| eyre::eyre!("invalid JSON: {e}"))?;
+
+    let serde_json::Value::Object(ref _obj) = json_value else {
+        eyre::bail!("JSON root must be an object");
+    };
+
+    out.success("Parsed JSON")?;
+
+    // Step 2: Convert JSON to an Automerge document
+    let mut doc = automerge::Automerge::new();
+    json_to_automerge(&json_value, &mut doc, automerge::ROOT)?;
+
+    if out.is_porcelain() {
+        // Show a summary of what was created
+        let keys: Vec<&str> = _obj.keys().map(String::as_str).collect();
+        out.kv("keys", &keys.join(", "))?;
+    }
+
+    out.success("Created Automerge document")?;
+
+    // Step 3: Generate a sedimentree ID and store the doc
+    let sed_id = darn_core::generate_sedimentree_id();
+
+    let spinner = out.spinner("Storing document...");
+    let signer = {
+        let signer_dir = darn_core::config::global_signer_dir()?;
+        darn_core::signer::load(&signer_dir)?
+    };
+    let storage = darn_core::subduction::create_global_storage()?;
+    let subduction = darn_core::subduction::spawn(signer.clone(), storage);
+
+    darn_core::sedimentree::store_document(&subduction, sed_id, &mut doc).await?;
+    spinner.stop("Document stored");
+
+    let automerge_url = darn_core::directory::sedimentree_id_to_url(sed_id);
+    out.success(&format!("Automerge URL: {automerge_url}"))?;
+
+    // Step 4: Look up the peer
+    let peer_name_parsed = PeerName::new(peer_name)?;
+    let peer = darn_core::peer::get_peer(&peer_name_parsed)?
+        .ok_or_else(|| eyre::eyre!("peer not found: {peer_name}"))?;
+
+    // Step 5: Connect to peer
+    let spinner = out.spinner(&format!("Connecting to {}...", peer.name));
+
+    let ws_url = match &peer.address {
+        PeerAddress::WebSocket { url } => url.clone(),
+        #[cfg(feature = "iroh")]
+        _ => eyre::bail!("push-doc only supports WebSocket peers currently"),
+    };
+
+    let uri: tungstenite::http::Uri = ws_url.parse()?;
+    let timeout = std::time::Duration::from_secs(30);
+
+    let (authenticated, listener_fut, sender_fut) =
+        subduction_websocket::tokio::client::TokioWebSocketClient::new(
+            uri,
+            subduction_websocket::tokio::TimeoutTokio,
+            timeout,
+            signer,
+            peer.audience,
+        )
+        .await?;
+
+    tokio::spawn(async move {
+        if let Err(e) = listener_fut.await {
+            tracing::error!("WebSocket listener error: {e:?}");
+        }
+    });
+    tokio::spawn(async move {
+        if let Err(e) = sender_fut.await {
+            tracing::error!("WebSocket sender error: {e:?}");
+        }
+    });
+
+    let actual_peer_id = authenticated.peer_id();
+    let authenticated =
+        authenticated.map(|c| darn_core::subduction::DarnConnection::WebSocket(Box::new(c)));
+
+    subduction.register(authenticated).await?;
+    spinner.stop(format!("Connected to {} ({})", peer.name, actual_peer_id));
+
+    // Step 6: Sync the document
+    let spinner = out.spinner("Syncing document...");
+    let sync_result = subduction
+        .sync_all(sed_id, true, Some(timeout))
+        .await?;
+
+    let mut total_sent = 0;
+    let mut total_received = 0;
+    let mut any_success = false;
+    for (success, stats, _errors) in sync_result.values() {
+        if *success {
+            any_success = true;
+            total_sent += stats.total_sent();
+            total_received += stats.total_received();
+        }
+    }
+
+    if any_success {
+        spinner.stop(format!("Synced (▲{total_sent} ▼{total_received})"));
+    } else {
+        spinner.stop("Sync completed (no data exchanged)");
+    }
+
+    // Output
+    if out.is_porcelain() {
+        out.kv("url", &automerge_url)?;
+        out.kv("sent", &total_sent.to_string())?;
+        out.kv("received", &total_received.to_string())?;
+    }
+
+    out.outro(&format!("Document pushed: {automerge_url}"))?;
+
+    Ok(())
+}
+
+/// Recursively convert a `serde_json::Value` into an Automerge document.
+///
+/// Strings are stored as `ObjType::Text` (via `splice_text`) for CRDT
+/// compatibility with automerge-repo's JS representation.
+fn json_to_automerge(
+    value: &serde_json::Value,
+    doc: &mut automerge::Automerge,
+    parent: automerge::ObjId,
+) -> eyre::Result<()> {
+    use automerge::{ObjType, transaction::Transactable as _};
+
+    let serde_json::Value::Object(obj) = value else {
+        eyre::bail!("expected JSON object at this level");
+    };
+
+    doc.transact::<_, _, automerge::AutomergeError>(|tx| {
+        for (key, val) in obj {
+            match val {
+                serde_json::Value::String(s) => {
+                    let text_id = tx.put_object(&parent, key.as_str(), ObjType::Text)?;
+                    tx.splice_text(&text_id, 0, 0, s)?;
+                }
+                serde_json::Value::Number(n) => {
+                    if let Some(i) = n.as_i64() {
+                        tx.put(&parent, key.as_str(), i)?;
+                    } else if let Some(f) = n.as_f64() {
+                        tx.put(&parent, key.as_str(), f)?;
+                    }
+                }
+                serde_json::Value::Bool(b) => {
+                    tx.put(&parent, key.as_str(), *b)?;
+                }
+                serde_json::Value::Null => {
+                    tx.put(&parent, key.as_str(), ())?;
+                }
+                serde_json::Value::Array(arr) => {
+                    let list_id = tx.put_object(&parent, key.as_str(), ObjType::List)?;
+                    for (idx, item) in arr.iter().enumerate() {
+                        match item {
+                            serde_json::Value::String(s) => {
+                                let text_id =
+                                    tx.insert_object(&list_id, idx, ObjType::Text)?;
+                                tx.splice_text(&text_id, 0, 0, s)?;
+                            }
+                            serde_json::Value::Number(n) => {
+                                if let Some(i) = n.as_i64() {
+                                    tx.insert(&list_id, idx, i)?;
+                                } else if let Some(f) = n.as_f64() {
+                                    tx.insert(&list_id, idx, f)?;
+                                }
+                            }
+                            serde_json::Value::Bool(b) => {
+                                tx.insert(&list_id, idx, *b)?;
+                            }
+                            serde_json::Value::Null => {
+                                tx.insert(&list_id, idx, ())?;
+                            }
+                            serde_json::Value::Object(_) => {
+                                let map_id =
+                                    tx.insert_object(&list_id, idx, ObjType::Map)?;
+                                json_object_in_tx(item, tx, &map_id)?;
+                            }
+                            serde_json::Value::Array(_) => {
+                                // Nested arrays — skip for now (module-settings doesn't need them)
+                            }
+                        }
+                    }
+                }
+                serde_json::Value::Object(_) => {
+                    let map_id = tx.put_object(&parent, key.as_str(), ObjType::Map)?;
+                    json_object_in_tx(val, tx, &map_id)?;
+                }
+            }
+        }
+        Ok(())
+    })
+    .map_err(|f| eyre::eyre!("automerge transaction failed: {}", f.error))?;
+
+    Ok(())
+}
+
+/// Recursively populate a map inside an existing Automerge transaction.
+fn json_object_in_tx(
+    value: &serde_json::Value,
+    tx: &mut automerge::transaction::Transaction<'_>,
+    parent: &automerge::ObjId,
+) -> Result<(), automerge::AutomergeError> {
+    use automerge::{ObjType, transaction::Transactable as _};
+
+    let serde_json::Value::Object(obj) = value else {
+        return Ok(());
+    };
+
+    for (key, val) in obj {
+        match val {
+            serde_json::Value::String(s) => {
+                let text_id = tx.put_object(parent, key.as_str(), ObjType::Text)?;
+                tx.splice_text(&text_id, 0, 0, s)?;
+            }
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    tx.put(parent, key.as_str(), i)?;
+                } else if let Some(f) = n.as_f64() {
+                    tx.put(parent, key.as_str(), f)?;
+                }
+            }
+            serde_json::Value::Bool(b) => {
+                tx.put(parent, key.as_str(), *b)?;
+            }
+            serde_json::Value::Null => {
+                tx.put(parent, key.as_str(), ())?;
+            }
+            serde_json::Value::Array(arr) => {
+                let list_id = tx.put_object(parent, key.as_str(), ObjType::List)?;
+                for (idx, item) in arr.iter().enumerate() {
+                    match item {
+                        serde_json::Value::String(s) => {
+                            let text_id = tx.insert_object(&list_id, idx, ObjType::Text)?;
+                            tx.splice_text(&text_id, 0, 0, s)?;
+                        }
+                        serde_json::Value::Number(n) => {
+                            if let Some(i) = n.as_i64() {
+                                tx.insert(&list_id, idx, i)?;
+                            } else if let Some(f) = n.as_f64() {
+                                tx.insert(&list_id, idx, f)?;
+                            }
+                        }
+                        serde_json::Value::Bool(b) => {
+                            tx.insert(&list_id, idx, *b)?;
+                        }
+                        serde_json::Value::Null => {
+                            tx.insert(&list_id, idx, ())?;
+                        }
+                        serde_json::Value::Object(_) => {
+                            let map_id = tx.insert_object(&list_id, idx, ObjType::Map)?;
+                            json_object_in_tx(item, tx, &map_id)?;
+                        }
+                        serde_json::Value::Array(_) => {
+                            // Skip nested arrays
+                        }
+                    }
+                }
+            }
+            serde_json::Value::Object(_) => {
+                let map_id = tx.put_object(parent, key.as_str(), ObjType::Map)?;
+                json_object_in_tx(val, tx, &map_id)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Truncate a path string, preferring to show the end (filename) if truncated.
 fn truncate_path(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {

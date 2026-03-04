@@ -172,9 +172,11 @@ impl File {
         doc.transact::<_, _, AutomergeError>(|tx| {
             // Patchwork metadata
             let patchwork = tx.put_object(ROOT, "@patchwork", ObjType::Map)?;
-            tx.put(&patchwork, "type", "file")?;
+            let pw_type = tx.put_object(&patchwork, "type", ObjType::Text)?;
+            tx.splice_text(&pw_type, 0, 0, "file")?;
 
-            tx.put(ROOT, "name", self.name.as_str())?;
+            let name_obj = tx.put_object(ROOT, "name", ObjType::Text)?;
+            tx.splice_text(&name_obj, 0, 0, self.name.as_str())?;
 
             match &self.content {
                 content::Content::Text(text) => {
@@ -190,8 +192,10 @@ impl File {
                 }
             }
 
-            tx.put(ROOT, "extension", extension.as_str())?;
-            tx.put(ROOT, "mimeType", mime_type.as_str())?;
+            let ext_obj = tx.put_object(ROOT, "extension", ObjType::Text)?;
+            tx.splice_text(&ext_obj, 0, 0, extension.as_str())?;
+            let mime_obj = tx.put_object(ROOT, "mimeType", ObjType::Text)?;
+            tx.splice_text(&mime_obj, 0, 0, mime_type.as_str())?;
 
             let metadata_obj = tx.put_object(ROOT, "metadata", ObjType::Map)?;
             tx.put(&metadata_obj, "permissions", i64::from(mode))?;
@@ -223,9 +227,11 @@ impl File {
         doc.transact::<_, _, AutomergeError>(|tx| {
             // Patchwork metadata
             let patchwork = tx.put_object(ROOT, "@patchwork", ObjType::Map)?;
-            tx.put(&patchwork, "type", "file")?;
+            let pw_type = tx.put_object(&patchwork, "type", ObjType::Text)?;
+            tx.splice_text(&pw_type, 0, 0, "file")?;
 
-            tx.put(ROOT, "name", name.as_str())?;
+            let name_obj = tx.put_object(ROOT, "name", ObjType::Text)?;
+            tx.splice_text(&name_obj, 0, 0, name.as_str())?;
 
             match content {
                 content::Content::Text(ref text) => {
@@ -241,8 +247,10 @@ impl File {
                 }
             }
 
-            tx.put(ROOT, "extension", extension.as_str())?;
-            tx.put(ROOT, "mimeType", mime_type.as_str())?;
+            let ext_obj = tx.put_object(ROOT, "extension", ObjType::Text)?;
+            tx.splice_text(&ext_obj, 0, 0, extension.as_str())?;
+            let mime_obj = tx.put_object(ROOT, "mimeType", ObjType::Text)?;
+            tx.splice_text(&mime_obj, 0, 0, mime_type.as_str())?;
 
             let metadata_obj = tx.put_object(ROOT, "metadata", ObjType::Map)?;
             tx.put(&metadata_obj, "permissions", i64::from(mode))?;
@@ -260,7 +268,7 @@ impl File {
     ///
     /// Returns an error if the document doesn't match the expected schema.
     pub fn from_automerge(doc: &Automerge) -> Result<Self, DeserializeError> {
-        let name = name::Name::new(get_string(doc, ROOT, "name")?);
+        let name = name::Name::new(get_text(doc, ROOT, "name")?);
 
         let file_content = match doc.get(ROOT, "content")? {
             Some((automerge::Value::Object(ObjType::Text), id)) => {
@@ -439,22 +447,12 @@ fn mime_type_for_extension(extension: &str, is_text: bool) -> String {
     .to_string()
 }
 
-/// Helper to get a string value from an Automerge document.
-#[allow(clippy::wildcard_enum_match_arm)] // only Str is valid; all other variants are the same error
-fn get_string(
-    doc: &Automerge,
-    obj: automerge::ObjId,
-    key: &str,
-) -> Result<String, DeserializeError> {
+/// Get a Text CRDT string value from an Automerge document.
+fn get_text(doc: &Automerge, obj: automerge::ObjId, key: &str) -> Result<String, DeserializeError> {
     match doc.get(obj, key)? {
-        Some((automerge::Value::Scalar(s), _)) => match s.as_ref() {
-            automerge::ScalarValue::Str(s) => Ok(s.to_string()),
-            _ => Err(DeserializeError::InvalidSchema(format!(
-                "{key} must be a string"
-            ))),
-        },
+        Some((automerge::Value::Object(ObjType::Text), id)) => Ok(doc.text(&id)?),
         _ => Err(DeserializeError::InvalidSchema(format!(
-            "missing {key} field"
+            "missing {key} Text field"
         ))),
     }
 }
@@ -696,11 +694,11 @@ mod tests {
         let am = doc.to_automerge()?;
 
         // Check extension
-        let ext = get_string(&am, ROOT, "extension")?;
+        let ext = get_text(&am, ROOT, "extension")?;
         assert_eq!(ext, "js");
 
         // Check mimeType
-        let mime = get_string(&am, ROOT, "mimeType")?;
+        let mime = get_text(&am, ROOT, "mimeType")?;
         assert_eq!(mime, "text/javascript");
         Ok(())
     }

@@ -198,7 +198,8 @@ impl Directory {
         doc.transact::<_, _, AutomergeError>(|tx| {
             // Patchwork metadata
             let patchwork = tx.put_object(ROOT, "@patchwork", ObjType::Map)?;
-            tx.put(&patchwork, "type", "folder")?;
+            let pw_type = tx.put_object(&patchwork, "type", ObjType::Text)?;
+            tx.splice_text(&pw_type, 0, 0, "folder")?;
 
             let title = tx.put_object(ROOT, "title", ObjType::Text)?;
             tx.splice_text(&title, 0, 0, self.name.as_str())?;
@@ -208,12 +209,10 @@ impl Directory {
                 let entry_obj = tx.insert_object(&docs, idx, ObjType::Map)?;
                 let name = tx.put_object(&entry_obj, "name", ObjType::Text)?;
                 tx.splice_text(&name, 0, 0, entry.name.as_str())?;
-                tx.put(&entry_obj, "type", entry.entry_type.as_str())?;
-                tx.put(
-                    &entry_obj,
-                    "url",
-                    sedimentree_id_to_url(entry.sedimentree_id),
-                )?;
+                let entry_type = tx.put_object(&entry_obj, "type", ObjType::Text)?;
+                tx.splice_text(&entry_type, 0, 0, entry.entry_type.as_str())?;
+                let url = tx.put_object(&entry_obj, "url", ObjType::Text)?;
+                tx.splice_text(&url, 0, 0, &sedimentree_id_to_url(entry.sedimentree_id))?;
             }
 
             Ok(())
@@ -248,25 +247,13 @@ impl Directory {
 
             let entry_name = get_text(doc, entry_id.clone(), "name")?;
 
-            let entry_type_str = get_scalar_string(doc, entry_id.clone(), "type")?;
+            let entry_type_str = get_text(doc, entry_id.clone(), "type")?;
             let entry_type = EntryType::parse(&entry_type_str).ok_or_else(|| {
                 DeserializeError::InvalidSchema(format!("invalid entry type: {entry_type_str}"))
             })?;
 
-            let sedimentree_id = match doc.get(&entry_id, "url")? {
-                Some((automerge::Value::Scalar(s), _)) => {
-                    if let automerge::ScalarValue::Str(url) = s.as_ref() {
-                        url_to_sedimentree_id(url)?
-                    } else {
-                        return Err(DeserializeError::InvalidSchema(
-                            "url must be a string".into(),
-                        ));
-                    }
-                }
-                _ => {
-                    return Err(DeserializeError::InvalidSchema("missing url field".into()));
-                }
-            };
+            let url_str = get_text(doc, entry_id, "url")?;
+            let sedimentree_id = url_to_sedimentree_id(&url_str)?;
 
             entries.push(DirectoryEntry {
                 name: entry_name,
@@ -353,8 +340,10 @@ impl Directory {
             let entry_obj = tx.insert_object(&docs_id, length, ObjType::Map)?;
             let entry_name = tx.put_object(&entry_obj, "name", ObjType::Text)?;
             tx.splice_text(&entry_name, 0, 0, name.as_str())?;
-            tx.put(&entry_obj, "type", entry_type_str)?;
-            tx.put(&entry_obj, "url", url.as_str())?;
+            let entry_type = tx.put_object(&entry_obj, "type", ObjType::Text)?;
+            tx.splice_text(&entry_type, 0, 0, entry_type_str)?;
+            let entry_url = tx.put_object(&entry_obj, "url", ObjType::Text)?;
+            tx.splice_text(&entry_url, 0, 0, url.as_str())?;
 
             Ok(())
         })
@@ -428,7 +417,8 @@ impl Directory {
             let name = name.to_string();
             doc.transact::<_, _, AutomergeError>(|tx| {
                 let patchwork = tx.put_object(ROOT, "@patchwork", ObjType::Map)?;
-                tx.put(&patchwork, "type", "folder")?;
+                let pw_type = tx.put_object(&patchwork, "type", ObjType::Text)?;
+                tx.splice_text(&pw_type, 0, 0, "folder")?;
 
                 let title = tx.put_object(ROOT, "title", ObjType::Text)?;
                 tx.splice_text(&title, 0, 0, name.as_str())?;
@@ -447,26 +437,6 @@ fn get_text(doc: &Automerge, obj: automerge::ObjId, key: &str) -> Result<String,
         Some((automerge::Value::Object(ObjType::Text), id)) => Ok(doc.text(&id)?),
         _ => Err(DeserializeError::InvalidSchema(format!(
             "missing {key} Text field"
-        ))),
-    }
-}
-
-/// Get a scalar string value from an Automerge document.
-#[allow(clippy::wildcard_enum_match_arm)] // only Str is valid
-fn get_scalar_string(
-    doc: &Automerge,
-    obj: automerge::ObjId,
-    key: &str,
-) -> Result<String, DeserializeError> {
-    match doc.get(obj, key)? {
-        Some((automerge::Value::Scalar(s), _)) => match s.as_ref() {
-            automerge::ScalarValue::Str(s) => Ok(s.to_string()),
-            _ => Err(DeserializeError::InvalidSchema(format!(
-                "{key} must be a string"
-            ))),
-        },
-        _ => Err(DeserializeError::InvalidSchema(format!(
-            "missing {key} field"
         ))),
     }
 }
@@ -672,7 +642,7 @@ mod tests {
             panic!("entry should be a map")
         };
 
-        let url = get_scalar_string(&am, entry_id, "url")?;
+        let url = get_text(&am, entry_id, "url")?;
         assert!(
             url.starts_with("automerge:"),
             "url should start with 'automerge:'"
