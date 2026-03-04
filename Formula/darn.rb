@@ -13,26 +13,19 @@ class Darn < Formula
   license any_of: ["Apache-2.0", "MIT"]
 
   on_macos do
-    on_arm do
-      url "https://github.com/inkandswitch/darn/releases/download/v#{version}/darn-macos-aarch64-#{version}"
-      sha256 "PLACEHOLDER"
-    end
-
-    on_intel do
-      url "https://github.com/inkandswitch/darn/releases/download/v#{version}/darn-macos-x86_64-#{version}"
-      sha256 "PLACEHOLDER"
-    end
+    url "https://github.com/inkandswitch/darn/releases/download/v#{version}/darn-macos-aarch64-#{version}"
+    sha256 "ef90c82c3440689f8b75682a5c7116d7194629d08e229d35664a2ea91644361f"
   end
 
   on_linux do
     on_arm do
       url "https://github.com/inkandswitch/darn/releases/download/v#{version}/darn-linux-aarch64-musl-#{version}"
-      sha256 "PLACEHOLDER"
+      sha256 "7fb4d57f51cf0427e8845df3b6b97f904f4be1a94c62443c46d23ecec40358c2"
     end
 
     on_intel do
       url "https://github.com/inkandswitch/darn/releases/download/v#{version}/darn-linux-x86_64-musl-#{version}"
-      sha256 "PLACEHOLDER"
+      sha256 "8e873bbe26ca9b6ca08602381e52e7d4dbeb6d56da16c79341fefa1c0932c628"
     end
   end
 

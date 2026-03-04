@@ -54,11 +54,6 @@ jobs:
             artifact-name: darn-macos-aarch64
             cargo-flags: ""
             binary-ext: ""
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            artifact-name: darn-macos-x86_64
-            cargo-flags: ""
-            binary-ext: ""
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact-name: darn-windows-x86_64
@@ -164,7 +159,6 @@ jobs:
             darn-linux-aarch64 \
             darn-linux-aarch64-musl \
             darn-macos-aarch64 \
-            darn-macos-x86_64 \
             darn-windows-x86_64 \
           ; do
             dir="artifacts/${name}-${VERSION}"
@@ -219,7 +213,6 @@ jobs:
           | Linux aarch64 | \`darn-linux-aarch64-${VERSION}\` |
           | Linux aarch64 (static) | \`darn-linux-aarch64-musl-${VERSION}\` |
           | macOS aarch64 (Apple Silicon) | \`darn-macos-aarch64-${VERSION}\` |
-          | macOS x86_64 (Intel) | \`darn-macos-x86_64-${VERSION}\` |
           | Windows x86_64 | \`darn-windows-x86_64-${VERSION}.exe\` |
           EOF
           )" \

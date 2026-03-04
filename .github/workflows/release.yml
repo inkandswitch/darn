@@ -53,11 +53,6 @@ jobs:
             artifact-name: darn-macos-aarch64
             cargo-flags: ""
             binary-ext: ""
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            artifact-name: darn-macos-x86_64
-            cargo-flags: ""
-            binary-ext: ""
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact-name: darn-windows-x86_64
@@ -129,7 +124,6 @@ jobs:
             darn-linux-aarch64 \
             darn-linux-aarch64-musl \
             darn-macos-aarch64 \
-            darn-macos-x86_64 \
             darn-windows-x86_64 \
           ; do
             dir="artifacts/${name}-${VERSION}"
@@ -196,12 +190,10 @@ jobs:
       - name: Update formula
         run: |
           macos_arm_sha=$(grep "darn-macos-aarch64-" /tmp/SHA256SUMS | cut -d' ' -f1)
-          macos_x64_sha=$(grep "darn-macos-x86_64-" /tmp/SHA256SUMS | cut -d' ' -f1)
           linux_x64_musl_sha=$(grep "darn-linux-x86_64-musl-" /tmp/SHA256SUMS | cut -d' ' -f1)
           linux_arm_musl_sha=$(grep "darn-linux-aarch64-musl-" /tmp/SHA256SUMS | cut -d' ' -f1)
 
           echo "macOS ARM:       $macos_arm_sha"
-          echo "macOS x64:       $macos_x64_sha"
           echo "Linux x64 musl:  $linux_x64_musl_sha"
           echo "Linux ARM musl:  $linux_arm_musl_sha"
 
@@ -225,7 +217,6 @@ jobs:
               return '\n'.join(lines)
 
           content = replace_sha(content, 'darn-macos-aarch64', '$macos_arm_sha')
-          content = replace_sha(content, 'darn-macos-x86_64', '$macos_x64_sha')
           content = replace_sha(content, 'darn-linux-aarch64-musl', '$linux_arm_musl_sha')
           content = replace_sha(content, 'darn-linux-x86_64-musl', '$linux_x64_musl_sha')
 
