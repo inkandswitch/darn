@@ -4,8 +4,9 @@ use super::file_type::FileType;
 
 /// Content stored in a file document.
 ///
-/// Text files get character-level CRDT merging, while binary files
-/// use last-writer-wins semantics.
+/// Text files get character-level CRDT merging, binary files use
+/// last-writer-wins byte replacement, and immutable text files store
+/// UTF-8 strings with last-writer-wins replacement (no character merging).
 ///
 /// # Future Work
 ///
@@ -19,11 +20,19 @@ pub enum Content {
 
     /// Binary content (last-writer-wins).
     Bytes(Vec<u8>),
+
+    /// UTF-8 text content with last-writer-wins semantics.
+    ///
+    /// Stored as an Automerge `ScalarValue::Str` — the entire string is
+    /// replaced atomically on update. Human-readable in Patchwork/JS
+    /// (appears as a plain string, not a `Uint8Array`), but without
+    /// character-level merge support.
+    ImmutableString(String),
     // TODO Consider adding large file support with external blob references
 }
 
 impl Content {
-    /// Returns `true` if this is text content.
+    /// Returns `true` if this is text content (character-level CRDT).
     #[must_use]
     pub const fn is_text(&self) -> bool {
         matches!(self, Self::Text(_))
@@ -35,11 +44,17 @@ impl Content {
         matches!(self, Self::Bytes(_))
     }
 
-    /// Returns the text content if this is a text document.
+    /// Returns `true` if this is immutable text (LWW string).
+    #[must_use]
+    pub const fn is_immutable_string(&self) -> bool {
+        matches!(self, Self::ImmutableString(_))
+    }
+
+    /// Returns the text content if this is a text or immutable text document.
     #[must_use]
     pub fn as_text(&self) -> Option<&str> {
         match self {
-            Self::Text(s) => Some(s),
+            Self::Text(s) | Self::ImmutableString(s) => Some(s),
             Self::Bytes(_) => None,
         }
     }
@@ -48,7 +63,7 @@ impl Content {
     #[must_use]
     pub fn as_bytes(&self) -> Option<&[u8]> {
         match self {
-            Self::Text(_) => None,
+            Self::Text(_) | Self::ImmutableString(_) => None,
             Self::Bytes(b) => Some(b),
         }
     }
@@ -59,6 +74,17 @@ impl From<Content> for FileType {
         match c {
             Content::Text(_) => FileType::Text,
             Content::Bytes(_) => FileType::Binary,
+            Content::ImmutableString(_) => FileType::Immutable,
+        }
+    }
+}
+
+impl From<&Content> for FileType {
+    fn from(c: &Content) -> Self {
+        match c {
+            Content::Text(_) => FileType::Text,
+            Content::Bytes(_) => FileType::Binary,
+            Content::ImmutableString(_) => FileType::Immutable,
         }
     }
 }

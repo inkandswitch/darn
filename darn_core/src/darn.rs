@@ -711,11 +711,7 @@ impl Darn {
                 }
             };
 
-            let file_type = if file.content.is_text() {
-                FileType::Text
-            } else {
-                FileType::Binary
-            };
+            let file_type = FileType::from(&file.content);
 
             if let Err(e) = staged.stage_write(
                 &file,
@@ -865,11 +861,7 @@ impl Darn {
                         }
                     };
 
-                    let file_type = if file.content.is_text() {
-                        FileType::Text
-                    } else {
-                        FileType::Binary
-                    };
+                    let file_type = FileType::from(&file.content);
 
                     let sed_digest =
                         match sedimentree::compute_digest(&self.subduction, entry.sedimentree_id)
@@ -1152,6 +1144,7 @@ impl Darn {
         &self,
         paths: Vec<PathBuf>,
         manifest: &mut Manifest,
+        force_immutable: bool,
         on_progress: F,
         cancel: &CancellationToken,
     ) -> Result<DiscoverResult, DiscoverError>
@@ -1163,6 +1156,7 @@ impl Darn {
             &self.root,
             &self.subduction,
             manifest,
+            force_immutable,
             on_progress,
             cancel,
         )
@@ -1583,6 +1577,19 @@ impl InitializedDarn {
     #[must_use]
     pub fn manifest_path(&self) -> PathBuf {
         self.layout.manifest_path()
+    }
+
+    /// Set `force_immutable` in the `.darn` config and save it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the config file cannot be written.
+    pub fn set_force_immutable(
+        &mut self,
+        force_immutable: bool,
+    ) -> Result<(), crate::dotfile::DotfileError> {
+        self.config.force_immutable = force_immutable;
+        self.config.save(&self.root)
     }
 
     /// Get the peer ID from the global signer.

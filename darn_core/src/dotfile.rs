@@ -75,6 +75,12 @@ pub struct DarnConfig {
     #[serde(with = "serde_base58::sedimentree_id")]
     pub root_directory_id: SedimentreeId,
 
+    /// When true, newly ingested text files use LWW string semantics
+    /// (`ScalarValue::Str`) instead of character-level CRDT merging.
+    /// Binary files are unaffected. Already-tracked files keep their type.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub force_immutable: bool,
+
     /// Gitignore-style patterns to exclude from sync.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ignore: Vec<String>,
@@ -111,6 +117,7 @@ impl DarnConfig {
         Self {
             id,
             root_directory_id,
+            force_immutable: false,
             ignore: default_ignore_patterns(),
             attributes: default_attribute_map(),
         }
@@ -121,12 +128,14 @@ impl DarnConfig {
     pub const fn with_fields(
         id: WorkspaceId,
         root_directory_id: SedimentreeId,
+        force_immutable: bool,
         ignore: Vec<String>,
         attributes: AttributeMap,
     ) -> Self {
         Self {
             id,
             root_directory_id,
+            force_immutable,
             ignore,
             attributes,
         }

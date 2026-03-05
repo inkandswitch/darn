@@ -28,7 +28,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use automerge::{Automerge, AutomergeError, ObjType, ROOT, ReadDoc, transaction::Transactable};
+use automerge::{transaction::Transactable, Automerge, AutomergeError, ObjType, ReadDoc, ROOT};
 use thiserror::Error;
 
 use crate::attributes::AttributeRules;
@@ -80,6 +80,16 @@ impl File {
         }
     }
 
+    /// Creates a new immutable text file document (LWW string, no character merging).
+    #[must_use]
+    pub fn immutable(name: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            name: name::Name::new(name),
+            content: content::Content::ImmutableString(content.into()),
+            metadata: metadata::Metadata::default(),
+        }
+    }
+
     /// Creates a file document from a filesystem path.
     ///
     /// Automatically detects whether the file is text or binary using streaming
@@ -89,7 +99,7 @@ impl File {
     ///
     /// Returns an error if the file cannot be read.
     pub fn from_path(path: &Path) -> Result<Self, ReadFileError> {
-        Self::from_path_with_attributes(path, None)
+        Self::from_path_full(path, None, false)
     }
 
     /// Creates a file document from a filesystem path with attribute rules.
@@ -104,6 +114,25 @@ impl File {
     pub fn from_path_with_attributes(
         path: &Path,
         attributes: Option<&AttributeRules>,
+    ) -> Result<Self, ReadFileError> {
+        Self::from_path_full(path, attributes, false)
+    }
+
+    /// Creates a file document from a filesystem path with full options.
+    ///
+    /// When `force_immutable` is true, text files are stored as
+    /// [`Content::ImmutableString`] (LWW string) instead of [`Content::Text`]
+    /// (character-level CRDT). Binary files are unaffected. This only
+    /// applies to _newly ingested_ files — already-tracked files keep their
+    /// existing type on refresh.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read.
+    pub fn from_path_full(
+        path: &Path,
+        attributes: Option<&AttributeRules>,
+        force_immutable: bool,
     ) -> Result<Self, ReadFileError> {
         let name = name::Name::from_path(path)
             .ok_or_else(|| ReadFileError::InvalidPath(path.to_path_buf()))?;
@@ -122,12 +151,21 @@ impl File {
         // Check if attributes specify a file type
         let file_content = match attributes.and_then(|a| a.get_attribute(path)) {
             Some(file_type::FileType::Binary) => {
-                // Explicitly binary - read as bytes without UTF-8 check
+                // Explicitly binary — read as bytes without UTF-8 check
                 content::Content::Bytes(std::fs::read(path)?)
             }
+            Some(file_type::FileType::Immutable) => {
+                // Explicitly immutable — LWW string
+                content::Content::ImmutableString(std::fs::read_to_string(path)?)
+            }
             Some(file_type::FileType::Text) => {
-                // Explicitly text - read as string (will fail if not valid UTF-8)
-                content::Content::Text(std::fs::read_to_string(path)?)
+                // Explicitly text — force_immutable overrides to LWW string
+                let s = std::fs::read_to_string(path)?;
+                if force_immutable {
+                    content::Content::ImmutableString(s)
+                } else {
+                    content::Content::Text(s)
+                }
             }
             None => {
                 // Large files default to binary — character-level CRDT is too expensive
@@ -135,7 +173,15 @@ impl File {
                     content::Content::Bytes(std::fs::read(path)?)
                 } else {
                     // Auto-detect using streaming UTF-8 validation
-                    streaming_utf8_read(path)?
+                    let detected = streaming_utf8_read(path)?;
+                    if force_immutable {
+                        match detected {
+                            content::Content::Text(s) => content::Content::ImmutableString(s),
+                            other => other, // Binary stays binary
+                        }
+                    } else {
+                        detected
+                    }
                 }
             }
         };
@@ -166,7 +212,8 @@ impl File {
         let mut doc = Automerge::new();
 
         let extension = extract_extension(self.name.as_str());
-        let mime_type = mime_type_for_extension(&extension, self.content.is_text());
+        let is_readable_text = self.content.is_text() || self.content.is_immutable_string();
+        let mime_type = mime_type_for_extension(&extension, is_readable_text);
         let mode = self.metadata.mode();
 
         doc.transact::<_, _, AutomergeError>(|tx| {
@@ -188,6 +235,13 @@ impl File {
                         ROOT,
                         "content",
                         automerge::ScalarValue::Bytes(bytes.clone()),
+                    )?;
+                }
+                content::Content::ImmutableString(text) => {
+                    tx.put(
+                        ROOT,
+                        "content",
+                        automerge::ScalarValue::Str(text.clone().into()),
                     )?;
                 }
             }
@@ -219,7 +273,8 @@ impl File {
         let mut doc = Automerge::new();
 
         let extension = extract_extension(self.name.as_str());
-        let mime_type = mime_type_for_extension(&extension, self.content.is_text());
+        let is_readable_text = self.content.is_text() || self.content.is_immutable_string();
+        let mime_type = mime_type_for_extension(&extension, is_readable_text);
         let mode = self.metadata.mode();
         let name = self.name;
         let content = self.content;
@@ -233,16 +288,23 @@ impl File {
             let name_obj = tx.put_object(ROOT, "name", ObjType::Text)?;
             tx.splice_text(&name_obj, 0, 0, name.as_str())?;
 
-            match content {
-                content::Content::Text(ref text) => {
+            match &content {
+                content::Content::Text(text) => {
                     let text_obj = tx.put_object(ROOT, "content", ObjType::Text)?;
                     tx.splice_text(&text_obj, 0, 0, text)?;
                 }
-                content::Content::Bytes(ref bytes) => {
+                content::Content::Bytes(bytes) => {
                     tx.put(
                         ROOT,
                         "content",
                         automerge::ScalarValue::Bytes(bytes.clone()),
+                    )?;
+                }
+                content::Content::ImmutableString(text) => {
+                    tx.put(
+                        ROOT,
+                        "content",
+                        automerge::ScalarValue::Str(text.clone().into()),
                     )?;
                 }
             }
@@ -275,15 +337,17 @@ impl File {
                 let text = doc.text(&id)?;
                 content::Content::Text(text)
             }
-            Some((automerge::Value::Scalar(s), _)) => {
-                if let automerge::ScalarValue::Bytes(bytes) = s.as_ref() {
-                    content::Content::Bytes(bytes.clone())
-                } else {
+            Some((automerge::Value::Scalar(s), _)) => match s.as_ref() {
+                automerge::ScalarValue::Bytes(bytes) => content::Content::Bytes(bytes.clone()),
+                automerge::ScalarValue::Str(smol_str) => {
+                    content::Content::ImmutableString(smol_str.to_string())
+                }
+                _ => {
                     return Err(DeserializeError::InvalidSchema(
-                        "content must be Text or Bytes".into(),
+                        "content must be Text, Str, or Bytes".into(),
                     ));
                 }
-            }
+            },
             _ => {
                 return Err(DeserializeError::InvalidSchema(
                     "missing content field".into(),
@@ -325,7 +389,9 @@ impl File {
     /// Returns an error if the file cannot be written.
     pub fn write_to_staging(&self, path: &Path) -> Result<(), WriteFileError> {
         match &self.content {
-            content::Content::Text(text) => std::fs::write(path, text)?,
+            content::Content::Text(text) | content::Content::ImmutableString(text) => {
+                std::fs::write(path, text)?;
+            }
             content::Content::Bytes(bytes) => std::fs::write(path, bytes)?,
         }
 
@@ -357,7 +423,9 @@ impl File {
 
         // Write content to temp file
         match &self.content {
-            content::Content::Text(text) => std::fs::write(&temp_path, text)?,
+            content::Content::Text(text) | content::Content::ImmutableString(text) => {
+                std::fs::write(&temp_path, text)?;
+            }
             content::Content::Bytes(bytes) => std::fs::write(&temp_path, bytes)?,
         }
 
@@ -665,6 +733,7 @@ mod tests {
         let config = DarnConfig::with_fields(
             WorkspaceId::from_bytes([1; 16]),
             SedimentreeId::new([2; 32]),
+            false,
             Vec::new(),
             AttributeMap {
                 binary: Vec::new(),

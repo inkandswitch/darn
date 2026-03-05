@@ -17,6 +17,7 @@ use std::{
 
 use console::Style;
 use darn_core::{
+    attributes::AttributeRules,
     darn::Darn,
     directory::{Directory, entry::EntryType, sedimentree_id_to_url},
     discover::{DiscoverProgress, DiscoverResult},
@@ -122,12 +123,18 @@ pub(crate) async fn init(
     path: &Path,
     peer_url: Option<&str>,
     peer_name_override: Option<&str>,
+    force_immutable: bool,
     out: Output,
 ) -> eyre::Result<()> {
     out.intro("darn init")?;
 
     // Initialize workspace structure
-    let initialized = Darn::init(path)?;
+    let mut initialized = Darn::init(path)?;
+
+    // Set force_immutable in the .darn config if requested
+    if force_immutable {
+        initialized.set_force_immutable(true)?;
+    }
     let root = initialized.root().to_path_buf();
 
     out.success(&format!("Initialized workspace at {}", root.display()))?;
@@ -422,11 +429,7 @@ pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path, out: Output) -> ey
             }
         };
 
-        let file_type = if file.content.is_text() {
-            FileType::Text
-        } else {
-            FileType::Binary
-        };
+        let file_type = FileType::from(&file.content);
 
         let sed_digest =
             sedimentree::compute_digest(darn.subduction(), entry.sedimentree_id).await?;
@@ -773,6 +776,7 @@ pub(crate) async fn stat(target: &str, out: Output) -> eyre::Result<()> {
     let file_type_str = match tracked.file_type {
         FileType::Text => "text",
         FileType::Binary => "binary",
+        FileType::Immutable => "immutable",
     };
 
     let sed_id_str = sedimentree_id_to_url(sed_id);
@@ -873,9 +877,10 @@ pub(crate) async fn sync_cmd(
     peer_name: Option<&str>,
     dry_run: bool,
     force: bool,
+    force_immutable: bool,
     out: Output,
 ) -> eyre::Result<()> {
-    info!(?peer_name, dry_run, force, "Syncing");
+    info!(?peer_name, dry_run, force, force_immutable, "Syncing");
 
     // Porcelain mode implies --force (no interactive prompts)
     let force = force || out.is_porcelain();
@@ -891,8 +896,13 @@ pub(crate) async fn sync_cmd(
     let mut manifest = darn.load_manifest()?;
     spinner.stop("Workspace loaded");
 
+    // Merge persistent config + CLI flag
+    let force_immutable = force_immutable || darn.config().force_immutable;
+
     // Phase 1: Discover and optionally ingest new files
-    if let Err(early) = sync_discover_files(&darn, &mut manifest, force, &out).await {
+    if let Err(early) =
+        sync_discover_files(&darn, &mut manifest, force, force_immutable, &out).await
+    {
         // scan_new_files failed — continue straight to sync
         out.warning(&format!("File scan error: {early}"))?;
     }
@@ -908,6 +918,7 @@ async fn sync_discover_files(
     darn: &Darn,
     manifest: &mut Manifest,
     force: bool,
+    force_immutable: bool,
     out: &Output,
 ) -> Result<(), String> {
     let spinner = out.spinner("Scanning for new files...");
@@ -947,7 +958,7 @@ async fn sync_discover_files(
     let should_track = force || out.confirm("Track these files?", true).unwrap_or(false);
 
     if should_track {
-        sync_ingest_files(darn, manifest, candidates, out)
+        sync_ingest_files(darn, manifest, candidates, force_immutable, out)
             .await
             .map_err(|e| e.to_string())?;
     } else {
@@ -963,6 +974,7 @@ async fn sync_ingest_files(
     darn: &Darn,
     manifest: &mut Manifest,
     candidates: Vec<PathBuf>,
+    force_immutable: bool,
     out: &Output,
 ) -> eyre::Result<()> {
     let total_files = candidates.len();
@@ -994,7 +1006,13 @@ async fn sync_ingest_files(
     };
 
     let result = darn
-        .ingest_files(candidates, manifest, progress_callback, &cancel_token)
+        .ingest_files(
+            candidates,
+            manifest,
+            force_immutable,
+            progress_callback,
+            &cancel_token,
+        )
         .await;
 
     match result {
@@ -1526,6 +1544,7 @@ fn format_timestamp(ts: darn_core::unix_timestamp::UnixTimestamp) -> String {
 pub(crate) async fn watch(
     sync_interval: &std::time::Duration,
     no_track: bool,
+    force_immutable: bool,
     out: Output,
 ) -> eyre::Result<()> {
     out.intro("darn watch")?;
@@ -1535,6 +1554,9 @@ pub(crate) async fn watch(
     let root = darn.root().to_path_buf();
     let mut manifest = darn.load_manifest()?;
     spinner.stop("Workspace loaded");
+
+    // Merge persistent config + CLI flag
+    let force_immutable = force_immutable || darn.config().force_immutable;
 
     info!(root = %root.display(), ?sync_interval, no_track, "Starting watch");
     out.info(&format!("Watching {}", root.display()))?;
@@ -1761,7 +1783,9 @@ pub(crate) async fn watch(
                     // Track new files
                     if !batch.created.is_empty() && !no_track {
                         for path in &batch.created {
-                            match track_single_file(&darn, &mut manifest, path).await {
+                            match track_single_file(&darn, &mut manifest, path, force_immutable)
+                                .await
+                            {
                                 Ok(()) => {
                                     info!(path = %path.display(), "Auto-tracked file");
                                 }
@@ -1993,16 +2017,14 @@ async fn track_single_file(
     darn: &Darn,
     manifest: &mut Manifest,
     relative_path: &Path,
+    force_immutable: bool,
 ) -> eyre::Result<()> {
     let full_path = darn.root().join(relative_path);
 
-    // Create File from path
-    let doc = File::from_path(&full_path)?;
-    let file_type = if doc.content.is_text() {
-        FileType::Text
-    } else {
-        FileType::Binary
-    };
+    // Create File from path (with attribute rules + force_immutable)
+    let attributes = AttributeRules::from_workspace_root(darn.root()).ok();
+    let doc = File::from_path_full(&full_path, attributes.as_ref(), force_immutable)?;
+    let file_type = FileType::from(&doc.content);
 
     // Convert to Automerge
     let mut am_doc = doc.into_automerge()?;

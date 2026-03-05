@@ -29,7 +29,7 @@ use std::{
     time::Duration,
 };
 
-use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer, notify::RecursiveMode};
+use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode, DebounceEventResult, Debouncer};
 use thiserror::Error;
 use tokio::sync::mpsc;
 
@@ -495,6 +495,7 @@ mod tests {
         let config = DarnConfig::with_fields(
             WorkspaceId::from_bytes([1; 16]),
             sedimentree_core::id::SedimentreeId::new([2; 32]),
+            false,
             vec!["*.log".to_string()],
             AttributeMap::default(),
         );

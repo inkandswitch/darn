@@ -51,7 +51,10 @@ async fn main() -> Result<()> {
             path,
             peer,
             peer_name,
-        } => commands::init(&path, peer.as_deref(), peer_name.as_deref(), out).await,
+            force_immutable,
+        } => {
+            commands::init(&path, peer.as_deref(), peer_name.as_deref(), force_immutable, out).await
+        }
         Commands::Clone { root_id, path } => commands::clone_cmd(&root_id, &path, out).await,
         Commands::Ignore { patterns } => commands::ignore(&patterns, out),
         Commands::Unignore { patterns } => commands::unignore(&patterns, out),
@@ -61,8 +64,13 @@ async fn main() -> Result<()> {
             peer,
             dry_run,
             force,
-        } => commands::sync_cmd(peer.as_deref(), dry_run, force, out).await,
-        Commands::Watch { interval, no_track } => commands::watch(&interval, no_track, out).await,
+            force_immutable,
+        } => commands::sync_cmd(peer.as_deref(), dry_run, force, force_immutable, out).await,
+        Commands::Watch {
+            interval,
+            no_track,
+            force_immutable,
+        } => commands::watch(&interval, no_track, force_immutable, out).await,
         Commands::Info => commands::info(out),
         Commands::Peer { command } => match command {
             PeerCommands::Add {
@@ -110,6 +118,10 @@ enum Commands {
         /// Name for the peer (defaults to hostname from URL)
         #[arg(long, requires = "peer")]
         peer_name: Option<String>,
+
+        /// Store new text files as immutable strings (LWW, no character merging)
+        #[arg(long)]
+        force_immutable: bool,
     },
 
     /// Clone a workspace by root directory ID (syncs from global peers)
@@ -156,6 +168,10 @@ enum Commands {
         /// Skip confirmation for new file discovery
         #[arg(long, short)]
         force: bool,
+
+        /// Store new text files as immutable strings (LWW, no character merging)
+        #[arg(long)]
+        force_immutable: bool,
     },
 
     /// Watch for file changes and auto-sync
@@ -167,6 +183,10 @@ enum Commands {
         /// Disable auto-tracking of new files
         #[arg(long)]
         no_track: bool,
+
+        /// Store new text files as immutable strings (LWW, no character merging)
+        #[arg(long)]
+        force_immutable: bool,
     },
 
     /// Show info about global config and current workspace

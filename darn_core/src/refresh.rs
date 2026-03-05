@@ -1,6 +1,6 @@
 //! Refresh error types and Automerge content update helpers.
 
-use automerge::{Automerge, AutomergeError, ObjType, ROOT, ReadDoc, transaction::Transactable};
+use automerge::{transaction::Transactable, Automerge, AutomergeError, ObjType, ReadDoc, ROOT};
 use thiserror::Error;
 
 use crate::file::content::Content;
@@ -27,7 +27,7 @@ pub fn update_automerge_content(
     doc: &mut Automerge,
     new_content: Content,
 ) -> Result<(), RefreshError> {
-    // For text, we need to get the content_id first (read-only)
+    // For text (CRDT), we need to get the content_id first (read-only)
     let content_info = match &new_content {
         Content::Text(_) => {
             let Some((automerge::Value::Object(ObjType::Text), content_id)) =
@@ -40,7 +40,7 @@ pub fn update_automerge_content(
             let old_len = doc.text(&content_id)?.chars().count();
             Some((content_id, old_len))
         }
-        Content::Bytes(_) => None,
+        Content::Bytes(_) | Content::ImmutableString(_) => None,
     };
 
     doc.transact::<_, _, AutomergeError>(|tx| {
@@ -54,6 +54,9 @@ pub fn update_automerge_content(
             }
             Content::Bytes(bytes) => {
                 tx.put(ROOT, "content", automerge::ScalarValue::Bytes(bytes))?;
+            }
+            Content::ImmutableString(text) => {
+                tx.put(ROOT, "content", automerge::ScalarValue::Str(text.into()))?;
             }
         }
         Ok(())
