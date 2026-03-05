@@ -7,17 +7,20 @@ use std::io::IsTerminal;
 use darn_core::{config, signer};
 use subduction_core::peer::id::PeerId;
 
+use crate::output::Output;
+
 /// Checks if first-run setup is needed and runs it interactively.
 ///
 /// Returns `Ok(true)` if setup was completed (or already existed),
 /// `Ok(false)` if the user declined setup.
 ///
-/// In porcelain mode, auto-generates signer without prompting.
+/// In non-interactive mode (porcelain, quiet, silent, or non-TTY),
+/// auto-generates signer without prompting.
 ///
 /// # Errors
 ///
 /// Returns an error if signer generation fails.
-pub(crate) fn ensure_signer(porcelain: bool) -> eyre::Result<bool> {
+pub(crate) fn ensure_signer(out: Output) -> eyre::Result<bool> {
     if config::global_signer_exists() {
         return Ok(true);
     }
@@ -25,25 +28,23 @@ pub(crate) fn ensure_signer(porcelain: bool) -> eyre::Result<bool> {
     let signer_dir = config::global_signer_dir()?;
     let key_path = signer_dir.join("signing_key.ed25519");
 
-    // Non-interactive mode (porcelain or non-TTY): auto-generate signer
-    if porcelain || !std::io::stdin().is_terminal() {
+    // Non-interactive mode: auto-generate signer
+    if out.is_non_interactive() || !std::io::stdin().is_terminal() {
         let s = signer::generate_and_save(&signer_dir)?;
         let peer_id: PeerId = s.verifying_key().into();
         let peer_id_str = bs58::encode(peer_id.as_bytes()).into_string();
 
-        if porcelain {
+        if out.is_porcelain() {
             println!("signer_generated\t{}", key_path.display());
             println!("peer_id\t{peer_id_str}");
-        } else {
-            println!("No signer found. Generating Ed25519 keypair...");
-            println!("  Location: {}", key_path.display());
-            println!("  Peer ID: {peer_id_str}");
+        } else if !out.is_silent() {
+            out.summary(&format!("Generated signer at {}", key_path.display()))?;
         }
         return Ok(true);
     }
 
     // Interactive mode: use cliclack prompts
-    cliclack::intro("Welcome to darn! 🪡🧦")?;
+    cliclack::intro("Welcome to darn!")?;
 
     cliclack::log::info(format!(
         "No signer found. darn needs to generate an Ed25519 keypair\n\

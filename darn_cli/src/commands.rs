@@ -655,7 +655,10 @@ pub(crate) fn tree(out: Output) -> eyre::Result<()> {
                 FileState::Missing => "missing",
             };
             let url = sedimentree_id_to_url(entry.sedimentree_id);
-            println!("{state_str}\t{}\t{url}", entry.relative_path.display());
+            out.detail_porcelain(&format!(
+                "{state_str}\t{}\t{url}",
+                entry.relative_path.display()
+            ));
         }
         return Ok(());
     }
@@ -784,14 +787,14 @@ pub(crate) async fn stat(target: &str, out: Output) -> eyre::Result<()> {
     let sed_digest = bs58::encode(tracked.sedimentree_digest.as_bytes()).into_string();
 
     if out.is_porcelain() {
-        println!("path\t{}", tracked.relative_path.display());
-        println!("sedimentree\t{sed_id_str}");
-        println!("state\t{state_str}");
-        println!("type\t{file_type_str}");
-        println!("commits\t{}", commits.len());
-        println!("fragments\t{}", fragments.len());
-        println!("digest_fs\t{fs_digest}");
-        println!("digest_sed\t{sed_digest}");
+        out.detail_porcelain(&format!("path\t{}", tracked.relative_path.display()));
+        out.detail_porcelain(&format!("sedimentree\t{sed_id_str}"));
+        out.detail_porcelain(&format!("state\t{state_str}"));
+        out.detail_porcelain(&format!("type\t{file_type_str}"));
+        out.detail_porcelain(&format!("commits\t{}", commits.len()));
+        out.detail_porcelain(&format!("fragments\t{}", fragments.len()));
+        out.detail_porcelain(&format!("digest_fs\t{fs_digest}"));
+        out.detail_porcelain(&format!("digest_sed\t{sed_digest}"));
         return Ok(());
     }
 
@@ -882,8 +885,8 @@ pub(crate) async fn sync_cmd(
 ) -> eyre::Result<()> {
     info!(?peer_name, dry_run, force, force_immutable, "Syncing");
 
-    // Porcelain mode implies --force (no interactive prompts)
-    let force = force || out.is_porcelain();
+    // Non-interactive modes imply --force (no interactive prompts)
+    let force = force || out.is_non_interactive();
 
     if dry_run {
         return sync_dry_run(peer_name, out);
@@ -1142,13 +1145,13 @@ async fn continue_sync(
                 if summary.any_success() {
                     sync_success = true;
                     if out.is_porcelain() {
-                        println!(
+                        out.detail_porcelain(&format!(
                             "synced\t{}\t{}\t{}\t{}",
                             peer.name,
                             summary.sedimentrees_synced,
                             summary.total_received(),
                             summary.total_sent()
-                        );
+                        ));
                     } else {
                         let green = Style::new().green();
                         let file_count = manifest.len();
@@ -1165,7 +1168,10 @@ async fn continue_sync(
                         peer.set_known(learned_peer_id);
                         let id_str = bs58::encode(learned_peer_id.as_bytes()).into_string();
                         if out.is_porcelain() {
-                            println!("learned_peer_id\t{}\t{id_str}", peer.name);
+                            out.detail_porcelain(&format!(
+                                "learned_peer_id\t{}\t{id_str}",
+                                peer.name
+                            ));
                         } else {
                             out.info(&format!(
                                 "Learned peer ID for {}: {}",
@@ -1188,7 +1194,7 @@ async fn continue_sync(
             }
             Err(e) => {
                 if out.is_porcelain() {
-                    println!("error\t{}\t{e}", peer.name);
+                    out.detail_porcelain(&format!("error\t{}\t{e}", peer.name));
                 } else {
                     let red = Style::new().red();
                     out.error(&format!("{} {e}", red.apply_to(&peer.name)))?;
@@ -1207,19 +1213,19 @@ async fn continue_sync(
         // Report results
         if out.is_porcelain() {
             for path in &apply_result.updated {
-                println!("updated\t{}", path.display());
+                out.detail_porcelain(&format!("updated\t{}", path.display()));
             }
             for path in &apply_result.merged {
-                println!("merged\t{}", path.display());
+                out.detail_porcelain(&format!("merged\t{}", path.display()));
             }
             for path in &apply_result.created {
-                println!("created\t{}", path.display());
+                out.detail_porcelain(&format!("created\t{}", path.display()));
             }
             for path in &apply_result.deleted {
-                println!("deleted\t{}", path.display());
+                out.detail_porcelain(&format!("deleted\t{}", path.display()));
             }
             for (path, err) in &apply_result.errors {
-                println!("error\t{}\t{err}", path.display());
+                out.detail_porcelain(&format!("error\t{}\t{err}", path.display()));
             }
         } else {
             if !apply_result.updated.is_empty() {
@@ -1268,9 +1274,11 @@ async fn continue_sync(
         }
 
         darn.save_manifest(&manifest)?;
-        out.outro("Sync complete")?;
+        out.summary("Sync complete")?;
+        out.outro("")?;
     } else {
-        out.outro("Sync failed")?;
+        out.summary("Sync failed")?;
+        out.outro("")?;
     }
 
     Ok(())
@@ -1290,6 +1298,7 @@ async fn sync_peer_with_progress(
     let current_ref = &current;
     let total_ref = &total;
     let is_porcelain = out.is_porcelain();
+    let is_silent = out.is_silent();
 
     let summary = darn
         .sync_with_peer_progress(peer, manifest, |event| {
@@ -1312,12 +1321,12 @@ async fn sync_peer_with_progress(
                     ..
                 } => {
                     let display_index = index + 1;
-                    if is_porcelain {
+                    if is_porcelain && !is_silent {
                         let path_str = file_path
                             .as_ref()
                             .map_or("root_directory".to_string(), |p| p.display().to_string());
                         println!("syncing\t{display_index}\t{total}\t{path_str}");
-                    } else {
+                    } else if !is_porcelain {
                         let msg = match &file_path {
                             Some(path) => format!("[{display_index}/{total}] {}", path.display()),
                             None => format!("[{display_index}/{total}] root directory"),
@@ -1370,10 +1379,10 @@ fn sync_dry_run(peer_name: Option<&str>, out: Output) -> eyre::Result<()> {
 
     if out.is_porcelain() {
         for path in &modified {
-            println!("modified\t{}", path.display());
+            out.detail_porcelain(&format!("modified\t{}", path.display()));
         }
         for path in &missing {
-            println!("missing\t{}", path.display());
+            out.detail_porcelain(&format!("missing\t{}", path.display()));
         }
     } else if !modified.is_empty() || !missing.is_empty() {
         #[allow(clippy::expect_used)] // Writing to String is infallible
@@ -1456,14 +1465,14 @@ fn display_peer_dry_run_status(
     }
 
     if out.is_porcelain() {
-        println!(
+        out.detail_porcelain(&format!(
             "peer\t{}\t{}\t{peer_id_display}\t{last_sync}\t{}",
             peer.name,
             peer.address,
             unsynced.len()
-        );
+        ));
         for path in &unsynced {
-            println!("unsynced\t{}\t{}", peer.name, path.display());
+            out.detail_porcelain(&format!("unsynced\t{}\t{}", peer.name, path.display()));
         }
     } else {
         // Build peer status content
@@ -1612,7 +1621,7 @@ pub(crate) async fn watch(
     };
 
     out.remark("Press Ctrl+C to stop")?;
-    if !out.is_porcelain() {
+    if !out.is_non_interactive() {
         println!(); // Blank line before events
     }
 
@@ -1689,7 +1698,7 @@ pub(crate) async fn watch(
 
         last_sync = std::time::Instant::now();
         last_push_check = std::time::Instant::now();
-        if !out.is_porcelain() {
+        if !out.is_non_interactive() {
             println!();
         }
     }
@@ -1700,6 +1709,7 @@ pub(crate) async fn watch(
     let red = Style::new().red();
     let dim = Style::new().dim();
     let is_porcelain = out.is_porcelain();
+    let is_quiet = out.is_quiet();
 
     // Event loop
     loop {
@@ -1712,43 +1722,51 @@ pub(crate) async fn watch(
                 match event {
                     Some(WatchEvent::FileModified(path)) => {
                         if processor.process(WatchEvent::FileModified(path.clone())) {
-                            if is_porcelain {
-                                let kind = if manifest.get_by_path(&path).is_none() { "created" } else { "modified" };
-                                println!("{kind}\t{}", path.display());
-                            } else {
-                                let is_new = manifest.get_by_path(&path).is_none();
-                                if is_new {
-                                    println!("  {} {}", green.apply_to("+"), path.display());
+                            if !is_quiet {
+                                if is_porcelain {
+                                    let kind = if manifest.get_by_path(&path).is_none() { "created" } else { "modified" };
+                                    out.detail_porcelain(&format!("{kind}\t{}", path.display()));
                                 } else {
-                                    println!("  {} {}", yellow.apply_to("M"), path.display());
+                                    let is_new = manifest.get_by_path(&path).is_none();
+                                    if is_new {
+                                        out.detail(&format!("  {} {}", green.apply_to("+"), path.display()));
+                                    } else {
+                                        out.detail(&format!("  {} {}", yellow.apply_to("M"), path.display()));
+                                    }
                                 }
                             }
                         }
                     }
                     Some(WatchEvent::FileDeleted(path)) => {
                         if processor.process(WatchEvent::FileDeleted(path.clone())) {
-                            if is_porcelain {
-                                println!("deleted\t{}", path.display());
-                            } else {
-                                println!("  {} {}", red.apply_to("-"), path.display());
+                            if !is_quiet {
+                                if is_porcelain {
+                                    out.detail_porcelain(&format!("deleted\t{}", path.display()));
+                                } else {
+                                    out.detail(&format!("  {} {}", red.apply_to("-"), path.display()));
+                                }
                             }
                         }
                     }
                     Some(WatchEvent::FileCreated(path)) => {
                         if processor.process(WatchEvent::FileCreated(path.clone())) {
-                            if is_porcelain {
-                                println!("created\t{}", path.display());
-                            } else {
-                                println!("  {} {}", green.apply_to("+"), path.display());
+                            if !is_quiet {
+                                if is_porcelain {
+                                    out.detail_porcelain(&format!("created\t{}", path.display()));
+                                } else {
+                                    out.detail(&format!("  {} {}", green.apply_to("+"), path.display()));
+                                }
                             }
                         }
                     }
                     Some(WatchEvent::FileRenamed { from, to }) => {
                         if processor.process(WatchEvent::FileRenamed { from: from.clone(), to: to.clone() }) {
-                            if is_porcelain {
-                                println!("renamed\t{}\t{}", from.display(), to.display());
-                            } else {
-                                println!("  {} {} -> {}", dim.apply_to("R"), from.display(), to.display());
+                            if !is_quiet {
+                                if is_porcelain {
+                                    out.detail_porcelain(&format!("renamed\t{}\t{}", from.display(), to.display()));
+                                } else {
+                                    out.detail(&format!("  {} {} -> {}", dim.apply_to("R"), from.display(), to.display()));
+                                }
                             }
                         }
                     }
@@ -1767,7 +1785,7 @@ pub(crate) async fn watch(
 
             // Check for Ctrl+C
             _ = tokio::signal::ctrl_c() => {
-                if !is_porcelain {
+                if !is_quiet && !is_porcelain {
                     println!();
                 }
                 out.info("Stopping...")?;
@@ -1841,7 +1859,7 @@ pub(crate) async fn watch(
                 );
 
                 if should_sync {
-                        if !is_porcelain {
+                        if !is_quiet && !is_porcelain {
                             println!();
                         }
                         let spinner = out.spinner("Syncing with peers...");
@@ -1882,59 +1900,67 @@ pub(crate) async fn watch(
                             darn.save_manifest(&manifest)?;
                             processor.update_tracked_paths(&manifest);
 
-                            let mut summary = String::new();
+                            let mut sync_summary = String::new();
                             if !apply_result.updated.is_empty() {
-                                summary.push_str(&format!("{} updated, ", apply_result.updated.len()));
-                                for path in &apply_result.updated {
-                                    if is_porcelain {
-                                        println!("updated\t{}", path.display());
-                                    } else {
-                                        println!("  {} {}", yellow.apply_to("U"), path.display());
+                                sync_summary.push_str(&format!("{} updated, ", apply_result.updated.len()));
+                                if !is_quiet {
+                                    for path in &apply_result.updated {
+                                        if is_porcelain {
+                                            out.detail_porcelain(&format!("updated\t{}", path.display()));
+                                        } else {
+                                            out.detail(&format!("  {} {}", yellow.apply_to("U"), path.display()));
+                                        }
                                     }
                                 }
                             }
                             if !apply_result.merged.is_empty() {
-                                summary.push_str(&format!("{} merged, ", apply_result.merged.len()));
-                                for path in &apply_result.merged {
-                                    if is_porcelain {
-                                        println!("merged\t{}", path.display());
-                                    } else {
-                                        println!("  {} {}", yellow.apply_to("M"), path.display());
+                                sync_summary.push_str(&format!("{} merged, ", apply_result.merged.len()));
+                                if !is_quiet {
+                                    for path in &apply_result.merged {
+                                        if is_porcelain {
+                                            out.detail_porcelain(&format!("merged\t{}", path.display()));
+                                        } else {
+                                            out.detail(&format!("  {} {}", yellow.apply_to("M"), path.display()));
+                                        }
                                     }
                                 }
                             }
                             if !apply_result.created.is_empty() {
-                                summary.push_str(&format!("{} new, ", apply_result.created.len()));
-                                for path in &apply_result.created {
-                                    if is_porcelain {
-                                        println!("created\t{}", path.display());
-                                    } else {
-                                        println!("  {} {}", green.apply_to("+"), path.display());
+                                sync_summary.push_str(&format!("{} new, ", apply_result.created.len()));
+                                if !is_quiet {
+                                    for path in &apply_result.created {
+                                        if is_porcelain {
+                                            out.detail_porcelain(&format!("created\t{}", path.display()));
+                                        } else {
+                                            out.detail(&format!("  {} {}", green.apply_to("+"), path.display()));
+                                        }
                                     }
                                 }
                             }
                             if !apply_result.deleted.is_empty() {
-                                summary.push_str(&format!("{} deleted, ", apply_result.deleted.len()));
-                                for path in &apply_result.deleted {
-                                    if is_porcelain {
-                                        println!("deleted\t{}", path.display());
-                                    } else {
-                                        println!("  {} {}", red.apply_to("-"), path.display());
+                                sync_summary.push_str(&format!("{} deleted, ", apply_result.deleted.len()));
+                                if !is_quiet {
+                                    for path in &apply_result.deleted {
+                                        if is_porcelain {
+                                            out.detail_porcelain(&format!("deleted\t{}", path.display()));
+                                        } else {
+                                            out.detail(&format!("  {} {}", red.apply_to("-"), path.display()));
+                                        }
                                     }
                                 }
                             }
-                            if summary.is_empty() {
+                            if sync_summary.is_empty() {
                                 match (any_received, any_sent) {
-                                    (true, true) => summary = "synced".to_string(),
-                                    (true, false) => summary = "received updates".to_string(),
-                                    (false, true) => summary = "sent updates".to_string(),
-                                    (false, false) => summary = "no changes".to_string(),
+                                    (true, true) => sync_summary = "synced".to_string(),
+                                    (true, false) => sync_summary = "received updates".to_string(),
+                                    (false, true) => sync_summary = "sent updates".to_string(),
+                                    (false, false) => sync_summary = "no changes".to_string(),
                                 }
                             } else {
-                                summary = summary.trim_end_matches(", ").to_string();
+                                sync_summary = sync_summary.trim_end_matches(", ").to_string();
                             }
 
-                            spinner.stop(format!("Synced ({summary})"));
+                            spinner.stop(format!("Synced ({sync_summary})"));
                         } else {
                             spinner.stop("Sync complete");
                         }
@@ -1942,7 +1968,7 @@ pub(crate) async fn watch(
                         last_sync = std::time::Instant::now();
                         last_push_check = std::time::Instant::now();
                         has_local_changes = false;
-                        if !is_porcelain {
+                        if !is_quiet && !is_porcelain {
                             println!();
                         }
                 }
@@ -1960,32 +1986,34 @@ pub(crate) async fn watch(
                         darn.save_manifest(&manifest)?;
                         processor.update_tracked_paths(&manifest);
 
-                        for path in &apply_result.updated {
-                            if is_porcelain {
-                                println!("updated\t{}", path.display());
-                            } else {
-                                println!("  {} {}", yellow.apply_to("U"), path.display());
+                        if !is_quiet {
+                            for path in &apply_result.updated {
+                                if is_porcelain {
+                                    out.detail_porcelain(&format!("updated\t{}", path.display()));
+                                } else {
+                                    out.detail(&format!("  {} {}", yellow.apply_to("U"), path.display()));
+                                }
                             }
-                        }
-                        for path in &apply_result.merged {
-                            if is_porcelain {
-                                println!("merged\t{}", path.display());
-                            } else {
-                                println!("  {} {}", yellow.apply_to("M"), path.display());
+                            for path in &apply_result.merged {
+                                if is_porcelain {
+                                    out.detail_porcelain(&format!("merged\t{}", path.display()));
+                                } else {
+                                    out.detail(&format!("  {} {}", yellow.apply_to("M"), path.display()));
+                                }
                             }
-                        }
-                        for path in &apply_result.created {
-                            if is_porcelain {
-                                println!("created\t{}", path.display());
-                            } else {
-                                println!("  {} {}", green.apply_to("+"), path.display());
+                            for path in &apply_result.created {
+                                if is_porcelain {
+                                    out.detail_porcelain(&format!("created\t{}", path.display()));
+                                } else {
+                                    out.detail(&format!("  {} {}", green.apply_to("+"), path.display()));
+                                }
                             }
-                        }
-                        for path in &apply_result.deleted {
-                            if is_porcelain {
-                                println!("deleted\t{}", path.display());
-                            } else {
-                                println!("  {} {}", red.apply_to("-"), path.display());
+                            for path in &apply_result.deleted {
+                                if is_porcelain {
+                                    out.detail_porcelain(&format!("deleted\t{}", path.display()));
+                                } else {
+                                    out.detail(&format!("  {} {}", red.apply_to("-"), path.display()));
+                                }
                             }
                         }
 
@@ -2136,9 +2164,9 @@ pub(crate) fn peer_add(
     info!(%name, %addr_display, "Added peer");
 
     if out.is_porcelain() {
-        println!("name\t{name}");
-        println!("address\t{addr_display}");
-        println!("peer_id\t{peer_id_display}");
+        out.detail_porcelain(&format!("name\t{name}"));
+        out.detail_porcelain(&format!("address\t{addr_display}"));
+        out.detail_porcelain(&format!("peer_id\t{peer_id_display}"));
     } else {
         out.success(&format!("Added peer: {name} ({addr_display})"))?;
         out.remark(&format!("Peer ID: {peer_id_display}"))?;
@@ -2202,10 +2230,10 @@ pub(crate) fn peer_list(out: Output) -> eyre::Result<()> {
             let last_sync = peer
                 .last_synced_at
                 .map_or_else(|| "never".to_string(), |ts| ts.as_secs().to_string());
-            println!(
+            out.detail_porcelain(&format!(
                 "{}\t{}\t{mode}\t{peer_id_display}\t{last_sync}",
                 peer.name, peer.address
-            );
+            ));
         }
         return Ok(());
     }
@@ -2252,12 +2280,12 @@ pub(crate) fn peer_remove(name: &str, out: Output) -> eyre::Result<()> {
     if darn.remove_peer(&peer_name)? {
         info!(%name, "Removed peer");
         if out.is_porcelain() {
-            println!("removed\t{name}");
+            out.detail_porcelain(&format!("removed\t{name}"));
         } else {
             out.success(&format!("Removed peer: {name}"))?;
         }
     } else if out.is_porcelain() {
-        println!("not_found\t{name}");
+        out.detail_porcelain(&format!("not_found\t{name}"));
     } else {
         out.warning(&format!("Peer not found: {name}"))?;
     }
@@ -2287,7 +2315,7 @@ pub(crate) fn info(out: Output) -> eyre::Result<()> {
     let iroh_node_id_str: Option<String> = None;
 
     if out.is_porcelain() {
-        info_porcelain(&config_dir, &peer_id_str, iroh_node_id_str.as_deref());
+        info_porcelain(out, &config_dir, &peer_id_str, iroh_node_id_str.as_deref());
         return Ok(());
     }
 
@@ -2295,11 +2323,16 @@ pub(crate) fn info(out: Output) -> eyre::Result<()> {
 }
 
 /// Porcelain output for `darn info`.
-fn info_porcelain(config_dir: &Path, peer_id_str: &str, iroh_node_id_str: Option<&str>) {
-    println!("config_dir\t{}", config_dir.display());
-    println!("peer_id\t{peer_id_str}");
+fn info_porcelain(
+    out: Output,
+    config_dir: &Path,
+    peer_id_str: &str,
+    iroh_node_id_str: Option<&str>,
+) {
+    out.detail_porcelain(&format!("config_dir\t{}", config_dir.display()));
+    out.detail_porcelain(&format!("peer_id\t{peer_id_str}"));
     if let Some(iroh_id) = iroh_node_id_str {
-        println!("iroh_node_id\t{iroh_id}");
+        out.detail_porcelain(&format!("iroh_node_id\t{iroh_id}"));
     }
 
     // Peers
@@ -2311,10 +2344,10 @@ fn info_porcelain(config_dir: &Path, peer_id_str: &str, iroh_node_id_str: Option
             } else {
                 "discovery".to_string()
             };
-            println!(
+            out.detail_porcelain(&format!(
                 "peer\t{}\t{}\t{mode}\t{peer_id_display}",
                 peer.name, peer.address
-            );
+            ));
         }
     }
 
@@ -2327,9 +2360,9 @@ fn info_porcelain(config_dir: &Path, peer_id_str: &str, iroh_node_id_str: Option
         );
         let file_count = manifest.as_ref().map(Manifest::len).unwrap_or(0);
 
-        println!("workspace_root\t{}", darn.root().display());
-        println!("root_dir_id\t{root_id_str}");
-        println!("tracked_files\t{file_count}");
+        out.detail_porcelain(&format!("workspace_root\t{}", darn.root().display()));
+        out.detail_porcelain(&format!("root_dir_id\t{root_id_str}"));
+        out.detail_porcelain(&format!("tracked_files\t{file_count}"));
 
         if let Ok(manifest) = manifest {
             for entry in manifest.iter() {
@@ -2345,14 +2378,14 @@ fn info_porcelain(config_dir: &Path, peer_id_str: &str, iroh_node_id_str: Option
                     "binary"
                 };
                 let url = sedimentree_id_to_url(entry.sedimentree_id);
-                println!(
+                out.detail_porcelain(&format!(
                     "file\t{}\t{type_str}\t{state_str}\t{url}",
                     entry.relative_path.display()
-                );
+                ));
             }
         }
     } else {
-        println!("workspace\tnone");
+        out.detail_porcelain("workspace\tnone");
     }
 }
 

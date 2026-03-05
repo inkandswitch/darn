@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use eyre::Result;
+use output::Verbosity;
 use tracing_subscriber::{EnvFilter, fmt};
 
 mod commands;
@@ -34,15 +35,20 @@ async fn main() -> Result<()> {
     fmt().with_env_filter(filter).init();
 
     let porcelain = cli.porcelain;
-    let out = output::Output::new(porcelain);
+    let verbosity = match (cli.silent, cli.quiet) {
+        (true, _) => Verbosity::Silent,
+        (_, true) => Verbosity::Quiet,
+        _ => Verbosity::Normal,
+    };
+    let out = output::Output::new(porcelain, verbosity);
 
-    // Apply Catppuccin Mocha theme for all cliclack prompts (skip in porcelain mode)
-    if !porcelain {
+    // Apply Catppuccin Mocha theme for all cliclack prompts (skip in non-interactive modes)
+    if !out.is_non_interactive() {
         theme::apply();
     }
 
     // Ensure signer exists before running commands
-    if !setup::ensure_signer(porcelain)? {
+    if !setup::ensure_signer(out)? {
         return Ok(());
     }
 
@@ -98,6 +104,14 @@ struct Cli {
     /// Machine-readable output (no spinners, no color, tab-separated)
     #[arg(long, global = true)]
     porcelain: bool,
+
+    /// Suppress spinners and per-item detail; show only final summaries and errors
+    #[arg(short, long, global = true)]
+    quiet: bool,
+
+    /// Suppress all output except errors (printed to stderr)
+    #[arg(long, global = true)]
+    silent: bool,
 
     #[command(subcommand)]
     command: Commands,
