@@ -2557,12 +2557,12 @@ async fn connect_global_peers(
     signer_dir: &std::path::Path,
     peers: &[darn_core::peer::Peer],
     timeout: std::time::Duration,
-) -> eyre::Result<usize> {
+) -> eyre::Result<Vec<PeerId>> {
     use darn_core::{signer, subduction::DarnConnection};
     use subduction_websocket::tokio::{TimeoutTokio, client::TokioWebSocketClient};
     use tungstenite::http::Uri;
 
-    let mut connected = 0;
+    let mut connected = Vec::new();
 
     for peer in peers {
         match &peer.address {
@@ -2581,13 +2581,14 @@ async fn connect_global_peers(
                     Ok((authenticated, listener_fut, sender_fut)) => {
                         tokio::spawn(async move { drop(listener_fut.await) });
                         tokio::spawn(async move { drop(sender_fut.await) });
+                        let peer_id = authenticated.peer_id();
                         let authenticated =
                             authenticated.map(|c| DarnConnection::WebSocket(Box::new(c)));
                         if let Err(e) = subduction.register(authenticated).await {
                             info!(%e, peer = %peer.name, "Failed to register");
                             continue;
                         }
-                        connected += 1;
+                        connected.push(peer_id);
                     }
                     Err(e) => {
                         info!(%e, peer = %peer.name, "Connection failed");
@@ -2615,6 +2616,7 @@ pub(crate) async fn doc_edit(
     out: Output,
 ) -> eyre::Result<()> {
     use darn_core::{doc_edit::apply_edit, signer, subduction as sub};
+    use subduction_core::connection::Connection;
 
     out.intro("darn doc edit")?;
 
@@ -2638,12 +2640,12 @@ pub(crate) async fn doc_edit(
     }
 
     let spinner = out.spinner("Connecting to peers...");
-    let connected = connect_global_peers(&subduction, &signer_dir, &peers, timeout).await?;
-    if connected == 0 {
+    let peer_ids = connect_global_peers(&subduction, &signer_dir, &peers, timeout).await?;
+    if peer_ids.is_empty() {
         spinner.stop("Failed to connect");
         eyre::bail!("Could not connect to any peers");
     }
-    spinner.stop(format!("Connected to {connected} peer(s)"));
+    spinner.stop(format!("Connected to {} peer(s)", peer_ids.len()));
 
     // The path used for --create initialization
     let create_path = match &op {
@@ -2651,15 +2653,30 @@ pub(crate) async fn doc_edit(
         | darn_core::doc_edit::EditOp::Clear { path } => path.clone(),
     };
 
-
-    // Sync, load, edit, store, sync back
+    // Sync the specific sedimentree with each connected peer (fetch phase).
+    // Uses sync_with_peer (per-sedimentree, per-peer) — the same path that
+    // workspace sync uses — rather than full_sync/sync_all which time out
+    // when the peer has never seen the sedimentree.
     let spinner = out.spinner("Syncing document...");
-    let sync_result = subduction.sync_all(sed_id, true, Some(timeout)).await?;
-    let total_received: usize = sync_result
-        .values()
-        .filter(|(success, _, _)| *success)
-        .map(|(_, stats, _)| stats.total_received())
-        .sum();
+    let mut total_received: usize = 0;
+    for peer_id in &peer_ids {
+        match subduction
+            .sync_with_peer(peer_id, sed_id, true, Some(timeout))
+            .await
+        {
+            Ok((success, stats, errors)) => {
+                if success {
+                    total_received += stats.total_received();
+                }
+                for (conn, err) in &errors {
+                    tracing::warn!("Sync error with {:?}: {err:?}", Connection::peer_id(conn));
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to sync with peer {peer_id:?}: {e}");
+            }
+        }
+    }
     spinner.stop(format!("Synced (received {total_received} items)"));
 
     let spinner = out.spinner("Loading document...");
@@ -2703,12 +2720,25 @@ pub(crate) async fn doc_edit(
     spinner.stop("Changes stored");
 
     let spinner = out.spinner("Syncing changes to peers...");
-    let sync_result = subduction.sync_all(sed_id, true, Some(timeout)).await?;
-    let total_sent: usize = sync_result
-        .values()
-        .filter(|(success, _, _)| *success)
-        .map(|(_, stats, _)| stats.total_sent())
-        .sum();
+    let mut total_sent: usize = 0;
+    for peer_id in &peer_ids {
+        match subduction
+            .sync_with_peer(peer_id, sed_id, true, Some(timeout))
+            .await
+        {
+            Ok((success, stats, errors)) => {
+                if success {
+                    total_sent += stats.total_sent();
+                }
+                for (conn, err) in &errors {
+                    tracing::warn!("Sync error with {:?}: {err:?}", Connection::peer_id(conn));
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to sync with peer {peer_id:?}: {e}");
+            }
+        }
+    }
     spinner.stop(format!("Synced (sent {total_sent} items)"));
 
     if out.is_porcelain() {
