@@ -36,6 +36,7 @@ pub mod config;
 pub mod darn;
 pub mod directory;
 pub mod discover;
+pub mod doc_edit;
 pub mod dotfile;
 pub mod file;
 pub mod ignore;

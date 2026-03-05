@@ -1721,52 +1721,52 @@ pub(crate) async fn watch(
             event = rx.recv() => {
                 match event {
                     Some(WatchEvent::FileModified(path)) => {
-                        if processor.process(WatchEvent::FileModified(path.clone())) {
-                            if !is_quiet {
-                                if is_porcelain {
-                                    let kind = if manifest.get_by_path(&path).is_none() { "created" } else { "modified" };
-                                    out.detail_porcelain(&format!("{kind}\t{}", path.display()));
+                        if processor.process(WatchEvent::FileModified(path.clone()))
+                            && !is_quiet
+                        {
+                            if is_porcelain {
+                                let kind = if manifest.get_by_path(&path).is_none() { "created" } else { "modified" };
+                                out.detail_porcelain(&format!("{kind}\t{}", path.display()));
+                            } else {
+                                let is_new = manifest.get_by_path(&path).is_none();
+                                if is_new {
+                                    out.detail(&format!("  {} {}", green.apply_to("+"), path.display()));
                                 } else {
-                                    let is_new = manifest.get_by_path(&path).is_none();
-                                    if is_new {
-                                        out.detail(&format!("  {} {}", green.apply_to("+"), path.display()));
-                                    } else {
-                                        out.detail(&format!("  {} {}", yellow.apply_to("M"), path.display()));
-                                    }
+                                    out.detail(&format!("  {} {}", yellow.apply_to("M"), path.display()));
                                 }
                             }
                         }
                     }
                     Some(WatchEvent::FileDeleted(path)) => {
-                        if processor.process(WatchEvent::FileDeleted(path.clone())) {
-                            if !is_quiet {
-                                if is_porcelain {
-                                    out.detail_porcelain(&format!("deleted\t{}", path.display()));
-                                } else {
-                                    out.detail(&format!("  {} {}", red.apply_to("-"), path.display()));
-                                }
+                        if processor.process(WatchEvent::FileDeleted(path.clone()))
+                            && !is_quiet
+                        {
+                            if is_porcelain {
+                                out.detail_porcelain(&format!("deleted\t{}", path.display()));
+                            } else {
+                                out.detail(&format!("  {} {}", red.apply_to("-"), path.display()));
                             }
                         }
                     }
                     Some(WatchEvent::FileCreated(path)) => {
-                        if processor.process(WatchEvent::FileCreated(path.clone())) {
-                            if !is_quiet {
-                                if is_porcelain {
-                                    out.detail_porcelain(&format!("created\t{}", path.display()));
-                                } else {
-                                    out.detail(&format!("  {} {}", green.apply_to("+"), path.display()));
-                                }
+                        if processor.process(WatchEvent::FileCreated(path.clone()))
+                            && !is_quiet
+                        {
+                            if is_porcelain {
+                                out.detail_porcelain(&format!("created\t{}", path.display()));
+                            } else {
+                                out.detail(&format!("  {} {}", green.apply_to("+"), path.display()));
                             }
                         }
                     }
                     Some(WatchEvent::FileRenamed { from, to }) => {
-                        if processor.process(WatchEvent::FileRenamed { from: from.clone(), to: to.clone() }) {
-                            if !is_quiet {
-                                if is_porcelain {
-                                    out.detail_porcelain(&format!("renamed\t{}\t{}", from.display(), to.display()));
-                                } else {
-                                    out.detail(&format!("  {} {} -> {}", dim.apply_to("R"), from.display(), to.display()));
-                                }
+                        if processor.process(WatchEvent::FileRenamed { from: from.clone(), to: to.clone() })
+                            && !is_quiet
+                        {
+                            if is_porcelain {
+                                out.detail_porcelain(&format!("renamed\t{}\t{}", from.display(), to.display()));
+                            } else {
+                                out.detail(&format!("  {} {} -> {}", dim.apply_to("R"), from.display(), to.display()));
                             }
                         }
                     }
@@ -2111,7 +2111,7 @@ pub(crate) fn peer_add(
     peer_id: Option<String>,
     out: Output,
 ) -> eyre::Result<()> {
-    let darn = Darn::open_without_subduction(Path::new("."))?;
+    use darn_core::peer;
 
     // -- Name --
     let name = match name {
@@ -2120,7 +2120,7 @@ pub(crate) fn peer_add(
     };
     let peer_name = PeerName::new(&name)?;
 
-    if darn.get_peer(&peer_name)?.is_some() {
+    if peer::get_peer(&peer_name)?.is_some() {
         out.error(&format!("Peer already exists: {name}"))?;
         return Ok(());
     }
@@ -2159,7 +2159,7 @@ pub(crate) fn peer_add(
         "(discovery)".to_string()
     };
 
-    darn.add_peer(&peer)?;
+    peer::add_peer(&peer)?;
 
     info!(%name, %addr_display, "Added peer");
 
@@ -2213,8 +2213,7 @@ fn peer_add_interactive(out: Output) -> eyre::Result<PeerAddress> {
 
 /// List known peers.
 pub(crate) fn peer_list(out: Output) -> eyre::Result<()> {
-    let darn = Darn::open_without_subduction(Path::new("."))?;
-    let peers = darn.list_peers()?;
+    let peers = darn_core::peer::list_peers()?;
 
     info!("Listing peers");
 
@@ -2274,10 +2273,9 @@ pub(crate) fn peer_list(out: Output) -> eyre::Result<()> {
 
 /// Remove a peer.
 pub(crate) fn peer_remove(name: &str, out: Output) -> eyre::Result<()> {
-    let darn = Darn::open_without_subduction(Path::new("."))?;
     let peer_name = PeerName::new(name)?;
 
-    if darn.remove_peer(&peer_name)? {
+    if darn_core::peer::remove_peer(&peer_name)? {
         info!(%name, "Removed peer");
         if out.is_porcelain() {
             out.detail_porcelain(&format!("removed\t{name}"));
@@ -2544,6 +2542,181 @@ fn info_human_workspace(dim: &Style) -> eyre::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Connect to all global peers for standalone document operations.
+///
+/// Returns the number of successfully connected peers.
+///
+/// # Errors
+///
+/// Returns an error on signer loading or URI parsing failures.
+async fn connect_global_peers(
+    subduction: &darn_core::subduction::DarnSubduction,
+    signer_dir: &std::path::Path,
+    peers: &[darn_core::peer::Peer],
+    timeout: std::time::Duration,
+) -> eyre::Result<usize> {
+    use darn_core::{signer, subduction::DarnConnection};
+    use subduction_websocket::tokio::{TimeoutTokio, client::TokioWebSocketClient};
+    use tungstenite::http::Uri;
+
+    let mut connected = 0;
+
+    for peer in peers {
+        match &peer.address {
+            PeerAddress::WebSocket { url } => {
+                let uri: Uri = url.parse()?;
+                let peer_signer = signer::load(signer_dir)?;
+                match TokioWebSocketClient::new(
+                    uri,
+                    TimeoutTokio,
+                    timeout,
+                    peer_signer,
+                    peer.audience,
+                )
+                .await
+                {
+                    Ok((authenticated, listener_fut, sender_fut)) => {
+                        tokio::spawn(async move { drop(listener_fut.await) });
+                        tokio::spawn(async move { drop(sender_fut.await) });
+                        let authenticated =
+                            authenticated.map(|c| DarnConnection::WebSocket(Box::new(c)));
+                        if let Err(e) = subduction.register(authenticated).await {
+                            info!(%e, peer = %peer.name, "Failed to register");
+                            continue;
+                        }
+                        connected += 1;
+                    }
+                    Err(e) => {
+                        info!(%e, peer = %peer.name, "Connection failed");
+                    }
+                }
+            }
+            #[cfg(feature = "iroh")]
+            PeerAddress::Iroh { .. } => {
+                info!(peer = %peer.name, "Skipping Iroh peer for doc edit");
+            }
+        }
+    }
+
+    Ok(connected)
+}
+
+/// Edit an Automerge document directly, without a workspace.
+///
+/// Connects to global peers, syncs the target sedimentree, loads the document,
+/// applies the edit operation, stores the changes, and syncs back.
+pub(crate) async fn doc_edit(
+    doc_url: &str,
+    op: darn_core::doc_edit::EditOp,
+    create: bool,
+    out: Output,
+) -> eyre::Result<()> {
+    use darn_core::{doc_edit::apply_edit, signer, subduction as sub};
+
+    out.intro("darn doc edit")?;
+
+    let sed_id_bytes = parse_automerge_url(doc_url)?;
+    let sed_id = SedimentreeId::new(sed_id_bytes);
+    let timeout = std::time::Duration::from_secs(30);
+
+    // Load global signer and storage, hydrate Subduction
+    let signer_dir = darn_core::config::global_signer_dir()?;
+    let signer = signer::load(&signer_dir)?;
+    let storage = sub::create_global_storage()?;
+
+    let spinner = out.spinner("Loading storage...");
+    let subduction = sub::hydrate(signer, storage).await?;
+    spinner.stop("Storage loaded");
+
+    // Connect to all global peers
+    let peers = darn_core::peer::list_peers()?;
+    if peers.is_empty() {
+        eyre::bail!("No peers configured. Use `darn peer add` first.");
+    }
+
+    let spinner = out.spinner("Connecting to peers...");
+    let connected = connect_global_peers(&subduction, &signer_dir, &peers, timeout).await?;
+    if connected == 0 {
+        spinner.stop("Failed to connect");
+        eyre::bail!("Could not connect to any peers");
+    }
+    spinner.stop(format!("Connected to {connected} peer(s)"));
+
+    // The path used for --create initialization
+    let create_path = match &op {
+        darn_core::doc_edit::EditOp::Append { path, .. }
+        | darn_core::doc_edit::EditOp::Clear { path } => path.clone(),
+    };
+
+
+    // Sync, load, edit, store, sync back
+    let spinner = out.spinner("Syncing document...");
+    let sync_result = subduction.sync_all(sed_id, true, Some(timeout)).await?;
+    let total_received: usize = sync_result
+        .values()
+        .filter(|(success, _, _)| *success)
+        .map(|(_, stats, _)| stats.total_received())
+        .sum();
+    spinner.stop(format!("Synced (received {total_received} items)"));
+
+    let spinner = out.spinner("Loading document...");
+    let mut doc = match sedimentree::load_document(&subduction, sed_id).await? {
+        Some(doc) => {
+            spinner.stop("Document loaded");
+            doc
+        }
+        None if create => {
+            spinner.stop("Document not found — creating");
+            let doc = darn_core::doc_edit::create_with_empty_list(&create_path)?;
+            out.success("Created new document")?;
+            doc
+        }
+        None => {
+            spinner.stop("Document not found");
+            eyre::bail!(
+                "document not found after sync: {doc_url}\n  hint: use --create to create it"
+            );
+        }
+    };
+
+    let changed = apply_edit(&mut doc, &op)?;
+
+    if !changed {
+        out.remark("No changes needed")?;
+        out.outro("Done")?;
+        return Ok(());
+    }
+
+    let op_description = match &op {
+        darn_core::doc_edit::EditOp::Append { path, values } => {
+            format!("Appended {} value(s) to {path}", values.len())
+        }
+        darn_core::doc_edit::EditOp::Clear { path } => format!("Cleared {path}"),
+    };
+    out.success(&op_description)?;
+
+    let spinner = out.spinner("Storing changes...");
+    sedimentree::store_document(&subduction, sed_id, &mut doc).await?;
+    spinner.stop("Changes stored");
+
+    let spinner = out.spinner("Syncing changes to peers...");
+    let sync_result = subduction.sync_all(sed_id, true, Some(timeout)).await?;
+    let total_sent: usize = sync_result
+        .values()
+        .filter(|(success, _, _)| *success)
+        .map(|(_, stats, _)| stats.total_sent())
+        .sum();
+    spinner.stop(format!("Synced (sent {total_sent} items)"));
+
+    if out.is_porcelain() {
+        out.kv("doc", doc_url)?;
+        out.kv("changed", "true")?;
+    }
+
+    out.outro("Done")?;
     Ok(())
 }
 

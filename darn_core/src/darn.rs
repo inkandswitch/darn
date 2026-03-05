@@ -41,7 +41,7 @@ use crate::{
         DarnSubduction, SubductionInitError,
     },
     sync_progress::{ApplyResult, SyncProgressEvent, SyncSummary},
-    workspace::{WorkspaceId, WorkspaceLayout, WorkspaceRegistry, registry::WorkspaceEntry},
+    workspace::{WorkspaceId, WorkspaceLayout},
 };
 use refresh_diff::RefreshDiff;
 
@@ -115,24 +115,6 @@ impl Darn {
         // Create .darn marker file with default ignore/attribute patterns
         let config = DarnConfig::create(&root, id, root_directory_id)?;
 
-        // Register in global registry
-        let mut registry = WorkspaceRegistry::load()?;
-        registry.register(
-            id,
-            WorkspaceEntry {
-                original_path: root.clone(),
-                name: root
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("workspace")
-                    .to_string(),
-                created_at: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_secs()),
-            },
-        );
-        registry.save()?;
-
         // Ensure global signer exists
         let signer_dir = config::global_signer_dir()?;
         let signer = signer::load_or_generate(&signer_dir)?;
@@ -189,24 +171,6 @@ impl Darn {
         // Create .darn marker file with default ignore/attribute patterns
         let config = DarnConfig::create(&root, id, root_directory_id)?;
 
-        // Register in global registry
-        let mut registry = WorkspaceRegistry::load()?;
-        registry.register(
-            id,
-            WorkspaceEntry {
-                original_path: root.clone(),
-                name: root
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("workspace")
-                    .to_string(),
-                created_at: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_secs()),
-            },
-        );
-        registry.save()?;
-
         // Ensure global signer exists
         let signer_dir = config::global_signer_dir()?;
         let signer = signer::load_or_generate(&signer_dir)?;
@@ -239,31 +203,6 @@ impl Darn {
         let root = Self::find_root(path)?;
         let config = DarnConfig::load(&root)?;
         let layout = WorkspaceLayout::new(config.id)?;
-
-        // Auto-heal registry if workspace was moved
-        if let Ok(mut registry) = WorkspaceRegistry::load() {
-            let needs_update = registry
-                .get(config.id)
-                .is_none_or(|entry| entry.original_path != root);
-
-            if needs_update {
-                registry.register(
-                    config.id,
-                    WorkspaceEntry {
-                        original_path: root.clone(),
-                        name: root
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("workspace")
-                            .to_string(),
-                        created_at: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map_or(0, |d| d.as_secs()),
-                    },
-                );
-                drop(registry.save());
-            }
-        }
 
         let signer = Self::load_signer_static()?;
         let storage = Self::storage_from_layout(&layout)?;

@@ -6,6 +6,8 @@
 
 use std::{io, path::Path};
 
+use getrandom::getrandom as fill_random;
+
 /// Write `data` to `path` atomically.
 ///
 /// Creates a temporary file in the same directory, writes the data, then
@@ -22,10 +24,12 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
 
-    // Unique temp name: include thread ID to avoid races in parallel tests
-    let tid = std::thread::current().id();
+    // Unique temp name: random suffix to avoid collisions across threads and processes
+    let mut nonce = [0u8; 8];
+    fill_random(&mut nonce).map_err(io::Error::other)?;
+    let nonce = u64::from_ne_bytes(nonce);
     let stem = path.file_name().and_then(|n| n.to_str()).unwrap_or("data");
-    let temp_name = format!("{stem}.{tid:?}.tmp");
+    let temp_name = format!("{stem}.{nonce:016x}.tmp");
     let temp_path = path.with_file_name(temp_name);
 
     // Write to temp file

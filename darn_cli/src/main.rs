@@ -89,6 +89,21 @@ async fn main() -> Result<()> {
             PeerCommands::List => commands::peer_list(out),
             PeerCommands::Remove { name } => commands::peer_remove(&name, out),
         },
+        Commands::Doc { command } => match command {
+            DocCommands::Edit {
+                doc_url,
+                create,
+                operation,
+            } => {
+                let op = match operation {
+                    DocEditOp::Append { path, values } => {
+                        darn_core::doc_edit::EditOp::Append { path, values }
+                    }
+                    DocEditOp::Clear { path } => darn_core::doc_edit::EditOp::Clear { path },
+                };
+                commands::doc_edit(&doc_url, op, create, out).await
+            }
+        },
     }
 }
 
@@ -96,6 +111,7 @@ async fn main() -> Result<()> {
 #[derive(Debug, Parser)]
 #[command(name = "darn")]
 #[command(version, about, long_about = None)]
+#[allow(clippy::struct_excessive_bools)]
 struct Cli {
     /// Enable verbose output
     #[arg(short, long, global = true)]
@@ -211,6 +227,12 @@ enum Commands {
         #[command(subcommand)]
         command: PeerCommands,
     },
+
+    /// Operate on Automerge documents directly
+    Doc {
+        #[command(subcommand)]
+        command: DocCommands,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -245,6 +267,45 @@ enum PeerCommands {
     Remove {
         /// Name of the peer to remove
         name: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DocCommands {
+    /// Edit an Automerge document by path
+    ///
+    /// Operates on any Automerge document stored in Subduction, without
+    /// requiring a workspace. Connects to global peers, syncs the target
+    /// document, applies the edit, and syncs back.
+    Edit {
+        /// Automerge URL of the document (e.g., `automerge:2u4x5b6JdSMDkyyMrQRzb8dreHhL`)
+        doc_url: String,
+
+        /// Create the document if it doesn't exist (initializes the target path as an empty list)
+        #[arg(long)]
+        create: bool,
+
+        #[command(subcommand)]
+        operation: DocEditOp,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DocEditOp {
+    /// Append values to a list (idempotent — skips duplicates)
+    Append {
+        /// Dot-separated path to the target list (e.g., `modules`)
+        path: String,
+
+        /// Values to append
+        #[arg(required = true, num_args = 1..)]
+        values: Vec<String>,
+    },
+
+    /// Remove all elements from a list
+    Clear {
+        /// Dot-separated path to the target list (e.g., `modules`)
+        path: String,
     },
 }
 

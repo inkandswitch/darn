@@ -45,6 +45,7 @@ tokio-util.workspace = true
 tokio.workspace = true
 tracing-subscriber.workspace = true
 tracing.workspace = true
+tungstenite.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true
