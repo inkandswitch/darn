@@ -41,7 +41,7 @@ use crate::{
         DarnSubduction, SubductionInitError,
     },
     sync_progress::{ApplyResult, SyncProgressEvent, SyncSummary},
-    workspace::{WorkspaceId, WorkspaceLayout, WorkspaceRegistry, registry::WorkspaceEntry},
+    workspace::{WorkspaceId, WorkspaceLayout},
 };
 use refresh_diff::RefreshDiff;
 
@@ -115,24 +115,6 @@ impl Darn {
         // Create .darn marker file with default ignore/attribute patterns
         let config = DarnConfig::create(&root, id, root_directory_id)?;
 
-        // Register in global registry
-        let mut registry = WorkspaceRegistry::load()?;
-        registry.register(
-            id,
-            WorkspaceEntry {
-                original_path: root.clone(),
-                name: root
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("workspace")
-                    .to_string(),
-                created_at: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_secs()),
-            },
-        );
-        registry.save()?;
-
         // Ensure global signer exists
         let signer_dir = config::global_signer_dir()?;
         let signer = signer::load_or_generate(&signer_dir)?;
@@ -189,24 +171,6 @@ impl Darn {
         // Create .darn marker file with default ignore/attribute patterns
         let config = DarnConfig::create(&root, id, root_directory_id)?;
 
-        // Register in global registry
-        let mut registry = WorkspaceRegistry::load()?;
-        registry.register(
-            id,
-            WorkspaceEntry {
-                original_path: root.clone(),
-                name: root
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("workspace")
-                    .to_string(),
-                created_at: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_secs()),
-            },
-        );
-        registry.save()?;
-
         // Ensure global signer exists
         let signer_dir = config::global_signer_dir()?;
         let signer = signer::load_or_generate(&signer_dir)?;
@@ -239,31 +203,6 @@ impl Darn {
         let root = Self::find_root(path)?;
         let config = DarnConfig::load(&root)?;
         let layout = WorkspaceLayout::new(config.id)?;
-
-        // Auto-heal registry if workspace was moved
-        if let Ok(mut registry) = WorkspaceRegistry::load() {
-            let needs_update = registry
-                .get(config.id)
-                .is_none_or(|entry| entry.original_path != root);
-
-            if needs_update {
-                registry.register(
-                    config.id,
-                    WorkspaceEntry {
-                        original_path: root.clone(),
-                        name: root
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("workspace")
-                            .to_string(),
-                        created_at: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map_or(0, |d| d.as_secs()),
-                    },
-                );
-                drop(registry.save());
-            }
-        }
 
         let signer = Self::load_signer_static()?;
         let storage = Self::storage_from_layout(&layout)?;
@@ -711,11 +650,7 @@ impl Darn {
                 }
             };
 
-            let file_type = if file.content.is_text() {
-                FileType::Text
-            } else {
-                FileType::Binary
-            };
+            let file_type = FileType::from(&file.content);
 
             if let Err(e) = staged.stage_write(
                 &file,
@@ -865,11 +800,7 @@ impl Darn {
                         }
                     };
 
-                    let file_type = if file.content.is_text() {
-                        FileType::Text
-                    } else {
-                        FileType::Binary
-                    };
+                    let file_type = FileType::from(&file.content);
 
                     let sed_digest =
                         match sedimentree::compute_digest(&self.subduction, entry.sedimentree_id)
@@ -1152,6 +1083,7 @@ impl Darn {
         &self,
         paths: Vec<PathBuf>,
         manifest: &mut Manifest,
+        force_immutable: bool,
         on_progress: F,
         cancel: &CancellationToken,
     ) -> Result<DiscoverResult, DiscoverError>
@@ -1163,6 +1095,7 @@ impl Darn {
             &self.root,
             &self.subduction,
             manifest,
+            force_immutable,
             on_progress,
             cancel,
         )
@@ -1583,6 +1516,19 @@ impl InitializedDarn {
     #[must_use]
     pub fn manifest_path(&self) -> PathBuf {
         self.layout.manifest_path()
+    }
+
+    /// Set `force_immutable` in the `.darn` config and save it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the config file cannot be written.
+    pub fn set_force_immutable(
+        &mut self,
+        force_immutable: bool,
+    ) -> Result<(), crate::dotfile::DotfileError> {
+        self.config.force_immutable = force_immutable;
+        self.config.save(&self.root)
     }
 
     /// Get the peer ID from the global signer.

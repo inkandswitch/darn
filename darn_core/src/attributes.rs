@@ -1,7 +1,7 @@
 //! File attributes for `darn` workspaces.
 //!
-//! Determines whether files should be treated as text (character-level CRDT)
-//! or binary (last-writer-wins) based on patterns in the `.darn` config file.
+//! Determines how files are stored in Automerge based on patterns in the
+//! `.darn` config file.
 //!
 //! # `.darn` Config Example
 //!
@@ -9,14 +9,16 @@
 //! {
 //!   "attributes": {
 //!     "binary": ["*.lock", "*.min.js", "*.map"],
+//!     "immutable": ["dist/**"],
 //!     "text": ["*.md"]
 //!   }
 //! }
 //! ```
 //!
-//! Supported classifications:
+//! Supported classifications (checked in this priority order):
+//! - `immutable` — LWW string, no character merging (Automerge `ScalarValue::Str`)
 //! - `text` — Character-level CRDT merging (Automerge `Text`)
-//! - `binary` — Last-writer-wins (Automerge `Bytes`)
+//! - `binary` — Last-writer-wins binary (Automerge `Bytes`)
 
 use std::path::Path;
 
@@ -50,10 +52,13 @@ const DEFAULT_BINARY_PATTERNS: &[&str] = &[
 ];
 
 /// Attribute matcher for a workspace.
+#[allow(clippy::struct_field_names)]
 #[derive(Debug, Clone)]
 pub struct AttributeRules {
     /// Glob set for binary patterns.
     binary_globs: GlobSet,
+    /// Glob set for immutable text patterns.
+    immutable_globs: GlobSet,
     /// Glob set for text patterns.
     text_globs: GlobSet,
 }
@@ -66,6 +71,7 @@ impl AttributeRules {
     /// Returns an error if the attribute patterns cannot be compiled.
     pub fn from_config(_root: &Path, config: &DarnConfig) -> Result<Self, AttributeError> {
         let mut binary_builder = GlobSetBuilder::new();
+        let mut immutable_builder = GlobSetBuilder::new();
         let mut text_builder = GlobSetBuilder::new();
 
         // Add default binary patterns
@@ -78,6 +84,11 @@ impl AttributeRules {
             binary_builder.add(Glob::new(pattern)?);
         }
 
+        // Add user-configured immutable patterns from .darn
+        for pattern in &config.attributes.immutable {
+            immutable_builder.add(Glob::new(pattern)?);
+        }
+
         // Add user-configured text patterns from .darn
         for pattern in &config.attributes.text {
             text_builder.add(Glob::new(pattern)?);
@@ -85,6 +96,7 @@ impl AttributeRules {
 
         Ok(Self {
             binary_globs: binary_builder.build()?,
+            immutable_globs: immutable_builder.build()?,
             text_globs: text_builder.build()?,
         })
     }
@@ -107,12 +119,17 @@ impl AttributeRules {
     /// Get the attribute for a file path.
     ///
     /// Returns `Some(FileType)` if an explicit rule matches, `None` for auto-detect.
-    /// Text patterns take precedence over binary (user overrides win).
+    /// Priority: immutable > text > binary (most specific user override wins).
     #[must_use]
     pub fn get_attribute(&self, path: &Path) -> Option<FileType> {
         let path_str = path.to_string_lossy();
 
-        // Check text patterns first (user overrides)
+        // Check immutable patterns first (highest user priority)
+        if self.immutable_globs.is_match(path_str.as_ref()) {
+            return Some(FileType::Immutable);
+        }
+
+        // Check text patterns (user overrides)
         if self.text_globs.is_match(path_str.as_ref()) {
             return Some(FileType::Text);
         }
@@ -150,6 +167,7 @@ impl Default for AttributeRules {
 
         Self {
             binary_globs: binary_builder.build().unwrap_or_else(|_| GlobSet::empty()),
+            immutable_globs: GlobSet::empty(),
             text_globs: GlobSet::empty(),
         }
     }

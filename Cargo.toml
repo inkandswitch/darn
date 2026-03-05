@@ -17,7 +17,7 @@ rust-version = "1.90"
 
 [workspace.dependencies]
 # Local crates
-darn_core = { version = "0.4.0", path = "darn_core", default-features = false }
+darn_core = { version = "0.5.0", path = "darn_core", default-features = false }
 
 assert_cmd = "2.0"
 automerge = "0.7.3"
@@ -27,7 +27,7 @@ color-eyre = "0.6"
 eyre = "0.6"
 bs58 = { version = "0.5", features = ["check"] }
 clap = { version = "4.0", features = ["derive"] }
-cliclack = "0.3"
+cliclack = "0.4"
 console = "0.16"
 dirs = "6.0"
 future_form = "0.3"

@@ -483,7 +483,7 @@ async fn ingest_and_track_files() -> TestResult {
 
         let cancel = tokio_util::sync::CancellationToken::new();
         let result = darn
-            .ingest_files(paths, &mut manifest, |_| {}, &cancel)
+            .ingest_files(paths, &mut manifest, false, |_| {}, &cancel)
             .await?;
         assert_eq!(result.new_files.len(), 2);
         assert!(result.errors.is_empty());
@@ -527,7 +527,7 @@ async fn ingest_skips_ignored_via_scan() -> TestResult {
 
         let cancel = tokio_util::sync::CancellationToken::new();
         let result = darn
-            .ingest_files(paths, &mut manifest, |_| {}, &cancel)
+            .ingest_files(paths, &mut manifest, false, |_| {}, &cancel)
             .await?;
         assert_eq!(result.new_files.len(), 1);
 
@@ -554,7 +554,7 @@ async fn refresh_detects_modified_file() -> TestResult {
         std::fs::write(env.workspace().join("file.txt"), "original")?;
         let paths = darn.scan_new_files(&manifest)?;
         let cancel = tokio_util::sync::CancellationToken::new();
-        darn.ingest_files(paths, &mut manifest, |_| {}, &cancel)
+        darn.ingest_files(paths, &mut manifest, false, |_| {}, &cancel)
             .await?;
 
         let entry = manifest
@@ -596,7 +596,7 @@ async fn refresh_detects_missing_file() -> TestResult {
         std::fs::write(env.workspace().join("doomed.txt"), "bye")?;
         let paths = darn.scan_new_files(&manifest)?;
         let cancel = tokio_util::sync::CancellationToken::new();
-        darn.ingest_files(paths, &mut manifest, |_| {}, &cancel)
+        darn.ingest_files(paths, &mut manifest, false, |_| {}, &cancel)
             .await?;
 
         std::fs::remove_file(env.workspace().join("doomed.txt"))?;
@@ -685,7 +685,7 @@ async fn staged_update_handles_mixed_creates_and_deletes() -> TestResult {
         std::fs::write(env.workspace().join("old.txt"), "old content")?;
         let paths = darn.scan_new_files(&manifest)?;
         let cancel = tokio_util::sync::CancellationToken::new();
-        darn.ingest_files(paths, &mut manifest, |_| {}, &cancel)
+        darn.ingest_files(paths, &mut manifest, false, |_| {}, &cancel)
             .await?;
 
         let old_entry = manifest
@@ -792,7 +792,7 @@ async fn full_local_workflow() -> TestResult {
         // 5. Ingest discovered files
         let cancel = tokio_util::sync::CancellationToken::new();
         let result = darn
-            .ingest_files(paths, &mut manifest, |_| {}, &cancel)
+            .ingest_files(paths, &mut manifest, false, |_| {}, &cancel)
             .await?;
         assert_eq!(result.new_files.len(), 2);
         assert!(result.errors.is_empty());

@@ -158,8 +158,13 @@ mod tests {
     fn create_test_config(root: &Path, ignore: Vec<String>) {
         let id = WorkspaceId::from_bytes([1; 16]);
         let sed_id = SedimentreeId::new([2; 32]);
-        let config =
-            DarnConfig::with_fields(id, sed_id, ignore, crate::dotfile::AttributeMap::default());
+        let config = DarnConfig::with_fields(
+            id,
+            sed_id,
+            false,
+            ignore,
+            crate::dotfile::AttributeMap::default(),
+        );
         config.save(root).expect("save test config");
     }
 

@@ -221,6 +221,7 @@ async fn store_single_file(
     root: &Path,
     subduction: &DarnSubduction,
     attributes: &AttributeRules,
+    force_immutable: bool,
 ) -> Result<StoredFile, FileProcessError> {
     let relative_path = path
         .strip_prefix(root)
@@ -232,14 +233,11 @@ async fn store_single_file(
     let path_owned = path.to_path_buf();
     let attributes_default = attributes.clone();
     let (file_type, am_doc) = tokio::task::spawn_blocking(move || {
-        let doc = File::from_path_with_attributes(&path_owned, Some(&attributes_default))
-            .map_err(FileProcessError::Read)?;
+        let doc =
+            File::from_path_full(&path_owned, Some(&attributes_default), force_immutable)
+                .map_err(FileProcessError::Read)?;
 
-        let file_type = if doc.content.is_text() {
-            FileType::Text
-        } else {
-            FileType::Binary
-        };
+        let file_type = FileType::from(&doc.content);
 
         let am_doc = doc.into_automerge().map_err(FileProcessError::Automerge)?;
         Ok::<_, FileProcessError>((file_type, am_doc))
@@ -382,6 +380,7 @@ pub(crate) async fn ingest_files_parallel<F>(
     root: &Path,
     subduction: &DarnSubduction,
     manifest: &Manifest,
+    force_immutable: bool,
     on_progress: F,
     cancel: &CancellationToken,
 ) -> (Vec<DiscoveredFile>, Vec<(PathBuf, String)>, bool)
@@ -427,7 +426,8 @@ where
 
                 in_flight.fetch_add(1, Ordering::Relaxed);
 
-                let result = store_single_file(&path, root, subduction, attributes).await;
+                let result =
+                    store_single_file(&path, root, subduction, attributes, force_immutable).await;
 
                 in_flight.fetch_sub(1, Ordering::Relaxed);
                 completed.fetch_add(1, Ordering::Relaxed);
