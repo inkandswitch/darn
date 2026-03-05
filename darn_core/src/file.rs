@@ -737,6 +737,7 @@ mod tests {
             Vec::new(),
             AttributeMap {
                 binary: Vec::new(),
+                immutable: Vec::new(),
                 text: vec!["*.txt".to_string()],
             },
         );

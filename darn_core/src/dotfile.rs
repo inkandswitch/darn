@@ -13,6 +13,7 @@
 //!   "ignore": [".git/", "*.log"],
 //!   "attributes": {
 //!     "binary": ["*.lock", "*.min.js"],
+//!     "immutable": ["dist/**"],
 //!     "text": ["*.md"]
 //!   }
 //! }
@@ -97,16 +98,20 @@ pub struct AttributeMap {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub binary: Vec<String>,
 
+    /// Patterns for immutable text (LWW string, no character merging) files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub immutable: Vec<String>,
+
     /// Patterns for text (character-level CRDT) files.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub text: Vec<String>,
 }
 
 impl AttributeMap {
-    /// Returns `true` if both lists are empty.
+    /// Returns `true` if all lists are empty.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        self.binary.is_empty() && self.text.is_empty()
+        self.binary.is_empty() && self.immutable.is_empty() && self.text.is_empty()
     }
 }
 
@@ -219,6 +224,7 @@ fn default_ignore_patterns() -> Vec<String> {
 fn default_attribute_map() -> AttributeMap {
     AttributeMap {
         binary: DEFAULT_BINARY.iter().map(|s| (*s).to_string()).collect(),
+        immutable: Vec::new(),
         text: Vec::new(),
     }
 }
