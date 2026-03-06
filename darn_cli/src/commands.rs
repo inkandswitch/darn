@@ -17,6 +17,7 @@ use std::{
 
 use console::Style;
 use darn_core::{
+    attributes::AttributeRules,
     darn::Darn,
     directory::{Directory, entry::EntryType, sedimentree_id_to_url},
     discover::{DiscoverProgress, DiscoverResult},
@@ -122,12 +123,18 @@ pub(crate) async fn init(
     path: &Path,
     peer_url: Option<&str>,
     peer_name_override: Option<&str>,
+    force_immutable: bool,
     out: Output,
 ) -> eyre::Result<()> {
     out.intro("darn init")?;
 
     // Initialize workspace structure
-    let initialized = Darn::init(path)?;
+    let mut initialized = Darn::init(path)?;
+
+    // Set force_immutable in the .darn config if requested
+    if force_immutable {
+        initialized.set_force_immutable(true)?;
+    }
     let root = initialized.root().to_path_buf();
 
     out.success(&format!("Initialized workspace at {}", root.display()))?;
@@ -422,11 +429,7 @@ pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path, out: Output) -> ey
             }
         };
 
-        let file_type = if file.content.is_text() {
-            FileType::Text
-        } else {
-            FileType::Binary
-        };
+        let file_type = FileType::from(&file.content);
 
         let sed_digest =
             sedimentree::compute_digest(darn.subduction(), entry.sedimentree_id).await?;
@@ -652,7 +655,10 @@ pub(crate) fn tree(out: Output) -> eyre::Result<()> {
                 FileState::Missing => "missing",
             };
             let url = sedimentree_id_to_url(entry.sedimentree_id);
-            println!("{state_str}\t{}\t{url}", entry.relative_path.display());
+            out.detail_porcelain(&format!(
+                "{state_str}\t{}\t{url}",
+                entry.relative_path.display()
+            ));
         }
         return Ok(());
     }
@@ -773,6 +779,7 @@ pub(crate) async fn stat(target: &str, out: Output) -> eyre::Result<()> {
     let file_type_str = match tracked.file_type {
         FileType::Text => "text",
         FileType::Binary => "binary",
+        FileType::Immutable => "immutable",
     };
 
     let sed_id_str = sedimentree_id_to_url(sed_id);
@@ -780,14 +787,14 @@ pub(crate) async fn stat(target: &str, out: Output) -> eyre::Result<()> {
     let sed_digest = bs58::encode(tracked.sedimentree_digest.as_bytes()).into_string();
 
     if out.is_porcelain() {
-        println!("path\t{}", tracked.relative_path.display());
-        println!("sedimentree\t{sed_id_str}");
-        println!("state\t{state_str}");
-        println!("type\t{file_type_str}");
-        println!("commits\t{}", commits.len());
-        println!("fragments\t{}", fragments.len());
-        println!("digest_fs\t{fs_digest}");
-        println!("digest_sed\t{sed_digest}");
+        out.detail_porcelain(&format!("path\t{}", tracked.relative_path.display()));
+        out.detail_porcelain(&format!("sedimentree\t{sed_id_str}"));
+        out.detail_porcelain(&format!("state\t{state_str}"));
+        out.detail_porcelain(&format!("type\t{file_type_str}"));
+        out.detail_porcelain(&format!("commits\t{}", commits.len()));
+        out.detail_porcelain(&format!("fragments\t{}", fragments.len()));
+        out.detail_porcelain(&format!("digest_fs\t{fs_digest}"));
+        out.detail_porcelain(&format!("digest_sed\t{sed_digest}"));
         return Ok(());
     }
 
@@ -873,12 +880,13 @@ pub(crate) async fn sync_cmd(
     peer_name: Option<&str>,
     dry_run: bool,
     force: bool,
+    force_immutable: bool,
     out: Output,
 ) -> eyre::Result<()> {
-    info!(?peer_name, dry_run, force, "Syncing");
+    info!(?peer_name, dry_run, force, force_immutable, "Syncing");
 
-    // Porcelain mode implies --force (no interactive prompts)
-    let force = force || out.is_porcelain();
+    // Non-interactive modes imply --force (no interactive prompts)
+    let force = force || out.is_non_interactive();
 
     if dry_run {
         return sync_dry_run(peer_name, out);
@@ -891,8 +899,13 @@ pub(crate) async fn sync_cmd(
     let mut manifest = darn.load_manifest()?;
     spinner.stop("Workspace loaded");
 
+    // Merge persistent config + CLI flag
+    let force_immutable = force_immutable || darn.config().force_immutable;
+
     // Phase 1: Discover and optionally ingest new files
-    if let Err(early) = sync_discover_files(&darn, &mut manifest, force, &out).await {
+    if let Err(early) =
+        sync_discover_files(&darn, &mut manifest, force, force_immutable, &out).await
+    {
         // scan_new_files failed — continue straight to sync
         out.warning(&format!("File scan error: {early}"))?;
     }
@@ -908,6 +921,7 @@ async fn sync_discover_files(
     darn: &Darn,
     manifest: &mut Manifest,
     force: bool,
+    force_immutable: bool,
     out: &Output,
 ) -> Result<(), String> {
     let spinner = out.spinner("Scanning for new files...");
@@ -947,7 +961,7 @@ async fn sync_discover_files(
     let should_track = force || out.confirm("Track these files?", true).unwrap_or(false);
 
     if should_track {
-        sync_ingest_files(darn, manifest, candidates, out)
+        sync_ingest_files(darn, manifest, candidates, force_immutable, out)
             .await
             .map_err(|e| e.to_string())?;
     } else {
@@ -963,6 +977,7 @@ async fn sync_ingest_files(
     darn: &Darn,
     manifest: &mut Manifest,
     candidates: Vec<PathBuf>,
+    force_immutable: bool,
     out: &Output,
 ) -> eyre::Result<()> {
     let total_files = candidates.len();
@@ -994,7 +1009,13 @@ async fn sync_ingest_files(
     };
 
     let result = darn
-        .ingest_files(candidates, manifest, progress_callback, &cancel_token)
+        .ingest_files(
+            candidates,
+            manifest,
+            force_immutable,
+            progress_callback,
+            &cancel_token,
+        )
         .await;
 
     match result {
@@ -1124,13 +1145,13 @@ async fn continue_sync(
                 if summary.any_success() {
                     sync_success = true;
                     if out.is_porcelain() {
-                        println!(
+                        out.detail_porcelain(&format!(
                             "synced\t{}\t{}\t{}\t{}",
                             peer.name,
                             summary.sedimentrees_synced,
                             summary.total_received(),
                             summary.total_sent()
-                        );
+                        ));
                     } else {
                         let green = Style::new().green();
                         let file_count = manifest.len();
@@ -1147,7 +1168,10 @@ async fn continue_sync(
                         peer.set_known(learned_peer_id);
                         let id_str = bs58::encode(learned_peer_id.as_bytes()).into_string();
                         if out.is_porcelain() {
-                            println!("learned_peer_id\t{}\t{id_str}", peer.name);
+                            out.detail_porcelain(&format!(
+                                "learned_peer_id\t{}\t{id_str}",
+                                peer.name
+                            ));
                         } else {
                             out.info(&format!(
                                 "Learned peer ID for {}: {}",
@@ -1170,7 +1194,7 @@ async fn continue_sync(
             }
             Err(e) => {
                 if out.is_porcelain() {
-                    println!("error\t{}\t{e}", peer.name);
+                    out.detail_porcelain(&format!("error\t{}\t{e}", peer.name));
                 } else {
                     let red = Style::new().red();
                     out.error(&format!("{} {e}", red.apply_to(&peer.name)))?;
@@ -1189,19 +1213,19 @@ async fn continue_sync(
         // Report results
         if out.is_porcelain() {
             for path in &apply_result.updated {
-                println!("updated\t{}", path.display());
+                out.detail_porcelain(&format!("updated\t{}", path.display()));
             }
             for path in &apply_result.merged {
-                println!("merged\t{}", path.display());
+                out.detail_porcelain(&format!("merged\t{}", path.display()));
             }
             for path in &apply_result.created {
-                println!("created\t{}", path.display());
+                out.detail_porcelain(&format!("created\t{}", path.display()));
             }
             for path in &apply_result.deleted {
-                println!("deleted\t{}", path.display());
+                out.detail_porcelain(&format!("deleted\t{}", path.display()));
             }
             for (path, err) in &apply_result.errors {
-                println!("error\t{}\t{err}", path.display());
+                out.detail_porcelain(&format!("error\t{}\t{err}", path.display()));
             }
         } else {
             if !apply_result.updated.is_empty() {
@@ -1250,9 +1274,11 @@ async fn continue_sync(
         }
 
         darn.save_manifest(&manifest)?;
-        out.outro("Sync complete")?;
+        out.summary("Sync complete")?;
+        out.outro("")?;
     } else {
-        out.outro("Sync failed")?;
+        out.summary("Sync failed")?;
+        out.outro("")?;
     }
 
     Ok(())
@@ -1272,6 +1298,7 @@ async fn sync_peer_with_progress(
     let current_ref = &current;
     let total_ref = &total;
     let is_porcelain = out.is_porcelain();
+    let is_silent = out.is_silent();
 
     let summary = darn
         .sync_with_peer_progress(peer, manifest, |event| {
@@ -1294,12 +1321,12 @@ async fn sync_peer_with_progress(
                     ..
                 } => {
                     let display_index = index + 1;
-                    if is_porcelain {
+                    if is_porcelain && !is_silent {
                         let path_str = file_path
                             .as_ref()
                             .map_or("root_directory".to_string(), |p| p.display().to_string());
                         println!("syncing\t{display_index}\t{total}\t{path_str}");
-                    } else {
+                    } else if !is_porcelain {
                         let msg = match &file_path {
                             Some(path) => format!("[{display_index}/{total}] {}", path.display()),
                             None => format!("[{display_index}/{total}] root directory"),
@@ -1352,10 +1379,10 @@ fn sync_dry_run(peer_name: Option<&str>, out: Output) -> eyre::Result<()> {
 
     if out.is_porcelain() {
         for path in &modified {
-            println!("modified\t{}", path.display());
+            out.detail_porcelain(&format!("modified\t{}", path.display()));
         }
         for path in &missing {
-            println!("missing\t{}", path.display());
+            out.detail_porcelain(&format!("missing\t{}", path.display()));
         }
     } else if !modified.is_empty() || !missing.is_empty() {
         #[allow(clippy::expect_used)] // Writing to String is infallible
@@ -1438,14 +1465,14 @@ fn display_peer_dry_run_status(
     }
 
     if out.is_porcelain() {
-        println!(
+        out.detail_porcelain(&format!(
             "peer\t{}\t{}\t{peer_id_display}\t{last_sync}\t{}",
             peer.name,
             peer.address,
             unsynced.len()
-        );
+        ));
         for path in &unsynced {
-            println!("unsynced\t{}\t{}", peer.name, path.display());
+            out.detail_porcelain(&format!("unsynced\t{}\t{}", peer.name, path.display()));
         }
     } else {
         // Build peer status content
@@ -1526,6 +1553,7 @@ fn format_timestamp(ts: darn_core::unix_timestamp::UnixTimestamp) -> String {
 pub(crate) async fn watch(
     sync_interval: &std::time::Duration,
     no_track: bool,
+    force_immutable: bool,
     out: Output,
 ) -> eyre::Result<()> {
     out.intro("darn watch")?;
@@ -1535,6 +1563,9 @@ pub(crate) async fn watch(
     let root = darn.root().to_path_buf();
     let mut manifest = darn.load_manifest()?;
     spinner.stop("Workspace loaded");
+
+    // Merge persistent config + CLI flag
+    let force_immutable = force_immutable || darn.config().force_immutable;
 
     info!(root = %root.display(), ?sync_interval, no_track, "Starting watch");
     out.info(&format!("Watching {}", root.display()))?;
@@ -1590,7 +1621,7 @@ pub(crate) async fn watch(
     };
 
     out.remark("Press Ctrl+C to stop")?;
-    if !out.is_porcelain() {
+    if !out.is_non_interactive() {
         println!(); // Blank line before events
     }
 
@@ -1667,7 +1698,7 @@ pub(crate) async fn watch(
 
         last_sync = std::time::Instant::now();
         last_push_check = std::time::Instant::now();
-        if !out.is_porcelain() {
+        if !out.is_non_interactive() {
             println!();
         }
     }
@@ -1678,6 +1709,7 @@ pub(crate) async fn watch(
     let red = Style::new().red();
     let dim = Style::new().dim();
     let is_porcelain = out.is_porcelain();
+    let is_quiet = out.is_quiet();
 
     // Event loop
     loop {
@@ -1689,44 +1721,52 @@ pub(crate) async fn watch(
             event = rx.recv() => {
                 match event {
                     Some(WatchEvent::FileModified(path)) => {
-                        if processor.process(WatchEvent::FileModified(path.clone())) {
+                        if processor.process(WatchEvent::FileModified(path.clone()))
+                            && !is_quiet
+                        {
                             if is_porcelain {
                                 let kind = if manifest.get_by_path(&path).is_none() { "created" } else { "modified" };
-                                println!("{kind}\t{}", path.display());
+                                out.detail_porcelain(&format!("{kind}\t{}", path.display()));
                             } else {
                                 let is_new = manifest.get_by_path(&path).is_none();
                                 if is_new {
-                                    println!("  {} {}", green.apply_to("+"), path.display());
+                                    out.detail(&format!("  {} {}", green.apply_to("+"), path.display()));
                                 } else {
-                                    println!("  {} {}", yellow.apply_to("M"), path.display());
+                                    out.detail(&format!("  {} {}", yellow.apply_to("M"), path.display()));
                                 }
                             }
                         }
                     }
                     Some(WatchEvent::FileDeleted(path)) => {
-                        if processor.process(WatchEvent::FileDeleted(path.clone())) {
+                        if processor.process(WatchEvent::FileDeleted(path.clone()))
+                            && !is_quiet
+                        {
                             if is_porcelain {
-                                println!("deleted\t{}", path.display());
+                                out.detail_porcelain(&format!("deleted\t{}", path.display()));
                             } else {
-                                println!("  {} {}", red.apply_to("-"), path.display());
+                                out.detail(&format!("  {} {}", red.apply_to("-"), path.display()));
                             }
                         }
                     }
                     Some(WatchEvent::FileCreated(path)) => {
-                        if processor.process(WatchEvent::FileCreated(path.clone())) {
+                        if processor.process(WatchEvent::FileCreated(path.clone()))
+                            && !is_quiet
+                        {
                             if is_porcelain {
-                                println!("created\t{}", path.display());
+                                out.detail_porcelain(&format!("created\t{}", path.display()));
                             } else {
-                                println!("  {} {}", green.apply_to("+"), path.display());
+                                out.detail(&format!("  {} {}", green.apply_to("+"), path.display()));
                             }
                         }
                     }
                     Some(WatchEvent::FileRenamed { from, to }) => {
-                        if processor.process(WatchEvent::FileRenamed { from: from.clone(), to: to.clone() }) {
+                        if processor.process(WatchEvent::FileRenamed { from: from.clone(), to: to.clone() })
+                            && !is_quiet
+                        {
                             if is_porcelain {
-                                println!("renamed\t{}\t{}", from.display(), to.display());
+                                out.detail_porcelain(&format!("renamed\t{}\t{}", from.display(), to.display()));
                             } else {
-                                println!("  {} {} -> {}", dim.apply_to("R"), from.display(), to.display());
+                                out.detail(&format!("  {} {} -> {}", dim.apply_to("R"), from.display(), to.display()));
                             }
                         }
                     }
@@ -1745,7 +1785,7 @@ pub(crate) async fn watch(
 
             // Check for Ctrl+C
             _ = tokio::signal::ctrl_c() => {
-                if !is_porcelain {
+                if !is_quiet && !is_porcelain {
                     println!();
                 }
                 out.info("Stopping...")?;
@@ -1761,7 +1801,9 @@ pub(crate) async fn watch(
                     // Track new files
                     if !batch.created.is_empty() && !no_track {
                         for path in &batch.created {
-                            match track_single_file(&darn, &mut manifest, path).await {
+                            match track_single_file(&darn, &mut manifest, path, force_immutable)
+                                .await
+                            {
                                 Ok(()) => {
                                     info!(path = %path.display(), "Auto-tracked file");
                                 }
@@ -1817,7 +1859,7 @@ pub(crate) async fn watch(
                 );
 
                 if should_sync {
-                        if !is_porcelain {
+                        if !is_quiet && !is_porcelain {
                             println!();
                         }
                         let spinner = out.spinner("Syncing with peers...");
@@ -1858,59 +1900,67 @@ pub(crate) async fn watch(
                             darn.save_manifest(&manifest)?;
                             processor.update_tracked_paths(&manifest);
 
-                            let mut summary = String::new();
+                            let mut sync_summary = String::new();
                             if !apply_result.updated.is_empty() {
-                                summary.push_str(&format!("{} updated, ", apply_result.updated.len()));
-                                for path in &apply_result.updated {
-                                    if is_porcelain {
-                                        println!("updated\t{}", path.display());
-                                    } else {
-                                        println!("  {} {}", yellow.apply_to("U"), path.display());
+                                sync_summary.push_str(&format!("{} updated, ", apply_result.updated.len()));
+                                if !is_quiet {
+                                    for path in &apply_result.updated {
+                                        if is_porcelain {
+                                            out.detail_porcelain(&format!("updated\t{}", path.display()));
+                                        } else {
+                                            out.detail(&format!("  {} {}", yellow.apply_to("U"), path.display()));
+                                        }
                                     }
                                 }
                             }
                             if !apply_result.merged.is_empty() {
-                                summary.push_str(&format!("{} merged, ", apply_result.merged.len()));
-                                for path in &apply_result.merged {
-                                    if is_porcelain {
-                                        println!("merged\t{}", path.display());
-                                    } else {
-                                        println!("  {} {}", yellow.apply_to("M"), path.display());
+                                sync_summary.push_str(&format!("{} merged, ", apply_result.merged.len()));
+                                if !is_quiet {
+                                    for path in &apply_result.merged {
+                                        if is_porcelain {
+                                            out.detail_porcelain(&format!("merged\t{}", path.display()));
+                                        } else {
+                                            out.detail(&format!("  {} {}", yellow.apply_to("M"), path.display()));
+                                        }
                                     }
                                 }
                             }
                             if !apply_result.created.is_empty() {
-                                summary.push_str(&format!("{} new, ", apply_result.created.len()));
-                                for path in &apply_result.created {
-                                    if is_porcelain {
-                                        println!("created\t{}", path.display());
-                                    } else {
-                                        println!("  {} {}", green.apply_to("+"), path.display());
+                                sync_summary.push_str(&format!("{} new, ", apply_result.created.len()));
+                                if !is_quiet {
+                                    for path in &apply_result.created {
+                                        if is_porcelain {
+                                            out.detail_porcelain(&format!("created\t{}", path.display()));
+                                        } else {
+                                            out.detail(&format!("  {} {}", green.apply_to("+"), path.display()));
+                                        }
                                     }
                                 }
                             }
                             if !apply_result.deleted.is_empty() {
-                                summary.push_str(&format!("{} deleted, ", apply_result.deleted.len()));
-                                for path in &apply_result.deleted {
-                                    if is_porcelain {
-                                        println!("deleted\t{}", path.display());
-                                    } else {
-                                        println!("  {} {}", red.apply_to("-"), path.display());
+                                sync_summary.push_str(&format!("{} deleted, ", apply_result.deleted.len()));
+                                if !is_quiet {
+                                    for path in &apply_result.deleted {
+                                        if is_porcelain {
+                                            out.detail_porcelain(&format!("deleted\t{}", path.display()));
+                                        } else {
+                                            out.detail(&format!("  {} {}", red.apply_to("-"), path.display()));
+                                        }
                                     }
                                 }
                             }
-                            if summary.is_empty() {
+                            if sync_summary.is_empty() {
                                 match (any_received, any_sent) {
-                                    (true, true) => summary = "synced".to_string(),
-                                    (true, false) => summary = "received updates".to_string(),
-                                    (false, true) => summary = "sent updates".to_string(),
-                                    (false, false) => summary = "no changes".to_string(),
+                                    (true, true) => sync_summary = "synced".to_string(),
+                                    (true, false) => sync_summary = "received updates".to_string(),
+                                    (false, true) => sync_summary = "sent updates".to_string(),
+                                    (false, false) => sync_summary = "no changes".to_string(),
                                 }
                             } else {
-                                summary = summary.trim_end_matches(", ").to_string();
+                                sync_summary = sync_summary.trim_end_matches(", ").to_string();
                             }
 
-                            spinner.stop(format!("Synced ({summary})"));
+                            spinner.stop(format!("Synced ({sync_summary})"));
                         } else {
                             spinner.stop("Sync complete");
                         }
@@ -1918,7 +1968,7 @@ pub(crate) async fn watch(
                         last_sync = std::time::Instant::now();
                         last_push_check = std::time::Instant::now();
                         has_local_changes = false;
-                        if !is_porcelain {
+                        if !is_quiet && !is_porcelain {
                             println!();
                         }
                 }
@@ -1936,32 +1986,34 @@ pub(crate) async fn watch(
                         darn.save_manifest(&manifest)?;
                         processor.update_tracked_paths(&manifest);
 
-                        for path in &apply_result.updated {
-                            if is_porcelain {
-                                println!("updated\t{}", path.display());
-                            } else {
-                                println!("  {} {}", yellow.apply_to("U"), path.display());
+                        if !is_quiet {
+                            for path in &apply_result.updated {
+                                if is_porcelain {
+                                    out.detail_porcelain(&format!("updated\t{}", path.display()));
+                                } else {
+                                    out.detail(&format!("  {} {}", yellow.apply_to("U"), path.display()));
+                                }
                             }
-                        }
-                        for path in &apply_result.merged {
-                            if is_porcelain {
-                                println!("merged\t{}", path.display());
-                            } else {
-                                println!("  {} {}", yellow.apply_to("M"), path.display());
+                            for path in &apply_result.merged {
+                                if is_porcelain {
+                                    out.detail_porcelain(&format!("merged\t{}", path.display()));
+                                } else {
+                                    out.detail(&format!("  {} {}", yellow.apply_to("M"), path.display()));
+                                }
                             }
-                        }
-                        for path in &apply_result.created {
-                            if is_porcelain {
-                                println!("created\t{}", path.display());
-                            } else {
-                                println!("  {} {}", green.apply_to("+"), path.display());
+                            for path in &apply_result.created {
+                                if is_porcelain {
+                                    out.detail_porcelain(&format!("created\t{}", path.display()));
+                                } else {
+                                    out.detail(&format!("  {} {}", green.apply_to("+"), path.display()));
+                                }
                             }
-                        }
-                        for path in &apply_result.deleted {
-                            if is_porcelain {
-                                println!("deleted\t{}", path.display());
-                            } else {
-                                println!("  {} {}", red.apply_to("-"), path.display());
+                            for path in &apply_result.deleted {
+                                if is_porcelain {
+                                    out.detail_porcelain(&format!("deleted\t{}", path.display()));
+                                } else {
+                                    out.detail(&format!("  {} {}", red.apply_to("-"), path.display()));
+                                }
                             }
                         }
 
@@ -1993,16 +2045,14 @@ async fn track_single_file(
     darn: &Darn,
     manifest: &mut Manifest,
     relative_path: &Path,
+    force_immutable: bool,
 ) -> eyre::Result<()> {
     let full_path = darn.root().join(relative_path);
 
-    // Create File from path
-    let doc = File::from_path(&full_path)?;
-    let file_type = if doc.content.is_text() {
-        FileType::Text
-    } else {
-        FileType::Binary
-    };
+    // Create File from path (with attribute rules + force_immutable)
+    let attributes = AttributeRules::from_workspace_root(darn.root()).ok();
+    let doc = File::from_path_full(&full_path, attributes.as_ref(), force_immutable)?;
+    let file_type = FileType::from(&doc.content);
 
     // Convert to Automerge
     let mut am_doc = doc.into_automerge()?;
@@ -2061,7 +2111,7 @@ pub(crate) fn peer_add(
     peer_id: Option<String>,
     out: Output,
 ) -> eyre::Result<()> {
-    let darn = Darn::open_without_subduction(Path::new("."))?;
+    use darn_core::peer;
 
     // -- Name --
     let name = match name {
@@ -2070,7 +2120,7 @@ pub(crate) fn peer_add(
     };
     let peer_name = PeerName::new(&name)?;
 
-    if darn.get_peer(&peer_name)?.is_some() {
+    if peer::get_peer(&peer_name)?.is_some() {
         out.error(&format!("Peer already exists: {name}"))?;
         return Ok(());
     }
@@ -2109,14 +2159,14 @@ pub(crate) fn peer_add(
         "(discovery)".to_string()
     };
 
-    darn.add_peer(&peer)?;
+    peer::add_peer(&peer)?;
 
     info!(%name, %addr_display, "Added peer");
 
     if out.is_porcelain() {
-        println!("name\t{name}");
-        println!("address\t{addr_display}");
-        println!("peer_id\t{peer_id_display}");
+        out.detail_porcelain(&format!("name\t{name}"));
+        out.detail_porcelain(&format!("address\t{addr_display}"));
+        out.detail_porcelain(&format!("peer_id\t{peer_id_display}"));
     } else {
         out.success(&format!("Added peer: {name} ({addr_display})"))?;
         out.remark(&format!("Peer ID: {peer_id_display}"))?;
@@ -2163,8 +2213,7 @@ fn peer_add_interactive(out: Output) -> eyre::Result<PeerAddress> {
 
 /// List known peers.
 pub(crate) fn peer_list(out: Output) -> eyre::Result<()> {
-    let darn = Darn::open_without_subduction(Path::new("."))?;
-    let peers = darn.list_peers()?;
+    let peers = darn_core::peer::list_peers()?;
 
     info!("Listing peers");
 
@@ -2180,10 +2229,10 @@ pub(crate) fn peer_list(out: Output) -> eyre::Result<()> {
             let last_sync = peer
                 .last_synced_at
                 .map_or_else(|| "never".to_string(), |ts| ts.as_secs().to_string());
-            println!(
+            out.detail_porcelain(&format!(
                 "{}\t{}\t{mode}\t{peer_id_display}\t{last_sync}",
                 peer.name, peer.address
-            );
+            ));
         }
         return Ok(());
     }
@@ -2224,18 +2273,17 @@ pub(crate) fn peer_list(out: Output) -> eyre::Result<()> {
 
 /// Remove a peer.
 pub(crate) fn peer_remove(name: &str, out: Output) -> eyre::Result<()> {
-    let darn = Darn::open_without_subduction(Path::new("."))?;
     let peer_name = PeerName::new(name)?;
 
-    if darn.remove_peer(&peer_name)? {
+    if darn_core::peer::remove_peer(&peer_name)? {
         info!(%name, "Removed peer");
         if out.is_porcelain() {
-            println!("removed\t{name}");
+            out.detail_porcelain(&format!("removed\t{name}"));
         } else {
             out.success(&format!("Removed peer: {name}"))?;
         }
     } else if out.is_porcelain() {
-        println!("not_found\t{name}");
+        out.detail_porcelain(&format!("not_found\t{name}"));
     } else {
         out.warning(&format!("Peer not found: {name}"))?;
     }
@@ -2265,7 +2313,7 @@ pub(crate) fn info(out: Output) -> eyre::Result<()> {
     let iroh_node_id_str: Option<String> = None;
 
     if out.is_porcelain() {
-        info_porcelain(&config_dir, &peer_id_str, iroh_node_id_str.as_deref());
+        info_porcelain(out, &config_dir, &peer_id_str, iroh_node_id_str.as_deref());
         return Ok(());
     }
 
@@ -2273,11 +2321,16 @@ pub(crate) fn info(out: Output) -> eyre::Result<()> {
 }
 
 /// Porcelain output for `darn info`.
-fn info_porcelain(config_dir: &Path, peer_id_str: &str, iroh_node_id_str: Option<&str>) {
-    println!("config_dir\t{}", config_dir.display());
-    println!("peer_id\t{peer_id_str}");
+fn info_porcelain(
+    out: Output,
+    config_dir: &Path,
+    peer_id_str: &str,
+    iroh_node_id_str: Option<&str>,
+) {
+    out.detail_porcelain(&format!("config_dir\t{}", config_dir.display()));
+    out.detail_porcelain(&format!("peer_id\t{peer_id_str}"));
     if let Some(iroh_id) = iroh_node_id_str {
-        println!("iroh_node_id\t{iroh_id}");
+        out.detail_porcelain(&format!("iroh_node_id\t{iroh_id}"));
     }
 
     // Peers
@@ -2289,10 +2342,10 @@ fn info_porcelain(config_dir: &Path, peer_id_str: &str, iroh_node_id_str: Option
             } else {
                 "discovery".to_string()
             };
-            println!(
+            out.detail_porcelain(&format!(
                 "peer\t{}\t{}\t{mode}\t{peer_id_display}",
                 peer.name, peer.address
-            );
+            ));
         }
     }
 
@@ -2305,9 +2358,9 @@ fn info_porcelain(config_dir: &Path, peer_id_str: &str, iroh_node_id_str: Option
         );
         let file_count = manifest.as_ref().map(Manifest::len).unwrap_or(0);
 
-        println!("workspace_root\t{}", darn.root().display());
-        println!("root_dir_id\t{root_id_str}");
-        println!("tracked_files\t{file_count}");
+        out.detail_porcelain(&format!("workspace_root\t{}", darn.root().display()));
+        out.detail_porcelain(&format!("root_dir_id\t{root_id_str}"));
+        out.detail_porcelain(&format!("tracked_files\t{file_count}"));
 
         if let Ok(manifest) = manifest {
             for entry in manifest.iter() {
@@ -2317,20 +2370,20 @@ fn info_porcelain(config_dir: &Path, peer_id_str: &str, iroh_node_id_str: Option
                     FileState::Modified => "modified",
                     FileState::Missing => "missing",
                 };
-                let type_str = if entry.file_type.is_text() {
-                    "text"
-                } else {
-                    "binary"
+                let type_str = match entry.file_type {
+                    FileType::Text => "text",
+                    FileType::Binary => "binary",
+                    FileType::Immutable => "immutable",
                 };
                 let url = sedimentree_id_to_url(entry.sedimentree_id);
-                println!(
+                out.detail_porcelain(&format!(
                     "file\t{}\t{type_str}\t{state_str}\t{url}",
                     entry.relative_path.display()
-                );
+                ));
             }
         }
     } else {
-        println!("workspace\tnone");
+        out.detail_porcelain("workspace\tnone");
     }
 }
 
@@ -2466,10 +2519,10 @@ fn info_human_workspace(dim: &Style) -> eyre::Result<()> {
                         FileState::Modified => "modified",
                         FileState::Missing => "missing",
                     };
-                    let type_str = if entry.file_type.is_text() {
-                        "text"
-                    } else {
-                        "binary"
+                    let type_str = match entry.file_type {
+                        FileType::Text => "text",
+                        FileType::Binary => "binary",
+                        FileType::Immutable => "immut",
                     };
                     files_table.push_str(&format!(
                         "│ {:<40} │ {:^6} │ {:^19} │\n",
@@ -2489,6 +2542,209 @@ fn info_human_workspace(dim: &Style) -> eyre::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Connect to all global peers for standalone document operations.
+///
+/// Returns the number of successfully connected peers.
+///
+/// # Errors
+///
+/// Returns an error on signer loading or URI parsing failures.
+async fn connect_global_peers(
+    subduction: &darn_core::subduction::DarnSubduction,
+    signer_dir: &std::path::Path,
+    peers: &[darn_core::peer::Peer],
+    timeout: std::time::Duration,
+) -> eyre::Result<Vec<PeerId>> {
+    use darn_core::{signer, subduction::DarnConnection};
+    use subduction_websocket::tokio::{TimeoutTokio, client::TokioWebSocketClient};
+    use tungstenite::http::Uri;
+
+    let mut connected = Vec::new();
+
+    for peer in peers {
+        match &peer.address {
+            PeerAddress::WebSocket { url } => {
+                let uri: Uri = url.parse()?;
+                let peer_signer = signer::load(signer_dir)?;
+                match TokioWebSocketClient::new(
+                    uri,
+                    TimeoutTokio,
+                    timeout,
+                    peer_signer,
+                    peer.audience,
+                )
+                .await
+                {
+                    Ok((authenticated, listener_fut, sender_fut)) => {
+                        tokio::spawn(async move { drop(listener_fut.await) });
+                        tokio::spawn(async move { drop(sender_fut.await) });
+                        let peer_id = authenticated.peer_id();
+                        let authenticated =
+                            authenticated.map(|c| DarnConnection::WebSocket(Box::new(c)));
+                        if let Err(e) = subduction.register(authenticated).await {
+                            info!(%e, peer = %peer.name, "Failed to register");
+                            continue;
+                        }
+                        connected.push(peer_id);
+                    }
+                    Err(e) => {
+                        info!(%e, peer = %peer.name, "Connection failed");
+                    }
+                }
+            }
+            #[cfg(feature = "iroh")]
+            PeerAddress::Iroh { .. } => {
+                info!(peer = %peer.name, "Skipping Iroh peer for doc edit");
+            }
+        }
+    }
+
+    Ok(connected)
+}
+
+/// Sync a single sedimentree with all connected peers, returning total items transferred.
+async fn sync_sedimentree_with_peers(
+    subduction: &darn_core::subduction::DarnSubduction,
+    peer_ids: &[PeerId],
+    sed_id: SedimentreeId,
+    timeout: std::time::Duration,
+) -> (usize, usize) {
+    use subduction_core::connection::Connection;
+
+    let mut received = 0;
+    let mut sent = 0;
+
+    for peer_id in peer_ids {
+        match subduction
+            .sync_with_peer(peer_id, sed_id, true, Some(timeout))
+            .await
+        {
+            Ok((success, stats, errors)) => {
+                if success {
+                    received += stats.total_received();
+                    sent += stats.total_sent();
+                }
+                for (conn, err) in &errors {
+                    tracing::warn!("Sync error with {:?}: {err:?}", Connection::peer_id(conn));
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to sync with peer {peer_id:?}: {e}");
+            }
+        }
+    }
+
+    (received, sent)
+}
+
+/// Edit an Automerge document directly, without a workspace.
+///
+/// Connects to global peers, syncs the target sedimentree, loads the document,
+/// applies the edit operation, stores the changes, and syncs back.
+pub(crate) async fn doc_edit(
+    doc_url: &str,
+    op: darn_core::doc_edit::EditOp,
+    create: bool,
+    out: Output,
+) -> eyre::Result<()> {
+    use darn_core::{doc_edit::apply_edit, signer, subduction as sub};
+
+    out.intro("darn doc edit")?;
+
+    let sed_id_bytes = parse_automerge_url(doc_url)?;
+    let sed_id = SedimentreeId::new(sed_id_bytes);
+    let timeout = std::time::Duration::from_secs(30);
+
+    // Load global signer and storage, hydrate Subduction
+    let signer_dir = darn_core::config::global_signer_dir()?;
+    let signer = signer::load(&signer_dir)?;
+    let storage = sub::create_global_storage()?;
+
+    let spinner = out.spinner("Loading storage...");
+    let subduction = sub::hydrate(signer, storage).await?;
+    spinner.stop("Storage loaded");
+
+    // Connect to all global peers
+    let peers = darn_core::peer::list_peers()?;
+    if peers.is_empty() {
+        eyre::bail!("No peers configured. Use `darn peer add` first.");
+    }
+
+    let spinner = out.spinner("Connecting to peers...");
+    let peer_ids = connect_global_peers(&subduction, &signer_dir, &peers, timeout).await?;
+    if peer_ids.is_empty() {
+        spinner.stop("Failed to connect");
+        eyre::bail!("Could not connect to any peers");
+    }
+    spinner.stop(format!("Connected to {} peer(s)", peer_ids.len()));
+
+    // The path used for --create initialization
+    let create_path = match &op {
+        darn_core::doc_edit::EditOp::Append { path, .. }
+        | darn_core::doc_edit::EditOp::Clear { path } => path.clone(),
+    };
+
+    // Fetch phase: sync sedimentree from peers
+    let spinner = out.spinner("Syncing document...");
+    let (total_received, _) =
+        sync_sedimentree_with_peers(&subduction, &peer_ids, sed_id, timeout).await;
+    spinner.stop(format!("Synced (received {total_received} items)"));
+
+    let spinner = out.spinner("Loading document...");
+    let mut doc = match sedimentree::load_document(&subduction, sed_id).await? {
+        Some(doc) => {
+            spinner.stop("Document loaded");
+            doc
+        }
+        None if create => {
+            spinner.stop("Document not found — creating");
+            let doc = darn_core::doc_edit::create_with_empty_list(&create_path)?;
+            out.success("Created new document")?;
+            doc
+        }
+        None => {
+            spinner.stop("Document not found");
+            eyre::bail!(
+                "document not found after sync: {doc_url}\n  hint: use --create to create it"
+            );
+        }
+    };
+
+    let changed = apply_edit(&mut doc, &op)?;
+
+    if !changed {
+        out.remark("No changes needed")?;
+        out.outro("Done")?;
+        return Ok(());
+    }
+
+    let op_description = match &op {
+        darn_core::doc_edit::EditOp::Append { path, values } => {
+            format!("Appended {} value(s) to {path}", values.len())
+        }
+        darn_core::doc_edit::EditOp::Clear { path } => format!("Cleared {path}"),
+    };
+    out.success(&op_description)?;
+
+    let spinner = out.spinner("Storing changes...");
+    sedimentree::store_document(&subduction, sed_id, &mut doc).await?;
+    spinner.stop("Changes stored");
+
+    // Push phase: sync changes back to peers
+    let spinner = out.spinner("Syncing changes to peers...");
+    let (_, total_sent) =
+        sync_sedimentree_with_peers(&subduction, &peer_ids, sed_id, timeout).await;
+    spinner.stop(format!("Synced (sent {total_sent} items)"));
+
+    if out.is_porcelain() {
+        out.kv("doc", doc_url)?;
+        out.kv("changed", "true")?;
+    }
+
+    out.outro("Done")?;
     Ok(())
 }
 

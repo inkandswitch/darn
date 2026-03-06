@@ -13,6 +13,7 @@
 //!   "ignore": [".git/", "*.log"],
 //!   "attributes": {
 //!     "binary": ["*.lock", "*.min.js"],
+//!     "immutable": ["dist/**"],
 //!     "text": ["*.md"]
 //!   }
 //! }
@@ -75,6 +76,12 @@ pub struct DarnConfig {
     #[serde(with = "serde_base58::sedimentree_id")]
     pub root_directory_id: SedimentreeId,
 
+    /// When true, newly ingested text files use LWW string semantics
+    /// (`ScalarValue::Str`) instead of character-level CRDT merging.
+    /// Binary files are unaffected. Already-tracked files keep their type.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub force_immutable: bool,
+
     /// Gitignore-style patterns to exclude from sync.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ignore: Vec<String>,
@@ -91,16 +98,20 @@ pub struct AttributeMap {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub binary: Vec<String>,
 
+    /// Patterns for immutable text (LWW string, no character merging) files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub immutable: Vec<String>,
+
     /// Patterns for text (character-level CRDT) files.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub text: Vec<String>,
 }
 
 impl AttributeMap {
-    /// Returns `true` if both lists are empty.
+    /// Returns `true` if all lists are empty.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        self.binary.is_empty() && self.text.is_empty()
+        self.binary.is_empty() && self.immutable.is_empty() && self.text.is_empty()
     }
 }
 
@@ -111,6 +122,7 @@ impl DarnConfig {
         Self {
             id,
             root_directory_id,
+            force_immutable: false,
             ignore: default_ignore_patterns(),
             attributes: default_attribute_map(),
         }
@@ -121,12 +133,14 @@ impl DarnConfig {
     pub const fn with_fields(
         id: WorkspaceId,
         root_directory_id: SedimentreeId,
+        force_immutable: bool,
         ignore: Vec<String>,
         attributes: AttributeMap,
     ) -> Self {
         Self {
             id,
             root_directory_id,
+            force_immutable,
             ignore,
             attributes,
         }
@@ -210,6 +224,7 @@ fn default_ignore_patterns() -> Vec<String> {
 fn default_attribute_map() -> AttributeMap {
     AttributeMap {
         binary: DEFAULT_BINARY.iter().map(|s| (*s).to_string()).collect(),
+        immutable: Vec::new(),
         text: Vec::new(),
     }
 }
@@ -231,7 +246,6 @@ pub enum DotfileError {
     Parse(serde_json::Error),
 }
 
-#[allow(clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -256,6 +270,59 @@ mod tests {
     }
 
     #[test]
+    fn force_immutable_roundtrip() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let id = WorkspaceId::from_bytes([3; 16]);
+        let sed_id = SedimentreeId::new([4; 32]);
+
+        let config = DarnConfig::with_fields(
+            id,
+            sed_id,
+            true,
+            vec![".git/".to_string()],
+            AttributeMap {
+                binary: Vec::new(),
+                immutable: Vec::new(),
+                text: Vec::new(),
+            },
+        );
+        config.save(dir.path())?;
+
+        let loaded = DarnConfig::load(dir.path())?;
+        assert!(
+            loaded.force_immutable,
+            "force_immutable should survive roundtrip"
+        );
+
+        // Verify JSON contains the field
+        let json = std::fs::read_to_string(dir.path().join(DOTFILE_NAME))?;
+        assert!(
+            json.contains("\"force_immutable\": true"),
+            "JSON should contain force_immutable"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn force_immutable_false_omitted_from_json() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let id = WorkspaceId::from_bytes([5; 16]);
+        let sed_id = SedimentreeId::new([6; 32]);
+
+        let config = DarnConfig::create(dir.path(), id, sed_id)?;
+        assert!(!config.force_immutable);
+
+        let json = std::fs::read_to_string(dir.path().join(DOTFILE_NAME))?;
+        assert!(
+            !json.contains("force_immutable"),
+            "false should be omitted from JSON"
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn find_root_finds_dotfile() -> TestResult {
         let dir = tempfile::tempdir()?;
         let id = WorkspaceId::from_bytes([1; 16]);
@@ -272,10 +339,11 @@ mod tests {
     }
 
     #[test]
-    fn find_root_not_found() {
-        let dir = tempfile::tempdir().expect("create tempdir");
+    fn find_root_not_found() -> TestResult {
+        let dir = tempfile::tempdir()?;
         let result = DarnConfig::find_root(dir.path());
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]

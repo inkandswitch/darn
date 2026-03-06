@@ -12,6 +12,7 @@ use std::path::Path;
 
 use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::prelude::*;
+use testresult::TestResult;
 
 /// Test fixture: an isolated config dir + workspace dir.
 struct Fixture {
@@ -215,15 +216,16 @@ fn sync_with_no_peers_succeeds_with_warning() {
 // ==========================================================================
 
 #[test]
-fn sync_dry_run_no_peers() {
+fn sync_dry_run_no_peers() -> TestResult {
     let f = Fixture::new();
     f.init();
 
-    std::fs::write(f.workspace().join("file.txt"), "content").expect("write file");
+    std::fs::write(f.workspace().join("file.txt"), "content")?;
 
     // Dry-run with no peers exits early (success) — untracked files
     // don't appear in the manifest scan, and no peers means no sync plan.
     f.cmd().args(["sync", "--dry-run"]).assert().success();
+    Ok(())
 }
 
 // ==========================================================================
@@ -264,13 +266,13 @@ fn unknown_command_fails() {
 // ==========================================================================
 
 #[test]
-fn full_cli_init_and_tree() {
+fn full_cli_init_and_tree() -> TestResult {
     let f = Fixture::new();
     f.init();
 
-    std::fs::write(f.workspace().join("hello.txt"), "hello").expect("write file");
-    std::fs::create_dir_all(f.workspace().join("src")).expect("create dir");
-    std::fs::write(f.workspace().join("src/lib.rs"), "pub fn hello() {}").expect("write file");
+    std::fs::write(f.workspace().join("hello.txt"), "hello")?;
+    std::fs::create_dir_all(f.workspace().join("src"))?;
+    std::fs::write(f.workspace().join("src/lib.rs"), "pub fn hello() {}")?;
 
     f.cmd().args(["ignore", "*.log"]).assert().success();
 
@@ -287,4 +289,5 @@ fn full_cli_init_and_tree() {
         .assert()
         .success()
         .stdout(predicates::str::contains("workspace_root\t"));
+    Ok(())
 }
