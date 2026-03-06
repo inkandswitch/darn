@@ -387,12 +387,7 @@ async fn scan_discovers_new_files() -> TestResult {
 
         let names: Vec<_> = new_files
             .iter()
-            .map(|p| {
-                p.file_name()
-                    .expect("has filename")
-                    .to_string_lossy()
-                    .to_string()
-            })
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
             .collect();
         assert!(names.contains(&"hello.txt".to_string()));
         assert!(names.contains(&"world.txt".to_string()));
@@ -492,12 +487,12 @@ async fn ingest_and_track_files() -> TestResult {
 
         let readme = manifest
             .get_by_path(Path::new("readme.txt"))
-            .expect("readme tracked");
+            .ok_or("readme should be tracked")?;
         assert_eq!(readme.state(env.workspace()), FileState::Clean);
 
         let data = manifest
             .get_by_path(Path::new("data.bin"))
-            .expect("data tracked");
+            .ok_or("data.bin should be tracked")?;
         assert_eq!(data.state(env.workspace()), FileState::Clean);
 
         // Save and reload to verify persistence
@@ -559,7 +554,7 @@ async fn refresh_detects_modified_file() -> TestResult {
 
         let entry = manifest
             .get_by_path(Path::new("file.txt"))
-            .expect("tracked");
+            .ok_or("file.txt should be tracked")?;
         assert_eq!(entry.state(env.workspace()), FileState::Clean);
 
         // Modify the file
@@ -567,7 +562,7 @@ async fn refresh_detects_modified_file() -> TestResult {
 
         let entry = manifest
             .get_by_path(Path::new("file.txt"))
-            .expect("tracked");
+            .ok_or("file.txt should be tracked after modify")?;
         assert_eq!(entry.state(env.workspace()), FileState::Modified);
 
         // Refresh should pick it up
@@ -578,7 +573,7 @@ async fn refresh_detects_modified_file() -> TestResult {
         // After refresh, should be clean again
         let entry = manifest
             .get_by_path(Path::new("file.txt"))
-            .expect("tracked");
+            .ok_or("file.txt should be tracked after refresh")?;
         assert_eq!(entry.state(env.workspace()), FileState::Clean);
 
         Ok(())
@@ -603,7 +598,7 @@ async fn refresh_detects_missing_file() -> TestResult {
 
         let entry = manifest
             .get_by_path(Path::new("doomed.txt"))
-            .expect("tracked");
+            .ok_or("doomed.txt should be tracked")?;
         assert_eq!(entry.state(env.workspace()), FileState::Missing);
 
         Ok(())
@@ -631,14 +626,12 @@ async fn staged_update_creates_files_atomically() -> TestResult {
         ];
 
         for (path, content) in &files {
-            let file = darn_core::file::File::text(
-                Path::new(path)
-                    .file_name()
-                    .expect("file name")
-                    .to_str()
-                    .expect("utf8"),
-                *content,
-            );
+            let name = Path::new(path)
+                .file_name()
+                .ok_or("path should have file name")?
+                .to_str()
+                .ok_or("file name should be utf8")?;
+            let file = darn_core::file::File::text(name, *content);
             let id = darn_core::generate_sedimentree_id();
             let digest = sedimentree_core::crypto::digest::Digest::force_from_bytes([0u8; 32]);
 
@@ -690,7 +683,7 @@ async fn staged_update_handles_mixed_creates_and_deletes() -> TestResult {
 
         let old_entry = manifest
             .get_by_path(Path::new("old.txt"))
-            .expect("old tracked");
+            .ok_or("old.txt should be tracked")?;
         let old_id = old_entry.sedimentree_id;
 
         // Now stage: create a new file + delete the old one
@@ -811,7 +804,7 @@ async fn full_local_workflow() -> TestResult {
 
         let readme = manifest
             .get_by_path(Path::new("README.md"))
-            .expect("readme tracked");
+            .ok_or("README.md should be tracked")?;
         assert_eq!(readme.state(env.workspace()), FileState::Modified);
 
         // 8. Refresh

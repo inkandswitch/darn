@@ -493,7 +493,7 @@ pub enum StageError {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::indexing_slicing)]
+#[allow(clippy::indexing_slicing)]
 mod tests {
     use super::*;
     use crate::manifest::content_hash;
@@ -516,15 +516,13 @@ mod tests {
         let staged = StagedUpdate::new(workspace.path())?;
 
         assert!(staged.staging_dir.path().exists());
-        assert!(
-            staged
-                .staging_dir
-                .path()
-                .file_name()
-                .expect("staging dir has name")
-                .to_string_lossy()
-                .starts_with(STAGING_DIR_PREFIX)
-        );
+        let dir_name = staged
+            .staging_dir
+            .path()
+            .file_name()
+            .ok_or("staging dir should have a name")?
+            .to_string_lossy();
+        assert!(dir_name.starts_with(STAGING_DIR_PREFIX));
         Ok(())
     }
 
@@ -634,7 +632,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::expect_used)]
     async fn commit_renames_files_into_workspace() -> TestResult {
         let workspace = tempfile::tempdir()?;
         let mut manifest = Manifest::new();
@@ -659,10 +656,9 @@ mod tests {
         assert_eq!(std::fs::read_to_string(ws_file)?, "hello world");
 
         // Manifest should have the entry
-        assert!(manifest.get_by_path(Path::new("hello.txt")).is_some());
         let tracked = manifest
             .get_by_path(Path::new("hello.txt"))
-            .expect("tracked");
+            .ok_or("hello.txt should be tracked")?;
         assert_eq!(tracked.sedimentree_id, id);
 
         // Result should classify as created
@@ -673,7 +669,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::expect_used)]
     async fn commit_creates_parent_dirs() -> TestResult {
         let workspace = tempfile::tempdir()?;
         let mut manifest = Manifest::new();
@@ -753,7 +748,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::expect_used)]
     async fn commit_mixed_creates_and_deletes() -> TestResult {
         let workspace = tempfile::tempdir()?;
         let mut manifest = Manifest::new();
@@ -799,7 +793,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::expect_used)]
     async fn commit_binary_file() -> TestResult {
         let workspace = tempfile::tempdir()?;
         let mut manifest = Manifest::new();
@@ -825,14 +818,13 @@ mod tests {
 
         let tracked = manifest
             .get_by_path(Path::new("data.bin"))
-            .expect("tracked");
+            .ok_or("data.bin should be tracked")?;
         assert_eq!(tracked.file_type, FileType::Binary);
 
         Ok(())
     }
 
     #[tokio::test]
-    #[allow(clippy::expect_used)]
     async fn commit_overwrites_existing_file() -> TestResult {
         let workspace = tempfile::tempdir()?;
         let mut manifest = Manifest::new();

@@ -60,11 +60,11 @@ impl std::fmt::Display for Name {
     }
 }
 
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;
     use bolero::check;
+    use testresult::TestResult;
 
     #[test]
     fn rejects_path_separators() {
@@ -88,9 +88,11 @@ mod tests {
     }
 
     #[test]
-    fn from_path_extracts_basename() {
-        let name = Name::from_path(Path::new("/some/path/to/file.rs")).unwrap();
+    fn from_path_extracts_basename() -> TestResult {
+        let name = Name::from_path(Path::new("/some/path/to/file.rs"))
+            .ok_or("expected Some from valid path")?;
         assert_eq!(name.as_str(), "file.rs");
+        Ok(())
     }
 
     #[test]

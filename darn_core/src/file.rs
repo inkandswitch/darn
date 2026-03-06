@@ -177,7 +177,9 @@ impl File {
                     if force_immutable {
                         match detected {
                             content::Content::Text(s) => content::Content::ImmutableString(s),
-                            other => other, // Binary stays binary
+                            content::Content::Bytes(_) | content::Content::ImmutableString(_) => {
+                                detected
+                            }
                         }
                     } else {
                         detected
@@ -342,7 +344,14 @@ impl File {
                 automerge::ScalarValue::Str(smol_str) => {
                     content::Content::ImmutableString(smol_str.to_string())
                 }
-                _ => {
+                automerge::ScalarValue::Int(_)
+                | automerge::ScalarValue::Uint(_)
+                | automerge::ScalarValue::F64(_)
+                | automerge::ScalarValue::Counter(_)
+                | automerge::ScalarValue::Timestamp(_)
+                | automerge::ScalarValue::Boolean(_)
+                | automerge::ScalarValue::Unknown { .. }
+                | automerge::ScalarValue::Null => {
                     return Err(DeserializeError::InvalidSchema(
                         "content must be Text, Str, or Bytes".into(),
                     ));
@@ -355,8 +364,9 @@ impl File {
             }
         };
 
-        #[allow(clippy::wildcard_enum_match_arm)]
         // Read permissions from metadata.permissions (Patchwork convention)
+        #[allow(clippy::wildcard_enum_match_arm)]
+        // automerge::Value has many variants; we only care about Map
         let permissions = match doc.get(ROOT, "metadata")? {
             Some((automerge::Value::Object(ObjType::Map), metadata_id)) => {
                 match doc.get(&metadata_id, "permissions")? {
@@ -653,6 +663,19 @@ mod tests {
     fn binary_automerge_roundtrip() {
         check!().with_type::<Vec<u8>>().for_each(|bytes: &Vec<u8>| {
             let doc = File::binary("test.bin", bytes.clone());
+            let am = doc.to_automerge().expect("to_automerge");
+            let loaded = File::from_automerge(&am).expect("from_automerge");
+
+            assert_eq!(doc.name, loaded.name);
+            assert_eq!(doc.content, loaded.content);
+        });
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn immutable_automerge_roundtrip() {
+        check!().with_type::<String>().for_each(|text: &String| {
+            let doc = File::immutable("test.txt", text);
             let am = doc.to_automerge().expect("to_automerge");
             let loaded = File::from_automerge(&am).expect("from_automerge");
 

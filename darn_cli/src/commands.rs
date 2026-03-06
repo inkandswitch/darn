@@ -2370,10 +2370,10 @@ fn info_porcelain(
                     FileState::Modified => "modified",
                     FileState::Missing => "missing",
                 };
-                let type_str = if entry.file_type.is_text() {
-                    "text"
-                } else {
-                    "binary"
+                let type_str = match entry.file_type {
+                    FileType::Text => "text",
+                    FileType::Binary => "binary",
+                    FileType::Immutable => "immutable",
                 };
                 let url = sedimentree_id_to_url(entry.sedimentree_id);
                 out.detail_porcelain(&format!(
@@ -2519,10 +2519,10 @@ fn info_human_workspace(dim: &Style) -> eyre::Result<()> {
                         FileState::Modified => "modified",
                         FileState::Missing => "missing",
                     };
-                    let type_str = if entry.file_type.is_text() {
-                        "text"
-                    } else {
-                        "binary"
+                    let type_str = match entry.file_type {
+                        FileType::Text => "text",
+                        FileType::Binary => "binary",
+                        FileType::Immutable => "immut",
                     };
                     files_table.push_str(&format!(
                         "│ {:<40} │ {:^6} │ {:^19} │\n",
@@ -2605,6 +2605,41 @@ async fn connect_global_peers(
     Ok(connected)
 }
 
+/// Sync a single sedimentree with all connected peers, returning total items transferred.
+async fn sync_sedimentree_with_peers(
+    subduction: &darn_core::subduction::DarnSubduction,
+    peer_ids: &[PeerId],
+    sed_id: SedimentreeId,
+    timeout: std::time::Duration,
+) -> (usize, usize) {
+    use subduction_core::connection::Connection;
+
+    let mut received = 0;
+    let mut sent = 0;
+
+    for peer_id in peer_ids {
+        match subduction
+            .sync_with_peer(peer_id, sed_id, true, Some(timeout))
+            .await
+        {
+            Ok((success, stats, errors)) => {
+                if success {
+                    received += stats.total_received();
+                    sent += stats.total_sent();
+                }
+                for (conn, err) in &errors {
+                    tracing::warn!("Sync error with {:?}: {err:?}", Connection::peer_id(conn));
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to sync with peer {peer_id:?}: {e}");
+            }
+        }
+    }
+
+    (received, sent)
+}
+
 /// Edit an Automerge document directly, without a workspace.
 ///
 /// Connects to global peers, syncs the target sedimentree, loads the document,
@@ -2616,7 +2651,6 @@ pub(crate) async fn doc_edit(
     out: Output,
 ) -> eyre::Result<()> {
     use darn_core::{doc_edit::apply_edit, signer, subduction as sub};
-    use subduction_core::connection::Connection;
 
     out.intro("darn doc edit")?;
 
@@ -2653,30 +2687,10 @@ pub(crate) async fn doc_edit(
         | darn_core::doc_edit::EditOp::Clear { path } => path.clone(),
     };
 
-    // Sync the specific sedimentree with each connected peer (fetch phase).
-    // Uses sync_with_peer (per-sedimentree, per-peer) — the same path that
-    // workspace sync uses — rather than full_sync/sync_all which time out
-    // when the peer has never seen the sedimentree.
+    // Fetch phase: sync sedimentree from peers
     let spinner = out.spinner("Syncing document...");
-    let mut total_received: usize = 0;
-    for peer_id in &peer_ids {
-        match subduction
-            .sync_with_peer(peer_id, sed_id, true, Some(timeout))
-            .await
-        {
-            Ok((success, stats, errors)) => {
-                if success {
-                    total_received += stats.total_received();
-                }
-                for (conn, err) in &errors {
-                    tracing::warn!("Sync error with {:?}: {err:?}", Connection::peer_id(conn));
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Failed to sync with peer {peer_id:?}: {e}");
-            }
-        }
-    }
+    let (total_received, _) =
+        sync_sedimentree_with_peers(&subduction, &peer_ids, sed_id, timeout).await;
     spinner.stop(format!("Synced (received {total_received} items)"));
 
     let spinner = out.spinner("Loading document...");
@@ -2719,26 +2733,10 @@ pub(crate) async fn doc_edit(
     sedimentree::store_document(&subduction, sed_id, &mut doc).await?;
     spinner.stop("Changes stored");
 
+    // Push phase: sync changes back to peers
     let spinner = out.spinner("Syncing changes to peers...");
-    let mut total_sent: usize = 0;
-    for peer_id in &peer_ids {
-        match subduction
-            .sync_with_peer(peer_id, sed_id, true, Some(timeout))
-            .await
-        {
-            Ok((success, stats, errors)) => {
-                if success {
-                    total_sent += stats.total_sent();
-                }
-                for (conn, err) in &errors {
-                    tracing::warn!("Sync error with {:?}: {err:?}", Connection::peer_id(conn));
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Failed to sync with peer {peer_id:?}: {e}");
-            }
-        }
-    }
+    let (_, total_sent) =
+        sync_sedimentree_with_peers(&subduction, &peer_ids, sed_id, timeout).await;
     spinner.stop(format!("Synced (sent {total_sent} items)"));
 
     if out.is_porcelain() {

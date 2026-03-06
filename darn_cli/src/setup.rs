@@ -35,8 +35,8 @@ pub(crate) fn ensure_signer(out: Output) -> eyre::Result<bool> {
         let peer_id_str = bs58::encode(peer_id.as_bytes()).into_string();
 
         if out.is_porcelain() {
-            println!("signer_generated\t{}", key_path.display());
-            println!("peer_id\t{peer_id_str}");
+            out.detail_porcelain(&format!("signer_generated\t{}", key_path.display()));
+            out.detail_porcelain(&format!("peer_id\t{peer_id_str}"));
         } else if !out.is_silent() {
             out.summary(&format!("Generated signer at {}", key_path.display()))?;
         }

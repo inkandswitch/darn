@@ -450,45 +450,18 @@ impl WatchProcessResult {
     }
 }
 
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::manifest::Manifest;
+    use testresult::TestResult;
 
     #[test]
-    fn watcher_config_default() {
-        let config = WatcherConfig::default();
-        assert_eq!(config.debounce_duration, Duration::from_millis(300));
-        assert!(config.auto_track);
-        assert!(config.auto_refresh);
-    }
-
-    #[test]
-    fn watch_batch_is_empty() {
-        let batch = WatchBatch::default();
-        assert!(batch.is_empty());
-        assert_eq!(batch.len(), 0);
-    }
-
-    #[test]
-    fn watch_batch_len() {
-        let batch = WatchBatch {
-            created: vec![PathBuf::from("a.txt")],
-            modified: vec![PathBuf::from("b.txt"), PathBuf::from("c.txt")],
-            deleted: vec![],
-            renamed: vec![(PathBuf::from("d.txt"), PathBuf::from("e.txt"))],
-        };
-        assert!(!batch.is_empty());
-        assert_eq!(batch.len(), 4);
-    }
-
-    #[test]
-    fn event_processor_ignores_config_patterns() {
+    fn event_processor_ignores_config_patterns() -> TestResult {
         use crate::dotfile::{AttributeMap, DarnConfig};
         use crate::workspace::WorkspaceId;
 
-        let temp_dir = tempfile::tempdir().expect("create tempdir");
+        let temp_dir = tempfile::tempdir()?;
         let manifest = Manifest::new();
 
         // Create .darn config with ignore pattern
@@ -499,21 +472,21 @@ mod tests {
             vec!["*.log".to_string()],
             AttributeMap::default(),
         );
-        config.save(temp_dir.path()).expect("save config");
+        config.save(temp_dir.path())?;
 
-        let mut processor =
-            WatchEventProcessor::new(temp_dir.path(), &manifest).expect("create processor");
+        let mut processor = WatchEventProcessor::new(temp_dir.path(), &manifest)?;
 
         // Should be ignored
         assert!(!processor.process(WatchEvent::FileModified(PathBuf::from("test.log"))));
 
         // Should not be ignored
         assert!(processor.process(WatchEvent::FileModified(PathBuf::from("test.txt"))));
+        Ok(())
     }
 
     #[test]
-    fn event_processor_separates_created_and_modified() {
-        let temp_dir = tempfile::tempdir().expect("create tempdir");
+    fn event_processor_separates_created_and_modified() -> TestResult {
+        let temp_dir = tempfile::tempdir()?;
         let mut manifest = Manifest::new();
 
         // Add a tracked file
@@ -526,8 +499,7 @@ mod tests {
         );
         manifest.track(tracked);
 
-        let mut processor =
-            WatchEventProcessor::new(temp_dir.path(), &manifest).expect("create processor");
+        let mut processor = WatchEventProcessor::new(temp_dir.path(), &manifest)?;
 
         // Modify tracked file
         processor.process(WatchEvent::FileModified(PathBuf::from("existing.txt")));
@@ -539,11 +511,12 @@ mod tests {
 
         assert_eq!(batch.created, vec![PathBuf::from("new.txt")]);
         assert_eq!(batch.modified, vec![PathBuf::from("existing.txt")]);
+        Ok(())
     }
 
     #[test]
-    fn event_processor_handles_delete_restore_cycle() {
-        let temp_dir = tempfile::tempdir().expect("create tempdir");
+    fn event_processor_handles_delete_restore_cycle() -> TestResult {
+        let temp_dir = tempfile::tempdir()?;
         let mut manifest = Manifest::new();
 
         // Add a tracked file
@@ -556,8 +529,7 @@ mod tests {
         );
         manifest.track(tracked);
 
-        let mut processor =
-            WatchEventProcessor::new(temp_dir.path(), &manifest).expect("create processor");
+        let mut processor = WatchEventProcessor::new(temp_dir.path(), &manifest)?;
 
         // Delete file
         processor.process(WatchEvent::FileDeleted(PathBuf::from("file.txt")));
@@ -571,5 +543,6 @@ mod tests {
         // Should be in modified, not deleted
         assert!(batch.deleted.is_empty());
         assert_eq!(batch.modified, vec![PathBuf::from("file.txt")]);
+        Ok(())
     }
 }

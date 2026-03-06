@@ -93,3 +93,48 @@ impl<'b, Ctx> minicbor::Decode<'b, Ctx> for FileType {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use testresult::TestResult;
+
+    #[test]
+    fn serde_roundtrip() -> TestResult {
+        for variant in [FileType::Text, FileType::Binary, FileType::Immutable] {
+            let json = serde_json::to_string(&variant)?;
+            let loaded: FileType = serde_json::from_str(&json)?;
+            assert_eq!(variant, loaded, "serde roundtrip failed for {json}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn serde_names() -> TestResult {
+        assert_eq!(serde_json::to_string(&FileType::Text)?, "\"text\"");
+        assert_eq!(serde_json::to_string(&FileType::Binary)?, "\"binary\"");
+        assert_eq!(
+            serde_json::to_string(&FileType::Immutable)?,
+            "\"immutable\""
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn minicbor_roundtrip() -> TestResult {
+        for variant in [FileType::Text, FileType::Binary, FileType::Immutable] {
+            let mut buf = Vec::new();
+            minicbor::encode(variant, &mut buf)?;
+            let decoded: FileType = minicbor::decode(&buf)?;
+            assert_eq!(variant, decoded, "minicbor roundtrip failed for {variant}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn display_values() {
+        assert_eq!(FileType::Text.to_string(), "text/plain");
+        assert_eq!(FileType::Binary.to_string(), "application/octet-stream");
+        assert_eq!(FileType::Immutable.to_string(), "text/plain; immutable");
+    }
+}

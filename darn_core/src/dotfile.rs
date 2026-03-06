@@ -246,7 +246,6 @@ pub enum DotfileError {
     Parse(serde_json::Error),
 }
 
-#[allow(clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,6 +270,59 @@ mod tests {
     }
 
     #[test]
+    fn force_immutable_roundtrip() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let id = WorkspaceId::from_bytes([3; 16]);
+        let sed_id = SedimentreeId::new([4; 32]);
+
+        let config = DarnConfig::with_fields(
+            id,
+            sed_id,
+            true,
+            vec![".git/".to_string()],
+            AttributeMap {
+                binary: Vec::new(),
+                immutable: Vec::new(),
+                text: Vec::new(),
+            },
+        );
+        config.save(dir.path())?;
+
+        let loaded = DarnConfig::load(dir.path())?;
+        assert!(
+            loaded.force_immutable,
+            "force_immutable should survive roundtrip"
+        );
+
+        // Verify JSON contains the field
+        let json = std::fs::read_to_string(dir.path().join(DOTFILE_NAME))?;
+        assert!(
+            json.contains("\"force_immutable\": true"),
+            "JSON should contain force_immutable"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn force_immutable_false_omitted_from_json() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let id = WorkspaceId::from_bytes([5; 16]);
+        let sed_id = SedimentreeId::new([6; 32]);
+
+        let config = DarnConfig::create(dir.path(), id, sed_id)?;
+        assert!(!config.force_immutable);
+
+        let json = std::fs::read_to_string(dir.path().join(DOTFILE_NAME))?;
+        assert!(
+            !json.contains("force_immutable"),
+            "false should be omitted from JSON"
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn find_root_finds_dotfile() -> TestResult {
         let dir = tempfile::tempdir()?;
         let id = WorkspaceId::from_bytes([1; 16]);
@@ -287,10 +339,11 @@ mod tests {
     }
 
     #[test]
-    fn find_root_not_found() {
-        let dir = tempfile::tempdir().expect("create tempdir");
+    fn find_root_not_found() -> TestResult {
+        let dir = tempfile::tempdir()?;
         let result = DarnConfig::find_root(dir.path());
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]

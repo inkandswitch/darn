@@ -233,48 +233,57 @@ pub enum EditError {
     /// Automerge operation failed.
     #[error(transparent)]
     Automerge(#[from] automerge::AutomergeError),
-
-    /// Transaction failed.
-    #[error("transaction failed: {0}")]
-    Transaction(String),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use testresult::TestResult;
 
-    #[test]
-    fn append_to_empty_list() {
+    /// Helper: create an Automerge doc with a "modules" list, optionally pre-populated.
+    fn doc_with_list(initial: &[&str]) -> Result<Automerge, EditError> {
         let mut doc = Automerge::new();
         doc.transact::<_, _, automerge::AutomergeError>(|tx| {
-            tx.put_object(automerge::ROOT, "modules", ObjType::List)?;
+            let list = tx.put_object(automerge::ROOT, "modules", ObjType::List)?;
+            for (i, val) in initial.iter().enumerate() {
+                tx.insert(&list, i, ScalarValue::Str((*val).into()))?;
+            }
             Ok(())
         })
-        .expect("create list");
+        .map_err(|f| f.error)?;
+        Ok(doc)
+    }
+
+    /// Helper: get the length of the "modules" list.
+    fn modules_len(doc: &Automerge) -> Result<usize, EditError> {
+        let (_, list_id) = doc
+            .get(automerge::ROOT, "modules")?
+            .ok_or_else(|| EditError::PathNotFound {
+                segment: "modules".into(),
+                path: "modules".into(),
+            })?;
+        Ok(doc.length(&list_id))
+    }
+
+    #[test]
+    fn append_to_empty_list() -> TestResult {
+        let mut doc = doc_with_list(&[])?;
 
         let op = EditOp::Append {
             path: "modules".to_string(),
             values: vec!["automerge:abc123".to_string()],
         };
 
-        let changed = apply_edit(&mut doc, &op).expect("append");
+        let changed = apply_edit(&mut doc, &op)?;
         assert!(changed);
+        assert_eq!(modules_len(&doc)?, 1);
 
-        let (_, list_id) = doc
-            .get(automerge::ROOT, "modules")
-            .expect("get")
-            .expect("modules exists");
-        assert_eq!(doc.length(&list_id), 1);
+        Ok(())
     }
 
     #[test]
-    fn append_multiple_values() {
-        let mut doc = Automerge::new();
-        doc.transact::<_, _, automerge::AutomergeError>(|tx| {
-            tx.put_object(automerge::ROOT, "modules", ObjType::List)?;
-            Ok(())
-        })
-        .expect("create list");
+    fn append_multiple_values() -> TestResult {
+        let mut doc = doc_with_list(&[])?;
 
         let op = EditOp::Append {
             path: "modules".to_string(),
@@ -285,25 +294,16 @@ mod tests {
             ],
         };
 
-        let changed = apply_edit(&mut doc, &op).expect("append");
+        let changed = apply_edit(&mut doc, &op)?;
         assert!(changed);
+        assert_eq!(modules_len(&doc)?, 3);
 
-        let (_, list_id) = doc
-            .get(automerge::ROOT, "modules")
-            .expect("get")
-            .expect("modules exists");
-        assert_eq!(doc.length(&list_id), 3);
+        Ok(())
     }
 
     #[test]
-    fn append_deduplicates_within_batch() {
-        let mut doc = Automerge::new();
-        doc.transact::<_, _, automerge::AutomergeError>(|tx| {
-            let list = tx.put_object(automerge::ROOT, "modules", ObjType::List)?;
-            tx.insert(&list, 0, ScalarValue::Str("automerge:existing".into()))?;
-            Ok(())
-        })
-        .expect("create list with value");
+    fn append_deduplicates_within_batch() -> TestResult {
+        let mut doc = doc_with_list(&["automerge:existing"])?;
 
         let op = EditOp::Append {
             path: "modules".to_string(),
@@ -313,39 +313,27 @@ mod tests {
             ],
         };
 
-        let changed = apply_edit(&mut doc, &op).expect("append");
+        let changed = apply_edit(&mut doc, &op)?;
         assert!(changed);
+        assert_eq!(modules_len(&doc)?, 2);
 
-        let (_, list_id) = doc
-            .get(automerge::ROOT, "modules")
-            .expect("get")
-            .expect("modules exists");
-        assert_eq!(doc.length(&list_id), 2);
+        Ok(())
     }
 
     #[test]
-    fn append_is_idempotent() {
-        let mut doc = Automerge::new();
-        doc.transact::<_, _, automerge::AutomergeError>(|tx| {
-            let list = tx.put_object(automerge::ROOT, "modules", ObjType::List)?;
-            tx.insert(&list, 0, ScalarValue::Str("automerge:abc123".into()))?;
-            Ok(())
-        })
-        .expect("create list with value");
+    fn append_is_idempotent() -> TestResult {
+        let mut doc = doc_with_list(&["automerge:abc123"])?;
 
         let op = EditOp::Append {
             path: "modules".to_string(),
             values: vec!["automerge:abc123".to_string()],
         };
 
-        let changed = apply_edit(&mut doc, &op).expect("append");
+        let changed = apply_edit(&mut doc, &op)?;
         assert!(!changed, "should not modify when value already present");
+        assert_eq!(modules_len(&doc)?, 1);
 
-        let (_, list_id) = doc
-            .get(automerge::ROOT, "modules")
-            .expect("get")
-            .expect("modules exists");
-        assert_eq!(doc.length(&list_id), 1);
+        Ok(())
     }
 
     #[test]
@@ -362,65 +350,44 @@ mod tests {
     }
 
     #[test]
-    fn clear_populated_list() {
-        let mut doc = Automerge::new();
-        doc.transact::<_, _, automerge::AutomergeError>(|tx| {
-            let list = tx.put_object(automerge::ROOT, "modules", ObjType::List)?;
-            tx.insert(&list, 0, ScalarValue::Str("automerge:aaa".into()))?;
-            tx.insert(&list, 1, ScalarValue::Str("automerge:bbb".into()))?;
-            tx.insert(&list, 2, ScalarValue::Str("automerge:ccc".into()))?;
-            Ok(())
-        })
-        .expect("create list with values");
+    fn clear_populated_list() -> TestResult {
+        let mut doc = doc_with_list(&["automerge:aaa", "automerge:bbb", "automerge:ccc"])?;
 
         let op = EditOp::Clear {
             path: "modules".to_string(),
         };
 
-        let changed = apply_edit(&mut doc, &op).expect("clear");
+        let changed = apply_edit(&mut doc, &op)?;
         assert!(changed);
+        assert_eq!(modules_len(&doc)?, 0);
 
-        let (_, list_id) = doc
-            .get(automerge::ROOT, "modules")
-            .expect("get")
-            .expect("modules exists");
-        assert_eq!(doc.length(&list_id), 0);
+        Ok(())
     }
 
     #[test]
-    fn clear_empty_list() {
-        let mut doc = Automerge::new();
-        doc.transact::<_, _, automerge::AutomergeError>(|tx| {
-            tx.put_object(automerge::ROOT, "modules", ObjType::List)?;
-            Ok(())
-        })
-        .expect("create empty list");
+    fn clear_empty_list() -> TestResult {
+        let mut doc = doc_with_list(&[])?;
 
         let op = EditOp::Clear {
             path: "modules".to_string(),
         };
 
-        let changed = apply_edit(&mut doc, &op).expect("clear");
+        let changed = apply_edit(&mut doc, &op)?;
         assert!(!changed, "should report no change for already-empty list");
+
+        Ok(())
     }
 
     #[test]
-    fn clear_then_append() {
-        let mut doc = Automerge::new();
-        doc.transact::<_, _, automerge::AutomergeError>(|tx| {
-            let list = tx.put_object(automerge::ROOT, "modules", ObjType::List)?;
-            tx.insert(&list, 0, ScalarValue::Str("automerge:old".into()))?;
-            Ok(())
-        })
-        .expect("create list with old value");
+    fn clear_then_append() -> TestResult {
+        let mut doc = doc_with_list(&["automerge:old"])?;
 
         apply_edit(
             &mut doc,
             &EditOp::Clear {
                 path: "modules".to_string(),
             },
-        )
-        .expect("clear");
+        )?;
 
         apply_edit(
             &mut doc,
@@ -428,19 +395,22 @@ mod tests {
                 path: "modules".to_string(),
                 values: vec!["automerge:new".to_string()],
             },
-        )
-        .expect("append");
+        )?;
+
+        assert_eq!(modules_len(&doc)?, 1);
 
         let (_, list_id) = doc
-            .get(automerge::ROOT, "modules")
-            .expect("get")
-            .expect("modules exists");
-        assert_eq!(doc.length(&list_id), 1);
+            .get(automerge::ROOT, "modules")?
+            .ok_or("modules missing")?;
 
-        let (Value::Scalar(scalar), _) = doc.get(&list_id, 0).expect("get").expect("has item")
+        let (Value::Scalar(scalar), _) = doc
+            .get(&list_id, 0)?
+            .ok_or("first item missing")?
         else {
-            panic!("expected scalar");
+            return Err("expected scalar".into());
         };
         assert_eq!(scalar.to_str(), Some("automerge:new"));
+
+        Ok(())
     }
 }

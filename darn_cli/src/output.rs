@@ -202,28 +202,6 @@ impl Output {
 
     // -- Structured data --
 
-    /// Print a tab-separated data line (porcelain) or a note block (human).
-    ///
-    /// Suppressed in quiet and silent modes.
-    #[allow(dead_code)]
-    pub(crate) fn note(self, title: &str, content: &str) -> eyre::Result<()> {
-        if self.is_quiet() {
-            return Ok(());
-        }
-        if self.porcelain {
-            // Emit each line of content prefixed with the title as context
-            for line in content.lines() {
-                let trimmed = line.trim();
-                if !trimmed.is_empty() {
-                    println!("{title}\t{trimmed}");
-                }
-            }
-        } else {
-            cliclack::note(title, content)?;
-        }
-        Ok(())
-    }
-
     /// Print a single key-value pair.
     ///
     /// Suppressed in quiet and silent modes.
@@ -237,19 +215,6 @@ impl Output {
             cliclack::log::info(format!("{key}: {value}"))?;
         }
         Ok(())
-    }
-
-    /// Print a raw data line (porcelain only). No-op in human mode.
-    ///
-    /// Suppressed in silent mode.
-    #[allow(dead_code)]
-    pub(crate) fn data(self, line: &str) {
-        if self.is_silent() {
-            return;
-        }
-        if self.porcelain {
-            println!("{line}");
-        }
     }
 
     // -- Detail output (per-file streaming lines) --
@@ -405,14 +370,6 @@ impl Spinner {
     pub(crate) fn clear(&self) {
         match self {
             Spinner::Interactive(s) => s.clear(),
-            Spinner::Porcelain | Spinner::Suppressed => {}
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn set_message(&self, msg: impl std::fmt::Display) {
-        match self {
-            Spinner::Interactive(s) => s.set_message(msg),
             Spinner::Porcelain | Spinner::Suppressed => {}
         }
     }

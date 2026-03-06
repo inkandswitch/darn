@@ -405,9 +405,10 @@ impl Darn {
         // Load attribute rules for consistent file type detection
         let attributes = AttributeRules::from_workspace_root(&self.root).ok();
 
-        // Read current file content
+        // Read current file content, coercing to match the stored file type
         let current_fs_digest = content_hash::hash_file(&path)?;
-        let new_file = File::from_path_with_attributes(&path, attributes.as_ref())?;
+        let mut new_file = File::from_path_with_attributes(&path, attributes.as_ref())?;
+        new_file.content = new_file.content.coerce_to(entry.file_type);
 
         // Load existing Automerge doc from sedimentree
         let mut am_doc = sedimentree::load_document(&self.subduction, entry.sedimentree_id)
@@ -464,6 +465,7 @@ impl Darn {
                 FileState::Modified => modified.push(RefreshCandidate {
                     path,
                     sedimentree_id: entry.sedimentree_id,
+                    file_type: entry.file_type,
                     current_fs_digest: entry.file_system_digest,
                 }),
             }
@@ -537,7 +539,8 @@ impl Darn {
         }
 
         let attributes = AttributeRules::from_workspace_root(&self.root).ok();
-        let new_file = File::from_path_with_attributes(&path, attributes.as_ref())?;
+        let mut new_file = File::from_path_with_attributes(&path, attributes.as_ref())?;
+        new_file.content = new_file.content.coerce_to(candidate.file_type);
 
         // Load existing doc
         let mut am_doc = sedimentree::load_document(&self.subduction, sed_id)
@@ -562,31 +565,19 @@ impl Darn {
         }))
     }
 
-    /// Apply remote changes to local files after sync.
-    ///
-    /// For each tracked file, checks if the sedimentree digest changed (indicating
-    /// remote changes were received). If so, loads the merged CRDT document and
-    /// writes it to disk.
-    ///
-    /// Also discovers new files from the remote directory tree that aren't in
-    /// the local manifest.
-    ///
-    /// # Errors
-    ///
-    /// Individual file errors are collected in the result; this method doesn't
-    /// fail on individual file errors.
     /// Stage all remote changes for batch application to the workspace.
     ///
-    /// This is the slow "prepare" phase: loads CRDT documents, serializes
-    /// file content, and writes everything to a staging directory. No
-    /// workspace files are modified.
-    ///
-    /// Call [`StagedUpdate::commit`] to apply the changes.
+    /// This is the slow "prepare" phase: for each tracked file whose
+    /// sedimentree digest changed (indicating remote updates), loads the
+    /// merged CRDT document, serializes the content, and writes it to a
+    /// staging directory. Also discovers new files from the remote
+    /// directory tree that aren't in the local manifest. No workspace
+    /// files are modified until [`StagedUpdate::commit`] is called.
     ///
     /// # Errors
     ///
-    /// Returns errors from individual file operations in `ApplyResult`.
-    /// The `StagedUpdate` contains only the successfully staged operations.
+    /// Individual file errors are collected in [`ApplyResult`]; the
+    /// `StagedUpdate` contains only the successfully staged operations.
     #[allow(clippy::too_many_lines)]
     pub async fn stage_remote_changes(
         &self,
@@ -1718,6 +1709,7 @@ impl UnopenedDarn {
 struct RefreshCandidate {
     path: PathBuf,
     sedimentree_id: SedimentreeId,
+    file_type: crate::file::file_type::FileType,
     current_fs_digest: sedimentree_core::crypto::digest::Digest<content_hash::FileSystemContent>,
 }
 
