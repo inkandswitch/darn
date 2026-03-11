@@ -18,22 +18,27 @@ use std::{
 use console::Style;
 use darn_core::{
     attributes::AttributeRules,
+    config,
     darn::Darn,
     directory::{Directory, entry::EntryType, sedimentree_id_to_url},
     discover::{DiscoverProgress, DiscoverResult},
+    doc_edit::{self, EditOp, apply_edit},
     file::{File, file_type::FileType, state::FileState},
     manifest::{Manifest, content_hash, tracked::Tracked},
-    peer::{Peer, PeerAddress, PeerName},
-    sedimentree,
+    peer::{self, Peer, PeerAddress, PeerName},
+    sedimentree, signer,
     staged_update::StagedUpdate,
+    subduction::{self, DarnConnection, DarnSubduction},
     sync_progress::SyncProgressEvent,
     watcher::{WatchEvent, WatchEventProcessor, Watcher, WatcherConfig},
 };
 use futures::StreamExt as _;
 use sedimentree_core::id::SedimentreeId;
-use subduction_core::{peer::id::PeerId, storage::traits::Storage};
+use subduction_core::{connection::Connection, peer::id::PeerId, storage::traits::Storage};
+use subduction_websocket::tokio::{TimeoutTokio, client::TokioWebSocketClient};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
+use tungstenite::http::Uri;
 
 use crate::output::Output;
 
@@ -56,7 +61,7 @@ fn cmd(s: &str) -> String {
 ///     └── qux.txt
 /// other.txt
 /// ```
-fn format_paths_as_tree(paths: &[std::path::PathBuf]) -> String {
+fn format_paths_as_tree(paths: &[PathBuf]) -> String {
     // Build a tree structure from paths
     #[derive(Default)]
     struct TreeNode {
@@ -198,13 +203,13 @@ fn add_peer_during_init(name: &str, url: &str, out: Output) -> eyre::Result<bool
     let peer_name = PeerName::new(name)?;
 
     // Check if already exists
-    if darn_core::peer::get_peer(&peer_name)?.is_some() {
+    if peer::get_peer(&peer_name)?.is_some() {
         out.remark(&format!("Peer already exists: {name}"))?;
         return Ok(true);
     }
 
     let peer = Peer::discover(peer_name, PeerAddress::websocket(url.to_string()));
-    darn_core::peer::add_peer(&peer)?;
+    peer::add_peer(&peer)?;
 
     if out.is_porcelain() {
         out.kv("peer_name", name)?;
@@ -218,7 +223,7 @@ fn add_peer_during_init(name: &str, url: &str, out: Output) -> eyre::Result<bool
 
 /// Interactively prompt the user to add a sync server during init.
 fn prompt_peer_during_init(out: Output) -> eyre::Result<bool> {
-    let existing_peers = darn_core::peer::list_peers()?;
+    let existing_peers = peer::list_peers()?;
 
     let prompt = if existing_peers.is_empty() {
         "Add a sync server?"
@@ -284,7 +289,7 @@ pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path, out: Output) -> ey
     }
 
     // Step 3: Check we have peers configured
-    let peers = darn_core::peer::list_peers()?;
+    let peers = peer::list_peers()?;
     if peers.is_empty() {
         eyre::bail!("No peers configured. Use `darn peer add` first.");
     }
@@ -366,9 +371,7 @@ pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path, out: Output) -> ey
     #[allow(clippy::cast_possible_truncation)]
     let sync_progress = out.progress(file_entries.len() as u64, "Syncing files...");
 
-    let concurrency = std::thread::available_parallelism()
-        .map(std::num::NonZero::get)
-        .unwrap_or(4);
+    let concurrency = darn_core::concurrency::network_bound();
 
     let subduction = darn.subduction().clone();
 
@@ -490,7 +493,7 @@ struct CloneEntry {
 /// sedimentrees (must be sequential — need parent before child). Collect
 /// file entries for parallel sync in Phase 2.
 async fn collect_clone_entries(
-    subduction: &Arc<darn_core::subduction::DarnSubduction>,
+    subduction: &Arc<DarnSubduction>,
     dir_id: SedimentreeId,
     current_path: PathBuf,
     timeout: Option<Duration>,
@@ -1507,7 +1510,7 @@ fn display_peer_dry_run_status(
 }
 
 /// Format a duration for display.
-fn format_duration(d: &std::time::Duration) -> String {
+fn format_duration(d: &Duration) -> String {
     let secs = d.as_secs();
     if secs == 0 {
         let ms = d.as_millis();
@@ -1551,7 +1554,7 @@ fn format_timestamp(ts: darn_core::unix_timestamp::UnixTimestamp) -> String {
 /// - Optionally syncs with peers at the specified interval
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn watch(
-    sync_interval: &std::time::Duration,
+    sync_interval: &Duration,
     no_track: bool,
     force_immutable: bool,
     out: Output,
@@ -2116,8 +2119,6 @@ pub(crate) fn peer_add(
     peer_id: Option<String>,
     out: Output,
 ) -> eyre::Result<()> {
-    use darn_core::peer;
-
     // -- Name --
     let name = match name {
         Some(n) => n,
@@ -2218,7 +2219,7 @@ fn peer_add_interactive(out: Output) -> eyre::Result<PeerAddress> {
 
 /// List known peers.
 pub(crate) fn peer_list(out: Output) -> eyre::Result<()> {
-    let peers = darn_core::peer::list_peers()?;
+    let peers = peer::list_peers()?;
 
     info!("Listing peers");
 
@@ -2280,7 +2281,7 @@ pub(crate) fn peer_list(out: Output) -> eyre::Result<()> {
 pub(crate) fn peer_remove(name: &str, out: Output) -> eyre::Result<()> {
     let peer_name = PeerName::new(name)?;
 
-    if darn_core::peer::remove_peer(&peer_name)? {
+    if peer::remove_peer(&peer_name)? {
         info!(%name, "Removed peer");
         if out.is_porcelain() {
             out.detail_porcelain(&format!("removed\t{name}"));
@@ -2299,20 +2300,19 @@ pub(crate) fn peer_remove(name: &str, out: Output) -> eyre::Result<()> {
 /// Show info about global config and current workspace.
 pub(crate) fn info(out: Output) -> eyre::Result<()> {
     // Global Configuration
-    let config_dir = darn_core::config::global_config_dir()?;
-    let signer_dir = darn_core::config::global_signer_dir()?;
+    let config_dir = config::global_config_dir()?;
+    let signer_dir = config::global_signer_dir()?;
 
-    let peer_id_str = match darn_core::signer::peer_id(&signer_dir) {
+    let peer_id_str = match signer::peer_id(&signer_dir) {
         Ok(peer_id) => bs58::encode(peer_id.as_bytes()).into_string(),
         Err(e) => format!("(error: {e})"),
     };
 
     #[cfg(feature = "iroh")]
-    let iroh_node_id_str: Option<String> =
-        Some(match darn_core::signer::iroh_node_id_string(&signer_dir) {
-            Ok(id) => id,
-            Err(e) => format!("(error: {e})"),
-        });
+    let iroh_node_id_str: Option<String> = Some(match signer::iroh_node_id_string(&signer_dir) {
+        Ok(id) => id,
+        Err(e) => format!("(error: {e})"),
+    });
 
     #[cfg(not(feature = "iroh"))]
     let iroh_node_id_str: Option<String> = None;
@@ -2339,7 +2339,7 @@ fn info_porcelain(
     }
 
     // Peers
-    if let Ok(peers) = darn_core::peer::list_peers() {
+    if let Ok(peers) = peer::list_peers() {
         for peer in &peers {
             let mode = if peer.is_known() { "known" } else { "discover" };
             let peer_id_display = if let Some(id) = peer.peer_id() {
@@ -2430,7 +2430,7 @@ fn info_human(
     cliclack::note("Global Configuration", global_table)?;
 
     // Configured Peers
-    let peers_content = match darn_core::peer::list_peers() {
+    let peers_content = match peer::list_peers() {
         Ok(peers) if peers.is_empty() => dim.apply_to("(no peers configured)").to_string(),
         Ok(peers) => {
             let mut table = String::new();
@@ -2558,15 +2558,11 @@ fn info_human_workspace(dim: &Style) -> eyre::Result<()> {
 ///
 /// Returns an error on signer loading or URI parsing failures.
 async fn connect_global_peers(
-    subduction: &darn_core::subduction::DarnSubduction,
-    signer_dir: &std::path::Path,
-    peers: &[darn_core::peer::Peer],
-    timeout: std::time::Duration,
+    subduction: &DarnSubduction,
+    signer_dir: &Path,
+    peers: &[Peer],
+    timeout: Duration,
 ) -> eyre::Result<Vec<PeerId>> {
-    use darn_core::{signer, subduction::DarnConnection};
-    use subduction_websocket::tokio::{TimeoutTokio, client::TokioWebSocketClient};
-    use tungstenite::http::Uri;
-
     let mut connected = Vec::new();
 
     for peer in peers {
@@ -2612,13 +2608,11 @@ async fn connect_global_peers(
 
 /// Sync a single sedimentree with all connected peers, returning total items transferred.
 async fn sync_sedimentree_with_peers(
-    subduction: &darn_core::subduction::DarnSubduction,
+    subduction: &DarnSubduction,
     peer_ids: &[PeerId],
     sed_id: SedimentreeId,
-    timeout: std::time::Duration,
+    timeout: Duration,
 ) -> (usize, usize) {
-    use subduction_core::connection::Connection;
-
     let mut received = 0;
     let mut sent = 0;
 
@@ -2651,29 +2645,27 @@ async fn sync_sedimentree_with_peers(
 /// applies the edit operation, stores the changes, and syncs back.
 pub(crate) async fn doc_edit(
     doc_url: &str,
-    op: darn_core::doc_edit::EditOp,
+    op: EditOp,
     create: bool,
     out: Output,
 ) -> eyre::Result<()> {
-    use darn_core::{doc_edit::apply_edit, signer, subduction as sub};
-
     out.intro("darn doc edit")?;
 
     let sed_id_bytes = parse_automerge_url(doc_url)?;
     let sed_id = SedimentreeId::new(sed_id_bytes);
-    let timeout = std::time::Duration::from_secs(30);
+    let timeout = Duration::from_secs(30);
 
     // Load global signer and storage, hydrate Subduction
-    let signer_dir = darn_core::config::global_signer_dir()?;
+    let signer_dir = config::global_signer_dir()?;
     let signer = signer::load(&signer_dir)?;
-    let storage = sub::create_global_storage()?;
+    let storage = subduction::create_global_storage()?;
 
     let spinner = out.spinner("Loading storage...");
-    let subduction = sub::hydrate(signer, storage).await?;
+    let subduction = subduction::hydrate(signer, storage).await?;
     spinner.stop("Storage loaded");
 
     // Connect to all global peers
-    let peers = darn_core::peer::list_peers()?;
+    let peers = peer::list_peers()?;
     if peers.is_empty() {
         eyre::bail!("No peers configured. Use `darn peer add` first.");
     }
@@ -2688,8 +2680,7 @@ pub(crate) async fn doc_edit(
 
     // The path used for --create initialization
     let create_path = match &op {
-        darn_core::doc_edit::EditOp::Append { path, .. }
-        | darn_core::doc_edit::EditOp::Clear { path } => path.clone(),
+        EditOp::Append { path, .. } | EditOp::Clear { path } => path.clone(),
     };
 
     // Fetch phase: sync sedimentree from peers
@@ -2706,7 +2697,7 @@ pub(crate) async fn doc_edit(
         }
         None if create => {
             spinner.stop("Document not found — creating");
-            let doc = darn_core::doc_edit::create_with_empty_list(&create_path)?;
+            let doc = doc_edit::create_with_empty_list(&create_path)?;
             out.success("Created new document")?;
             doc
         }
@@ -2727,10 +2718,10 @@ pub(crate) async fn doc_edit(
     }
 
     let op_description = match &op {
-        darn_core::doc_edit::EditOp::Append { path, values } => {
+        EditOp::Append { path, values } => {
             format!("Appended {} value(s) to {path}", values.len())
         }
-        darn_core::doc_edit::EditOp::Clear { path } => format!("Cleared {path}"),
+        EditOp::Clear { path } => format!("Cleared {path}"),
     };
     out.success(&op_description)?;
 

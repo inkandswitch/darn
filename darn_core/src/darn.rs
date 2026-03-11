@@ -6,14 +6,19 @@
 pub mod refresh_diff;
 
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
+use futures::{StreamExt, stream};
 use sedimentree_core::id::SedimentreeId;
 use sedimentree_fs_storage::FsStorage;
-use subduction_core::{connection::Connection, peer::id::PeerId};
+use subduction_core::{
+    connection::{Connection, handshake::Audience, nonce_cache::NonceCache},
+    peer::id::PeerId,
+};
 use subduction_crypto::signer::memory::MemorySigner;
 use subduction_websocket::tokio::{TimeoutTokio, client::TokioWebSocketClient};
 use thiserror::Error;
@@ -449,9 +454,6 @@ impl Darn {
     ///
     /// Returns a summary of which files were updated, missing, or had errors.
     pub async fn refresh_all(&self, manifest: &mut Manifest) -> RefreshDiff {
-        use futures::{StreamExt, stream};
-        use std::sync::Mutex;
-
         let mut diff = RefreshDiff::default();
 
         // Phase 1: Classify files (fast — only compares hashes)
@@ -475,10 +477,7 @@ impl Darn {
             return diff;
         }
 
-        // Phase 2: Refresh files in parallel
-        let concurrency = std::thread::available_parallelism()
-            .map(std::num::NonZero::get)
-            .unwrap_or(4);
+        let concurrency = crate::concurrency::io_bound();
 
         let results: Mutex<Vec<RefreshResult>> = Mutex::new(Vec::new());
 
@@ -842,8 +841,6 @@ impl Darn {
         staged: &mut StagedUpdate,
         errors: &mut ApplyResult,
     ) -> Result<(), SedimentreeError> {
-        use std::collections::HashSet;
-
         let mut remote_ids = HashSet::new();
         let root_dir_id = manifest.root_directory_id();
         self.collect_remote_sedimentree_ids(root_dir_id, &mut remote_ids)
@@ -930,8 +927,6 @@ impl Darn {
         manifest: &Manifest,
         peer_id: &PeerId,
     ) -> Result<usize, SyncError> {
-        use std::collections::HashSet;
-
         tracing::debug!("sync_missing_sedimentrees: starting");
 
         // Collect IDs we already have
@@ -1226,8 +1221,6 @@ impl Darn {
     /// The loop runs until the `cancel` token is triggered (e.g., on Ctrl+C).
     #[cfg(feature = "iroh")]
     pub async fn accept_iroh_connections(&self, cancel: CancellationToken) {
-        use subduction_core::connection::{handshake::Audience, nonce_cache::NonceCache};
-
         let signer = match self.load_signer() {
             Ok(s) => s,
             Err(e) => {

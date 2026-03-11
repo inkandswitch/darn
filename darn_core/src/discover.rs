@@ -402,10 +402,7 @@ where
     // Load attribute rules for file type detection
     let attributes = AttributeRules::from_workspace_root(root).unwrap_or_default();
 
-    // Process in parallel
-    let concurrency = std::thread::available_parallelism()
-        .map(std::num::NonZero::get)
-        .unwrap_or(4);
+    let concurrency = crate::concurrency::io_bound();
 
     let stored_files: Arc<Mutex<Vec<StoredFile>>> = Arc::new(Mutex::new(Vec::new()));
     let errors: Arc<Mutex<Vec<(PathBuf, String)>>> = Arc::new(Mutex::new(Vec::new()));

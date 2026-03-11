@@ -28,6 +28,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use automerge::{Automerge, AutomergeError, ObjType, ROOT, ReadDoc, transaction::Transactable};
 use thiserror::Error;
 
@@ -147,10 +150,7 @@ impl File {
         let file_metadata = std::fs::metadata(path)?;
 
         #[cfg(unix)]
-        let permissions = {
-            use std::os::unix::fs::PermissionsExt;
-            file_metadata.permissions().mode() & 0o777
-        };
+        let permissions = { file_metadata.permissions().mode() & 0o777 };
 
         #[cfg(not(unix))]
         let permissions = 0o644;
@@ -418,7 +418,6 @@ impl File {
 
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(self.metadata.mode());
             std::fs::set_permissions(path, perms)?;
         }
@@ -454,7 +453,6 @@ impl File {
         // with correct mode immediately
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(self.metadata.mode());
             if let Err(e) = std::fs::set_permissions(&temp_path, perms) {
                 drop(std::fs::remove_file(&temp_path));
