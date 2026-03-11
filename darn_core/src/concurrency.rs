@@ -9,14 +9,13 @@
 /// wait. Using more tasks than cores keeps the storage device's queue fed
 /// while CPU work proceeds on the blocking pool.
 ///
-/// Returns `min(cores * 4, 64)`, falling back to 16 if core count is
-/// unavailable.
+/// Returns `cores * 4`, falling back to 16 if core count is unavailable.
 #[must_use]
 pub fn io_bound() -> usize {
     let cores = std::thread::available_parallelism()
         .map(std::num::NonZero::get)
         .unwrap_or(4);
-    (cores * 4).min(64)
+    cores * 4
 }
 
 /// Concurrency for network-bound work (sync with peers).
