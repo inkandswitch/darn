@@ -192,3 +192,68 @@ impl ApplyResult {
         !self.deleted.is_empty()
     }
 }
+
+#[allow(clippy::panic)]
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bolero::check;
+    use subduction_core::connection::stats::SyncStats;
+
+    /// `add_sync_stats` is additive: after N calls the summary fields
+    /// equal the element-wise sum, and `sedimentrees_synced == N`.
+    #[test]
+    fn sync_summary_accumulates_stats() {
+        check!()
+            .with_type::<Vec<(u16, u16, u16, u16)>>()
+            .for_each(|entries| {
+                let mut s = SyncSummary::new();
+                let mut exp_cr = 0;
+                let mut exp_fr = 0;
+                let mut exp_cs = 0;
+                let mut exp_fs = 0;
+
+                for &(cr, fr, cs, fs) in entries {
+                    let (cr, fr, cs, fs) =
+                        (cr as usize, fr as usize, cs as usize, fs as usize);
+                    s.add_sync_stats(&SyncStats {
+                        commits_received: cr,
+                        fragments_received: fr,
+                        commits_sent: cs,
+                        fragments_sent: fs,
+                    });
+                    exp_cr += cr;
+                    exp_fr += fr;
+                    exp_cs += cs;
+                    exp_fs += fs;
+                }
+
+                assert_eq!(s.sedimentrees_synced, entries.len());
+                assert_eq!(s.commits_received, exp_cr);
+                assert_eq!(s.fragments_received, exp_fr);
+                assert_eq!(s.commits_sent, exp_cs);
+                assert_eq!(s.fragments_sent, exp_fs);
+                assert_eq!(s.total_received(), exp_cr + exp_fr);
+                assert_eq!(s.total_sent(), exp_cs + exp_fs);
+                assert_eq!(s.any_success(), !entries.is_empty());
+            });
+    }
+
+    #[test]
+    fn apply_result_total_affected_is_sum_of_categories() {
+        let r = ApplyResult {
+            updated: vec![PathBuf::from("a.txt")],
+            merged: vec![PathBuf::from("b.txt")],
+            created: vec![PathBuf::from("c.txt"), PathBuf::from("d.txt")],
+            deleted: vec![PathBuf::from("e.txt")],
+            errors: Vec::new(),
+        };
+        assert_eq!(
+            r.total_affected(),
+            r.updated.len() + r.merged.len() + r.created.len() + r.deleted.len()
+        );
+        assert!(r.any_changes());
+        assert!(r.has_deletions());
+        assert!(!r.has_errors());
+    }
+}

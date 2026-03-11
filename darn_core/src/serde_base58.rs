@@ -264,6 +264,87 @@ pub mod synced_digests {
     }
 }
 
+#[allow(clippy::panic)]
+#[cfg(test)]
+mod tests {
+    use bolero::check;
+    use sedimentree_core::id::SedimentreeId;
+
+    #[test]
+    fn automerge_url_roundtrip() {
+        check!()
+            .with_type::<[u8; 16]>()
+            .for_each(|id_bytes: &[u8; 16]| {
+                let mut full = [0u8; 32];
+                full[..16].copy_from_slice(id_bytes);
+                let original = SedimentreeId::new(full);
+
+                #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
+                struct Wrapper {
+                    #[serde(with = "super::automerge_url")]
+                    id: SedimentreeId,
+                }
+
+                let w = Wrapper { id: original };
+                let json = serde_json::to_string(&w).expect("serialize");
+                assert!(
+                    json.contains("automerge:"),
+                    "serialized form must contain 'automerge:' prefix"
+                );
+
+                let recovered: Wrapper = serde_json::from_str(&json).expect("deserialize");
+                assert_eq!(recovered.id, original, "roundtrip must preserve identity");
+            });
+    }
+
+    #[test]
+    fn automerge_url_rejects_plain_bs58() {
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            #[serde(with = "super::automerge_url")]
+            #[allow(dead_code)]
+            id: SedimentreeId,
+        }
+
+        let plain_bs58 = bs58::encode([42u8; 32]).into_string();
+        let json = format!(r#"{{"id":"{}"}}"#, plain_bs58);
+        let result = serde_json::from_str::<Wrapper>(&json);
+        assert!(
+            result.is_err(),
+            "plain bs58 without automerge: prefix must be rejected"
+        );
+    }
+
+    /// A valid bs58check encoding of 8 bytes should be rejected
+    /// by the length check, not the checksum check.
+    #[test]
+    fn automerge_url_rejects_wrong_payload_length() {
+        use sha2::{Digest, Sha256};
+
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            #[serde(with = "super::automerge_url")]
+            #[allow(dead_code)]
+            id: SedimentreeId,
+        }
+
+        // Build a valid bs58check string encoding 8 bytes (not 16)
+        let payload = [0xAB_u8; 8];
+        let checksum = Sha256::digest(Sha256::digest(&payload));
+        let mut buf = Vec::with_capacity(12);
+        buf.extend_from_slice(&payload);
+        buf.extend_from_slice(&checksum[..4]);
+        let encoded = bs58::encode(&buf).into_string();
+
+        let json = format!(r#"{{"id":"automerge:{encoded}"}}"#);
+        let result = serde_json::from_str::<Wrapper>(&json);
+        assert!(
+            result.is_err(),
+            "8-byte payload should be rejected (need 16)"
+        );
+    }
+}
+
 /// Serde module for `Audience` enum (Known or Discover).
 pub mod audience {
     use serde::{Deserialize, Deserializer, Serialize, Serializer, de};

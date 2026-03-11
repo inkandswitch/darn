@@ -1140,3 +1140,289 @@ async fn nested_dist_files_ingested_as_immutable() -> TestResult {
     })
     .await
 }
+
+// ==========================================================================
+// Sedimentree store / load roundtrip
+// ==========================================================================
+
+#[tokio::test]
+async fn sedimentree_store_load_roundtrip() -> TestResult {
+    use darn_core::file::File;
+
+    with_env_async(|env| async move {
+        env.init();
+        let darn = env.open().await;
+
+        let original = File::text("hello.txt", "Hello, world!");
+        let mut am_doc = original.to_automerge()?;
+
+        let id = darn_core::generate_sedimentree_id();
+        darn_core::sedimentree::store_document(darn.subduction(), id, &mut am_doc).await?;
+
+        let loaded_doc = darn_core::sedimentree::load_document(darn.subduction(), id)
+            .await?
+            .expect("document should exist after store");
+
+        let loaded_file = File::from_automerge(&loaded_doc)?;
+        assert_eq!(loaded_file.content, original.content);
+        assert_eq!(loaded_file.name, original.name);
+
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn sedimentree_store_load_binary_roundtrip() -> TestResult {
+    use darn_core::file::File;
+
+    with_env_async(|env| async move {
+        env.init();
+        let darn = env.open().await;
+
+        let binary_data: Vec<u8> = (0..=255).collect();
+        let original = File::binary("data.bin", binary_data);
+        let mut am_doc = original.to_automerge()?;
+
+        let id = darn_core::generate_sedimentree_id();
+        darn_core::sedimentree::store_document(darn.subduction(), id, &mut am_doc).await?;
+
+        let loaded_doc = darn_core::sedimentree::load_document(darn.subduction(), id)
+            .await?
+            .expect("document should exist");
+
+        let loaded_file = File::from_automerge(&loaded_doc)?;
+        assert_eq!(loaded_file.content, original.content);
+
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn sedimentree_store_load_immutable_roundtrip() -> TestResult {
+    use darn_core::file::File;
+
+    with_env_async(|env| async move {
+        env.init();
+        let darn = env.open().await;
+
+        let original = File::immutable("Cargo.lock", "[[package]]\nname = \"darn\"");
+        let mut am_doc = original.to_automerge()?;
+
+        let id = darn_core::generate_sedimentree_id();
+        darn_core::sedimentree::store_document(darn.subduction(), id, &mut am_doc).await?;
+
+        let loaded_doc = darn_core::sedimentree::load_document(darn.subduction(), id)
+            .await?
+            .expect("document should exist");
+
+        let loaded_file = File::from_automerge(&loaded_doc)?;
+        assert_eq!(loaded_file.content, original.content);
+
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn sedimentree_load_nonexistent_returns_none() -> TestResult {
+    with_env_async(|env| async move {
+        env.init();
+        let darn = env.open().await;
+
+        let id = darn_core::generate_sedimentree_id();
+        let result = darn_core::sedimentree::load_document(darn.subduction(), id).await?;
+        assert!(
+            result.is_none(),
+            "loading a never-stored ID should return None"
+        );
+
+        Ok(())
+    })
+    .await
+}
+
+// ==========================================================================
+// Sedimentree compute_digest determinism
+// ==========================================================================
+
+#[tokio::test]
+async fn sedimentree_compute_digest_deterministic() -> TestResult {
+    use darn_core::file::File;
+
+    with_env_async(|env| async move {
+        env.init();
+        let darn = env.open().await;
+
+        let doc = File::text("test.txt", "deterministic content");
+        let mut am_doc = doc.to_automerge()?;
+
+        let id = darn_core::generate_sedimentree_id();
+        darn_core::sedimentree::store_document(darn.subduction(), id, &mut am_doc).await?;
+
+        let digest1 = darn_core::sedimentree::compute_digest(darn.subduction(), id).await?;
+        let digest2 = darn_core::sedimentree::compute_digest(darn.subduction(), id).await?;
+
+        assert_eq!(digest1, digest2, "digest must be deterministic");
+
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn sedimentree_compute_digest_differs_for_different_content() -> TestResult {
+    use darn_core::file::File;
+
+    with_env_async(|env| async move {
+        env.init();
+        let darn = env.open().await;
+
+        let doc_a = File::text("a.txt", "content A");
+        let mut am_a = doc_a.to_automerge()?;
+        let id_a = darn_core::generate_sedimentree_id();
+        darn_core::sedimentree::store_document(darn.subduction(), id_a, &mut am_a).await?;
+
+        let doc_b = File::text("b.txt", "content B");
+        let mut am_b = doc_b.to_automerge()?;
+        let id_b = darn_core::generate_sedimentree_id();
+        darn_core::sedimentree::store_document(darn.subduction(), id_b, &mut am_b).await?;
+
+        let digest_a = darn_core::sedimentree::compute_digest(darn.subduction(), id_a).await?;
+        let digest_b = darn_core::sedimentree::compute_digest(darn.subduction(), id_b).await?;
+
+        assert_ne!(
+            digest_a, digest_b,
+            "different content should produce different digests"
+        );
+
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn sedimentree_add_changes_stores_incremental() -> TestResult {
+    use automerge::{ReadDoc, transaction::Transactable};
+    use darn_core::file::File;
+
+    with_env_async(|env| async move {
+        env.init();
+        let darn = env.open().await;
+
+        let doc = File::text("incremental.txt", "version 1");
+        let mut am_doc = doc.to_automerge()?;
+        let id = darn_core::generate_sedimentree_id();
+        darn_core::sedimentree::store_document(darn.subduction(), id, &mut am_doc).await?;
+
+        // Make an incremental change
+        let heads_before: Vec<_> = am_doc.get_heads().into_iter().collect();
+        am_doc
+            .transact::<_, _, automerge::AutomergeError>(|tx| {
+                let (_, content_id) = tx
+                    .get(automerge::ROOT, "content")
+                    .unwrap()
+                    .expect("content field");
+                let old_len = tx.text(&content_id).unwrap().chars().count();
+                tx.splice_text(
+                    &content_id,
+                    0,
+                    old_len.try_into().unwrap_or(isize::MAX),
+                    "version 2",
+                )?;
+                Ok(())
+            })
+            .map_err(|f| f.error)?;
+
+        let count =
+            darn_core::sedimentree::add_changes(darn.subduction(), id, &mut am_doc, &heads_before)
+                .await?;
+        assert_eq!(count, 1, "should have stored exactly 1 new change");
+
+        let loaded = darn_core::sedimentree::load_document(darn.subduction(), id)
+            .await?
+            .expect("should exist");
+        let loaded_file = File::from_automerge(&loaded)?;
+        assert_eq!(
+            loaded_file.content,
+            darn_core::file::content::Content::Text("version 2".into())
+        );
+
+        Ok(())
+    })
+    .await
+}
+
+// ==========================================================================
+// Discovery: scan tolerates unreadable entries
+// ==========================================================================
+
+#[cfg(unix)]
+#[tokio::test]
+async fn scan_tolerates_unreadable_file() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+
+    with_env_async(|env| async move {
+        env.init();
+        let darn = env.open().await;
+        let manifest = darn.load_manifest()?;
+
+        std::fs::write(env.workspace().join("readable.txt"), "hello")?;
+        let unreadable = env.workspace().join("unreadable.txt");
+        std::fs::write(&unreadable, "secret")?;
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000))?;
+
+        // scan_new_files only lists candidates — it doesn't read content
+        let paths = darn.scan_new_files(&manifest)?;
+        assert!(
+            paths.iter().any(|p| p.ends_with("readable.txt")),
+            "readable file should be discovered"
+        );
+
+        // Restore permissions for cleanup
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o644))?;
+
+        Ok(())
+    })
+    .await
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ingest_reports_errors_for_unreadable_files() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+
+    with_env_async(|env| async move {
+        env.init();
+        let darn = env.open().await;
+        let mut manifest = darn.load_manifest()?;
+
+        std::fs::write(env.workspace().join("good.txt"), "readable")?;
+        let bad = env.workspace().join("bad.txt");
+        std::fs::write(&bad, "unreadable")?;
+        std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o000))?;
+
+        let paths = darn.scan_new_files(&manifest)?;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let result = darn
+            .ingest_files(paths, &mut manifest, false, |_| {}, &cancel)
+            .await?;
+
+        assert!(
+            result.new_files.iter().any(|p| p.ends_with("good.txt")),
+            "readable file should be ingested"
+        );
+        assert!(
+            result.errors.iter().any(|(p, _)| p.ends_with("bad.txt")),
+            "unreadable file should produce an error, errors: {:?}",
+            result.errors
+        );
+
+        // Restore permissions for cleanup
+        std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o644))?;
+
+        Ok(())
+    })
+    .await
+}
