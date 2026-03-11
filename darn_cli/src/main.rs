@@ -10,6 +10,7 @@
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use darn_core::doc_edit::EditOp;
 use eyre::Result;
 use output::Verbosity;
 use tracing_subscriber::{EnvFilter, fmt};
@@ -103,10 +104,8 @@ async fn main() -> Result<()> {
                 operation,
             } => {
                 let op = match operation {
-                    DocEditOp::Append { path, values } => {
-                        darn_core::doc_edit::EditOp::Append { path, values }
-                    }
-                    DocEditOp::Clear { path } => darn_core::doc_edit::EditOp::Clear { path },
+                    DocEditOp::Append { path, values } => EditOp::Append { path, values },
+                    DocEditOp::Clear { path } => EditOp::Clear { path },
                 };
                 commands::doc_edit(&doc_url, op, create, out).await
             }

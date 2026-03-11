@@ -15,8 +15,10 @@ use std::{
 use futures::{StreamExt, stream};
 use sedimentree_core::id::SedimentreeId;
 use sedimentree_fs_storage::FsStorage;
+#[cfg(feature = "iroh")]
+use subduction_core::connection::nonce_cache::NonceCache;
 use subduction_core::{
-    connection::{Connection, handshake::Audience, nonce_cache::NonceCache},
+    connection::{Connection, handshake::Audience},
     peer::id::PeerId,
 };
 use subduction_crypto::signer::memory::MemorySigner;
@@ -1138,7 +1140,7 @@ impl Darn {
     async fn connect_peer_ws(
         &self,
         ws_url: &str,
-        audience: subduction_core::connection::handshake::Audience,
+        audience: Audience,
     ) -> Result<(AuthenticatedDarnConnection, PeerId), SyncError> {
         let uri: Uri = ws_url.parse()?;
         let signer = self.load_signer()?;
@@ -1171,7 +1173,7 @@ impl Darn {
         &self,
         node_id: &str,
         relay_url: Option<&str>,
-        audience: subduction_core::connection::handshake::Audience,
+        audience: Audience,
     ) -> Result<(AuthenticatedDarnConnection, PeerId), SyncError> {
         let public_key: iroh::PublicKey = node_id.parse().map_err(SyncError::IrohNodeId)?;
 

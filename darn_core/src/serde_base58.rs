@@ -60,10 +60,8 @@ pub mod sedimentree_id {
 
 /// Serde module for `SedimentreeId` as an Automerge URL.
 ///
-/// Serializes as `automerge:<bs58check(first 16 bytes)>`.
-/// Deserializes from either:
-/// - New format: `automerge:<bs58check>` (16-byte payload, zero-padded to 32)
-/// - Legacy format: plain base58 of all 32 bytes (for backward compatibility)
+/// Serializes and deserializes as `automerge:<bs58check(first 16 bytes)>`.
+/// The 16-byte payload is zero-padded to 32 bytes for `SedimentreeId`.
 pub mod automerge_url {
     use sedimentree_core::id::SedimentreeId;
     use serde::{Deserialize, Deserializer, Serializer, de};

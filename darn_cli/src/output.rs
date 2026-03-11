@@ -1,20 +1,35 @@
 //! Output abstraction for human-friendly vs machine-readable (porcelain) modes.
 //!
-//! In porcelain mode, all output is plain text with tab-separated fields:
-//! - Status lines: `status\t<key>\t<value>`
-//! - Data lines: `<field1>\t<field2>\t...`
-//! - No spinners, progress bars, ANSI colors, or box-drawing characters
+//! In porcelain mode, all output is plain text with tab-separated fields
+//! and no spinners, progress bars, ANSI colors, or box-drawing characters.
+//!
+//! # Wire format
+//!
+//! Status lines use the format `<level>\t<message>`:
+//!
+//! | Prefix     | Emitted by                                  |
+//! |------------|---------------------------------------------|
+//! | `ok`       | `success`, `summary`, spinner/progress stop |
+//! | `error`    | `error`                                     |
+//! | `warning`  | `warning`                                   |
+//! | `info`     | `info`, `remark`, spinner start             |
+//! | `progress` | progress start (`progress\t<msg>\t<total>`) |
+//!
+//! Structured data uses `<key>\t<value>` (no status prefix) via [`Output::kv`].
+//!
+//! Per-item detail lines ([`Output::detail_porcelain`]) are caller-formatted,
+//! typically `<verb>\t<path>` (e.g. `created\t./foo.txt`).
 //!
 //! # Verbosity levels
 //!
 //! Independent of format (interactive vs porcelain), output volume is
 //! controlled by [`Verbosity`]:
 //!
-//! | Level    | Spinners | Detail | Summaries | Errors | Prompts      |
-//! |----------|----------|--------|-----------|--------|--------------|
-//! | Normal   | yes      | yes    | yes       | yes    | interactive  |
-//! | Quiet    | no       | no     | yes       | yes    | auto-accept  |
-//! | Silent   | no       | no     | no        | stderr | auto-accept  |
+//! | Level    | Spinners | Detail | Summaries | Errors | Prompts     |
+//! |----------|----------|--------|-----------|--------|-------------|
+//! | Normal   | yes      | yes    | yes       | yes    | interactive |
+//! | Quiet    | no       | no     | yes       | yes    | auto-accept |
+//! | Silent   | no       | no     | no        | stderr | auto-accept |
 //!
 //! When combined with `--porcelain`, the highest suppression wins:
 //! `--porcelain --silent` produces no output at all (check exit code).
