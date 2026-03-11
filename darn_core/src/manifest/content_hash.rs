@@ -78,3 +78,59 @@ pub fn hash_file(path: &Path) -> io::Result<Digest<FileSystemContent>> {
     io::copy(&mut reader, &mut hasher)?;
     Ok(Digest::force_from_bytes(*hasher.finalize().as_bytes()))
 }
+
+#[allow(clippy::panic)]
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bolero::check;
+
+    /// Hardcoded known-answer vectors for blake3.
+    ///
+    /// If these break, it means the hashing algorithm changed — which would
+    /// silently invalidate every existing manifest on disk.
+    #[test]
+    fn hash_bytes_known_answer() {
+        // blake3("") — from the BLAKE3 spec / reference implementation
+        let expected_empty: [u8; 32] = [
+            0xaf, 0x13, 0x49, 0xb9, 0xf5, 0xf9, 0xa1, 0xa6, 0xa0, 0x40, 0x4d, 0xea, 0x36, 0xdc,
+            0xc9, 0x49, 0x9b, 0xcb, 0x25, 0xc9, 0xad, 0xc1, 0x12, 0xb7, 0xcc, 0x9a, 0x93, 0xca,
+            0xe4, 0x1f, 0x32, 0x62,
+        ];
+        assert_eq!(
+            hash_bytes(b"").as_bytes(),
+            &expected_empty,
+            "blake3 empty hash must match known vector"
+        );
+
+        // blake3("hello")
+        let expected_hello: [u8; 32] = [
+            0xea, 0x8f, 0x16, 0x3d, 0xb3, 0x86, 0x82, 0x92, 0x5e, 0x44, 0x91, 0xc5, 0xe5, 0x8d,
+            0x4b, 0xb3, 0x50, 0x6e, 0xf8, 0xc1, 0x4e, 0xb7, 0x8a, 0x86, 0xe9, 0x08, 0xc5, 0x62,
+            0x4a, 0x67, 0x20, 0x0f,
+        ];
+        assert_eq!(
+            hash_bytes(b"hello").as_bytes(),
+            &expected_hello,
+            "blake3 'hello' hash must match known vector"
+        );
+    }
+
+    /// The streaming hash (via `io::copy`) must agree with the in-memory hash.
+    #[allow(clippy::expect_used)] // bolero closures return (), can't use TestResult
+    #[test]
+    fn hash_file_matches_hash_bytes() {
+        check!().with_type::<Vec<u8>>().for_each(|data: &Vec<u8>| {
+            let dir = tempfile::tempdir().expect("create tempdir");
+            let path = dir.path().join("test.bin");
+            std::fs::write(&path, data).expect("write test file");
+
+            let file_digest = hash_file(&path).expect("hash_file");
+            let bytes_digest = hash_bytes(data);
+            assert_eq!(
+                file_digest, bytes_digest,
+                "hash_file must agree with hash_bytes"
+            );
+        });
+    }
+}

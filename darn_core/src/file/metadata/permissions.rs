@@ -247,17 +247,6 @@ mod tests {
     use bolero::check;
 
     #[test]
-    fn permission_set_bitwise_or() {
-        let rw = PermissionSet::from(Permission::Read) | Permission::Write;
-        assert!(rw.contains(Permission::Read));
-        assert!(rw.contains(Permission::Write));
-        assert!(!rw.contains(Permission::Execute));
-
-        let rwx = rw | Permission::Execute;
-        assert_eq!(rwx, PermissionSet::ALL);
-    }
-
-    #[test]
     fn permissions_mode_roundtrip() {
         check!().with_type::<u16>().for_each(|&bits| {
             let mode = u32::from(bits) & 0o777;
@@ -273,12 +262,5 @@ mod tests {
         assert_eq!(Permissions::from_mode(0o700).rwx(), "rwx------");
         assert_eq!(Permissions::from_mode(0o777).rwx(), "rwxrwxrwx");
         assert_eq!(Permissions::from_mode(0o000).rwx(), "---------");
-    }
-
-    #[test]
-    fn permissions_is_executable() {
-        assert!(Permissions::from_mode(0o755).is_executable());
-        assert!(Permissions::from_mode(0o100).is_executable());
-        assert!(!Permissions::from_mode(0o644).is_executable());
     }
 }

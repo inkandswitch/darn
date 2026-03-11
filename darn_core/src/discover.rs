@@ -221,6 +221,7 @@ async fn store_single_file(
     root: &Path,
     subduction: &DarnSubduction,
     attributes: &AttributeRules,
+    force_immutable: bool,
 ) -> Result<StoredFile, FileProcessError> {
     let relative_path = path
         .strip_prefix(root)
@@ -230,16 +231,18 @@ async fn store_single_file(
     // CPU-intensive work: file read + Automerge conversion
     // Run on blocking threadpool to avoid starving the async runtime
     let path_owned = path.to_path_buf();
+    let rel_path = relative_path.clone();
     let attributes_default = attributes.clone();
     let (file_type, am_doc) = tokio::task::spawn_blocking(move || {
-        let doc = File::from_path_with_attributes(&path_owned, Some(&attributes_default))
-            .map_err(FileProcessError::Read)?;
+        let doc = File::from_path_full(
+            &path_owned,
+            Some(rel_path.as_path()),
+            Some(&attributes_default),
+            force_immutable,
+        )
+        .map_err(FileProcessError::Read)?;
 
-        let file_type = if doc.content.is_text() {
-            FileType::Text
-        } else {
-            FileType::Binary
-        };
+        let file_type = FileType::from(&doc.content);
 
         let am_doc = doc.into_automerge().map_err(FileProcessError::Automerge)?;
         Ok::<_, FileProcessError>((file_type, am_doc))
@@ -255,7 +258,7 @@ async fn store_single_file(
     // Store as sedimentree commits
     sedimentree::store_document(subduction, sedimentree_id, &mut am_doc)
         .await
-        .map_err(FileProcessError::Sedimentree)?;
+        .map_err(|e| FileProcessError::Sedimentree(Box::new(e)))?;
 
     // Compute digests (hash is CPU-bound, run on blocking pool)
     let path_for_hash = path.to_path_buf();
@@ -266,7 +269,7 @@ async fn store_single_file(
             .map_err(FileProcessError::Hash)?;
     let sedimentree_digest = sedimentree::compute_digest(subduction, sedimentree_id)
         .await
-        .map_err(FileProcessError::Sedimentree)?;
+        .map_err(|e| FileProcessError::Sedimentree(Box::new(e)))?;
 
     Ok(StoredFile {
         discovered: DiscoveredFile {
@@ -295,7 +298,7 @@ async fn register_file_in_directory(
     let parent_dir_id =
         sedimentree::ensure_parent_directories(subduction, root_dir_id, relative_path)
             .await
-            .map_err(FileProcessError::Sedimentree)?;
+            .map_err(|e| FileProcessError::Sedimentree(Box::new(e)))?;
 
     let file_name = relative_path
         .file_name()
@@ -309,7 +312,7 @@ async fn register_file_in_directory(
         stored.discovered.sedimentree_id,
     )
     .await
-    .map_err(FileProcessError::Sedimentree)?;
+    .map_err(|e| FileProcessError::Sedimentree(Box::new(e)))?;
 
     Ok(())
 }
@@ -343,7 +346,7 @@ pub enum FileProcessError {
 
     /// Sedimentree storage error.
     #[error("storage error: {0}")]
-    Sedimentree(#[from] SedimentreeError),
+    Sedimentree(Box<SedimentreeError>),
 
     /// Failed to hash file.
     #[error("hash error: {0}")]
@@ -382,6 +385,7 @@ pub(crate) async fn ingest_files_parallel<F>(
     root: &Path,
     subduction: &DarnSubduction,
     manifest: &Manifest,
+    force_immutable: bool,
     on_progress: F,
     cancel: &CancellationToken,
 ) -> (Vec<DiscoveredFile>, Vec<(PathBuf, String)>, bool)
@@ -398,10 +402,7 @@ where
     // Load attribute rules for file type detection
     let attributes = AttributeRules::from_workspace_root(root).unwrap_or_default();
 
-    // Process in parallel
-    let concurrency = std::thread::available_parallelism()
-        .map(std::num::NonZero::get)
-        .unwrap_or(4);
+    let concurrency = crate::concurrency::io_bound();
 
     let stored_files: Arc<Mutex<Vec<StoredFile>>> = Arc::new(Mutex::new(Vec::new()));
     let errors: Arc<Mutex<Vec<(PathBuf, String)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -427,7 +428,8 @@ where
 
                 in_flight.fetch_add(1, Ordering::Relaxed);
 
-                let result = store_single_file(&path, root, subduction, attributes).await;
+                let result =
+                    store_single_file(&path, root, subduction, attributes, force_immutable).await;
 
                 in_flight.fetch_sub(1, Ordering::Relaxed);
                 completed.fetch_add(1, Ordering::Relaxed);

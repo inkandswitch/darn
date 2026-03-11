@@ -19,7 +19,7 @@ use darn_core::{
     file::state::FileState,
     ignore,
     staged_update::StagedUpdate,
-    workspace::WorkspaceId,
+    workspace::id::WorkspaceId,
 };
 use testresult::TestResult;
 
@@ -387,12 +387,7 @@ async fn scan_discovers_new_files() -> TestResult {
 
         let names: Vec<_> = new_files
             .iter()
-            .map(|p| {
-                p.file_name()
-                    .expect("has filename")
-                    .to_string_lossy()
-                    .to_string()
-            })
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
             .collect();
         assert!(names.contains(&"hello.txt".to_string()));
         assert!(names.contains(&"world.txt".to_string()));
@@ -483,7 +478,7 @@ async fn ingest_and_track_files() -> TestResult {
 
         let cancel = tokio_util::sync::CancellationToken::new();
         let result = darn
-            .ingest_files(paths, &mut manifest, |_| {}, &cancel)
+            .ingest_files(paths, &mut manifest, false, |_| {}, &cancel)
             .await?;
         assert_eq!(result.new_files.len(), 2);
         assert!(result.errors.is_empty());
@@ -492,12 +487,12 @@ async fn ingest_and_track_files() -> TestResult {
 
         let readme = manifest
             .get_by_path(Path::new("readme.txt"))
-            .expect("readme tracked");
+            .ok_or("readme should be tracked")?;
         assert_eq!(readme.state(env.workspace()), FileState::Clean);
 
         let data = manifest
             .get_by_path(Path::new("data.bin"))
-            .expect("data tracked");
+            .ok_or("data.bin should be tracked")?;
         assert_eq!(data.state(env.workspace()), FileState::Clean);
 
         // Save and reload to verify persistence
@@ -527,7 +522,7 @@ async fn ingest_skips_ignored_via_scan() -> TestResult {
 
         let cancel = tokio_util::sync::CancellationToken::new();
         let result = darn
-            .ingest_files(paths, &mut manifest, |_| {}, &cancel)
+            .ingest_files(paths, &mut manifest, false, |_| {}, &cancel)
             .await?;
         assert_eq!(result.new_files.len(), 1);
 
@@ -554,12 +549,12 @@ async fn refresh_detects_modified_file() -> TestResult {
         std::fs::write(env.workspace().join("file.txt"), "original")?;
         let paths = darn.scan_new_files(&manifest)?;
         let cancel = tokio_util::sync::CancellationToken::new();
-        darn.ingest_files(paths, &mut manifest, |_| {}, &cancel)
+        darn.ingest_files(paths, &mut manifest, false, |_| {}, &cancel)
             .await?;
 
         let entry = manifest
             .get_by_path(Path::new("file.txt"))
-            .expect("tracked");
+            .ok_or("file.txt should be tracked")?;
         assert_eq!(entry.state(env.workspace()), FileState::Clean);
 
         // Modify the file
@@ -567,7 +562,7 @@ async fn refresh_detects_modified_file() -> TestResult {
 
         let entry = manifest
             .get_by_path(Path::new("file.txt"))
-            .expect("tracked");
+            .ok_or("file.txt should be tracked after modify")?;
         assert_eq!(entry.state(env.workspace()), FileState::Modified);
 
         // Refresh should pick it up
@@ -578,7 +573,7 @@ async fn refresh_detects_modified_file() -> TestResult {
         // After refresh, should be clean again
         let entry = manifest
             .get_by_path(Path::new("file.txt"))
-            .expect("tracked");
+            .ok_or("file.txt should be tracked after refresh")?;
         assert_eq!(entry.state(env.workspace()), FileState::Clean);
 
         Ok(())
@@ -596,14 +591,14 @@ async fn refresh_detects_missing_file() -> TestResult {
         std::fs::write(env.workspace().join("doomed.txt"), "bye")?;
         let paths = darn.scan_new_files(&manifest)?;
         let cancel = tokio_util::sync::CancellationToken::new();
-        darn.ingest_files(paths, &mut manifest, |_| {}, &cancel)
+        darn.ingest_files(paths, &mut manifest, false, |_| {}, &cancel)
             .await?;
 
         std::fs::remove_file(env.workspace().join("doomed.txt"))?;
 
         let entry = manifest
             .get_by_path(Path::new("doomed.txt"))
-            .expect("tracked");
+            .ok_or("doomed.txt should be tracked")?;
         assert_eq!(entry.state(env.workspace()), FileState::Missing);
 
         Ok(())
@@ -631,14 +626,12 @@ async fn staged_update_creates_files_atomically() -> TestResult {
         ];
 
         for (path, content) in &files {
-            let file = darn_core::file::File::text(
-                Path::new(path)
-                    .file_name()
-                    .expect("file name")
-                    .to_str()
-                    .expect("utf8"),
-                *content,
-            );
+            let name = Path::new(path)
+                .file_name()
+                .ok_or("path should have file name")?
+                .to_str()
+                .ok_or("file name should be utf8")?;
+            let file = darn_core::file::File::text(name, *content);
             let id = darn_core::generate_sedimentree_id();
             let digest = sedimentree_core::crypto::digest::Digest::force_from_bytes([0u8; 32]);
 
@@ -685,12 +678,12 @@ async fn staged_update_handles_mixed_creates_and_deletes() -> TestResult {
         std::fs::write(env.workspace().join("old.txt"), "old content")?;
         let paths = darn.scan_new_files(&manifest)?;
         let cancel = tokio_util::sync::CancellationToken::new();
-        darn.ingest_files(paths, &mut manifest, |_| {}, &cancel)
+        darn.ingest_files(paths, &mut manifest, false, |_| {}, &cancel)
             .await?;
 
         let old_entry = manifest
             .get_by_path(Path::new("old.txt"))
-            .expect("old tracked");
+            .ok_or("old.txt should be tracked")?;
         let old_id = old_entry.sedimentree_id;
 
         // Now stage: create a new file + delete the old one
@@ -792,7 +785,7 @@ async fn full_local_workflow() -> TestResult {
         // 5. Ingest discovered files
         let cancel = tokio_util::sync::CancellationToken::new();
         let result = darn
-            .ingest_files(paths, &mut manifest, |_| {}, &cancel)
+            .ingest_files(paths, &mut manifest, false, |_| {}, &cancel)
             .await?;
         assert_eq!(result.new_files.len(), 2);
         assert!(result.errors.is_empty());
@@ -811,7 +804,7 @@ async fn full_local_workflow() -> TestResult {
 
         let readme = manifest
             .get_by_path(Path::new("README.md"))
-            .expect("readme tracked");
+            .ok_or("README.md should be tracked")?;
         assert_eq!(readme.state(env.workspace()), FileState::Modified);
 
         // 8. Refresh
@@ -828,6 +821,603 @@ async fn full_local_workflow() -> TestResult {
         darn.save_manifest(&manifest)?;
         let reloaded = darn.load_manifest()?;
         assert_eq!(reloaded.iter().count(), 2);
+
+        Ok(())
+    })
+    .await
+}
+
+// ==========================================================================
+// Root directory document contains both files and folders
+// ==========================================================================
+
+#[tokio::test]
+async fn root_dir_doc_contains_root_level_files() -> TestResult {
+    use darn_core::directory::Directory;
+
+    with_env_async(|env| async move {
+        env.init();
+        let darn = env.open().await;
+        let mut manifest = darn.load_manifest()?;
+
+        // Create root-level files AND subdirectory files
+        std::fs::create_dir_all(env.workspace().join("dist"))?;
+        std::fs::write(env.workspace().join("package.json"), r#"{"name":"test"}"#)?;
+        std::fs::write(
+            env.workspace().join("tsconfig.json"),
+            r#"{"compilerOptions":{}}"#,
+        )?;
+        std::fs::write(env.workspace().join("dist/index.js"), "console.log('hi')")?;
+        std::fs::write(
+            env.workspace().join("dist/style.css"),
+            "body { color: red }",
+        )?;
+
+        let paths = darn.scan_new_files(&manifest)?;
+        assert_eq!(paths.len(), 4, "expected 4 files, got: {paths:?}");
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let result = darn
+            .ingest_files(paths, &mut manifest, false, |_| {}, &cancel)
+            .await?;
+        assert_eq!(result.new_files.len(), 4);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+        // Now read the root directory Automerge document and verify its contents
+        let root_dir_id = manifest.root_directory_id();
+        let root_doc = darn_core::sedimentree::load_document(darn.subduction(), root_dir_id)
+            .await?
+            .expect("root directory document should exist");
+
+        let root_dir = Directory::from_automerge(&root_doc)?;
+
+        // Root dir should contain: dist (folder), package.json (file), tsconfig.json (file)
+        let entry_names: Vec<String> = root_dir.entries.iter().map(|e| e.name.clone()).collect();
+
+        assert!(
+            root_dir.get("dist").is_some(),
+            "root dir should contain 'dist' folder. entries: {entry_names:?}"
+        );
+        assert!(
+            root_dir.get("package.json").is_some(),
+            "root dir should contain 'package.json'. entries: {entry_names:?}"
+        );
+        assert!(
+            root_dir.get("tsconfig.json").is_some(),
+            "root dir should contain 'tsconfig.json'. entries: {entry_names:?}"
+        );
+
+        // Verify entry types
+        let dist_entry = root_dir.get("dist").expect("dist should exist");
+        assert_eq!(
+            dist_entry.entry_type,
+            darn_core::directory::entry::EntryType::Folder
+        );
+
+        let pkg_entry = root_dir
+            .get("package.json")
+            .expect("package.json should exist");
+        assert_eq!(
+            pkg_entry.entry_type,
+            darn_core::directory::entry::EntryType::File
+        );
+
+        Ok(())
+    })
+    .await
+}
+
+// ==========================================================================
+// Attribute-based file type classification during ingestion
+// ==========================================================================
+
+#[tokio::test]
+async fn dist_files_ingested_as_immutable() -> TestResult {
+    use darn_core::file::file_type::FileType;
+
+    with_env_async(|env| async move {
+        env.init();
+
+        // Add dist/** to immutable patterns in .darn config
+        let mut config = darn_core::dotfile::DarnConfig::load(env.workspace())?;
+        config.attributes.immutable.push("dist/**".to_string());
+        config.save(env.workspace())?;
+
+        let darn = env.open().await;
+        let mut manifest = darn.load_manifest()?;
+
+        // Create dist/ files and a src/ file
+        std::fs::create_dir_all(env.workspace().join("dist"))?;
+        std::fs::write(env.workspace().join("dist/tool.js"), "console.log('tool')")?;
+        std::fs::write(env.workspace().join("dist/tool.css"), "body { color: red }")?;
+        std::fs::write(
+            env.workspace().join("dist/chunk-ABC123.js"),
+            "export const x = 1",
+        )?;
+        std::fs::create_dir_all(env.workspace().join("src"))?;
+        std::fs::write(env.workspace().join("src/main.ts"), "const x: number = 1")?;
+        std::fs::write(env.workspace().join("package.json"), r#"{"name":"test"}"#)?;
+
+        let paths = darn.scan_new_files(&manifest)?;
+        assert_eq!(paths.len(), 5, "expected 5 files, got: {paths:?}");
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let result = darn
+            .ingest_files(paths, &mut manifest, false, |_| {}, &cancel)
+            .await?;
+        assert_eq!(result.new_files.len(), 5);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+        // dist/ files must be Immutable
+        let tool_js = manifest
+            .get_by_path(Path::new("dist/tool.js"))
+            .expect("dist/tool.js should be tracked");
+        assert_eq!(
+            tool_js.file_type,
+            FileType::Immutable,
+            "dist/tool.js should be immutable (dist/** pattern)"
+        );
+
+        let tool_css = manifest
+            .get_by_path(Path::new("dist/tool.css"))
+            .expect("dist/tool.css should be tracked");
+        assert_eq!(
+            tool_css.file_type,
+            FileType::Immutable,
+            "dist/tool.css should be immutable (dist/** pattern)"
+        );
+
+        let chunk = manifest
+            .get_by_path(Path::new("dist/chunk-ABC123.js"))
+            .expect("dist/chunk-ABC123.js should be tracked");
+        assert_eq!(
+            chunk.file_type,
+            FileType::Immutable,
+            "dist/chunk-ABC123.js should be immutable (dist/** pattern)"
+        );
+
+        // src/ files must NOT be Immutable
+        let main_ts = manifest
+            .get_by_path(Path::new("src/main.ts"))
+            .expect("src/main.ts should be tracked");
+        assert_eq!(
+            main_ts.file_type,
+            FileType::Text,
+            "src/main.ts should be text (auto-detected)"
+        );
+
+        // Root-level files must NOT be Immutable (unless matched by other patterns)
+        let pkg = manifest
+            .get_by_path(Path::new("package.json"))
+            .expect("package.json should be tracked");
+        assert_eq!(
+            pkg.file_type,
+            FileType::Text,
+            "package.json should be text (auto-detected)"
+        );
+
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn default_immutable_patterns_applied_during_ingestion() -> TestResult {
+    use darn_core::file::file_type::FileType;
+
+    with_env_async(|env| async move {
+        env.init();
+
+        let darn = env.open().await;
+        let mut manifest = darn.load_manifest()?;
+
+        // Create files that match default immutable patterns
+        std::fs::write(
+            env.workspace().join("package-lock.json"),
+            r#"{"lockfileVersion":3}"#,
+        )?;
+        std::fs::write(
+            env.workspace().join("app.js.map"),
+            r#"{"version":3,"mappings":"AAAA"}"#,
+        )?;
+        std::fs::write(env.workspace().join("bundle.min.js"), "var a=1;")?;
+        // And a regular file that should auto-detect as text
+        std::fs::write(env.workspace().join("README.md"), "# Hello")?;
+
+        let paths = darn.scan_new_files(&manifest)?;
+        assert_eq!(paths.len(), 4);
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let result = darn
+            .ingest_files(paths, &mut manifest, false, |_| {}, &cancel)
+            .await?;
+        assert_eq!(result.new_files.len(), 4);
+
+        let lock = manifest
+            .get_by_path(Path::new("package-lock.json"))
+            .expect("package-lock.json should be tracked");
+        assert_eq!(
+            lock.file_type,
+            FileType::Immutable,
+            "package-lock.json should be immutable (default pattern)"
+        );
+
+        let sourcemap = manifest
+            .get_by_path(Path::new("app.js.map"))
+            .expect("app.js.map should be tracked");
+        assert_eq!(
+            sourcemap.file_type,
+            FileType::Immutable,
+            "app.js.map should be immutable (default pattern)"
+        );
+
+        let minified = manifest
+            .get_by_path(Path::new("bundle.min.js"))
+            .expect("bundle.min.js should be tracked");
+        assert_eq!(
+            minified.file_type,
+            FileType::Immutable,
+            "bundle.min.js should be immutable (default pattern)"
+        );
+
+        let readme = manifest
+            .get_by_path(Path::new("README.md"))
+            .expect("README.md should be tracked");
+        assert_eq!(
+            readme.file_type,
+            FileType::Text,
+            "README.md should be text (auto-detected)"
+        );
+
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn nested_dist_files_ingested_as_immutable() -> TestResult {
+    use darn_core::file::file_type::FileType;
+
+    with_env_async(|env| async move {
+        env.init();
+
+        // Add dist/** to immutable patterns
+        let mut config = darn_core::dotfile::DarnConfig::load(env.workspace())?;
+        config.attributes.immutable.push("dist/**".to_string());
+        config.save(env.workspace())?;
+
+        let darn = env.open().await;
+        let mut manifest = darn.load_manifest()?;
+
+        // Create deeply nested dist files
+        std::fs::create_dir_all(env.workspace().join("dist/assets/fonts"))?;
+        std::fs::write(env.workspace().join("dist/assets/chunk-XYZ.js"), "// chunk")?;
+        std::fs::write(
+            env.workspace().join("dist/assets/fonts/inter.woff2"),
+            vec![0u8; 100],
+        )?;
+        std::fs::write(env.workspace().join("dist/index.html"), "<html></html>")?;
+
+        let paths = darn.scan_new_files(&manifest)?;
+        assert_eq!(paths.len(), 3);
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let result = darn
+            .ingest_files(paths, &mut manifest, false, |_| {}, &cancel)
+            .await?;
+        assert_eq!(result.new_files.len(), 3);
+        assert!(result.errors.is_empty());
+
+        let nested_js = manifest
+            .get_by_path(Path::new("dist/assets/chunk-XYZ.js"))
+            .expect("nested dist js should be tracked");
+        assert_eq!(
+            nested_js.file_type,
+            FileType::Immutable,
+            "dist/assets/chunk-XYZ.js should be immutable"
+        );
+
+        // Binary file in dist/ — should still be binary since it's not valid UTF-8
+        let font = manifest
+            .get_by_path(Path::new("dist/assets/fonts/inter.woff2"))
+            .expect("font should be tracked");
+        assert_eq!(
+            font.file_type,
+            FileType::Immutable,
+            "dist/assets/fonts/inter.woff2: immutable rule takes priority over auto-detect"
+        );
+
+        let html = manifest
+            .get_by_path(Path::new("dist/index.html"))
+            .expect("html should be tracked");
+        assert_eq!(
+            html.file_type,
+            FileType::Immutable,
+            "dist/index.html should be immutable"
+        );
+
+        Ok(())
+    })
+    .await
+}
+
+// ==========================================================================
+// Sedimentree store / load roundtrip
+// ==========================================================================
+
+#[tokio::test]
+async fn sedimentree_store_load_roundtrip() -> TestResult {
+    use darn_core::file::File;
+
+    with_env_async(|env| async move {
+        env.init();
+        let darn = env.open().await;
+
+        let original = File::text("hello.txt", "Hello, world!");
+        let mut am_doc = original.to_automerge()?;
+
+        let id = darn_core::generate_sedimentree_id();
+        darn_core::sedimentree::store_document(darn.subduction(), id, &mut am_doc).await?;
+
+        let loaded_doc = darn_core::sedimentree::load_document(darn.subduction(), id)
+            .await?
+            .expect("document should exist after store");
+
+        let loaded_file = File::from_automerge(&loaded_doc)?;
+        assert_eq!(loaded_file.content, original.content);
+        assert_eq!(loaded_file.name, original.name);
+
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn sedimentree_store_load_binary_roundtrip() -> TestResult {
+    use darn_core::file::File;
+
+    with_env_async(|env| async move {
+        env.init();
+        let darn = env.open().await;
+
+        let binary_data: Vec<u8> = (0..=255).collect();
+        let original = File::binary("data.bin", binary_data);
+        let mut am_doc = original.to_automerge()?;
+
+        let id = darn_core::generate_sedimentree_id();
+        darn_core::sedimentree::store_document(darn.subduction(), id, &mut am_doc).await?;
+
+        let loaded_doc = darn_core::sedimentree::load_document(darn.subduction(), id)
+            .await?
+            .expect("document should exist");
+
+        let loaded_file = File::from_automerge(&loaded_doc)?;
+        assert_eq!(loaded_file.content, original.content);
+
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn sedimentree_store_load_immutable_roundtrip() -> TestResult {
+    use darn_core::file::File;
+
+    with_env_async(|env| async move {
+        env.init();
+        let darn = env.open().await;
+
+        let original = File::immutable("Cargo.lock", "[[package]]\nname = \"darn\"");
+        let mut am_doc = original.to_automerge()?;
+
+        let id = darn_core::generate_sedimentree_id();
+        darn_core::sedimentree::store_document(darn.subduction(), id, &mut am_doc).await?;
+
+        let loaded_doc = darn_core::sedimentree::load_document(darn.subduction(), id)
+            .await?
+            .expect("document should exist");
+
+        let loaded_file = File::from_automerge(&loaded_doc)?;
+        assert_eq!(loaded_file.content, original.content);
+
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn sedimentree_load_nonexistent_returns_none() -> TestResult {
+    with_env_async(|env| async move {
+        env.init();
+        let darn = env.open().await;
+
+        let id = darn_core::generate_sedimentree_id();
+        let result = darn_core::sedimentree::load_document(darn.subduction(), id).await?;
+        assert!(
+            result.is_none(),
+            "loading a never-stored ID should return None"
+        );
+
+        Ok(())
+    })
+    .await
+}
+
+// ==========================================================================
+// Sedimentree compute_digest determinism
+// ==========================================================================
+
+#[tokio::test]
+async fn sedimentree_compute_digest_deterministic() -> TestResult {
+    use darn_core::file::File;
+
+    with_env_async(|env| async move {
+        env.init();
+        let darn = env.open().await;
+
+        let doc = File::text("test.txt", "deterministic content");
+        let mut am_doc = doc.to_automerge()?;
+
+        let id = darn_core::generate_sedimentree_id();
+        darn_core::sedimentree::store_document(darn.subduction(), id, &mut am_doc).await?;
+
+        let digest1 = darn_core::sedimentree::compute_digest(darn.subduction(), id).await?;
+        let digest2 = darn_core::sedimentree::compute_digest(darn.subduction(), id).await?;
+
+        assert_eq!(digest1, digest2, "digest must be deterministic");
+
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn sedimentree_compute_digest_differs_for_different_content() -> TestResult {
+    use darn_core::file::File;
+
+    with_env_async(|env| async move {
+        env.init();
+        let darn = env.open().await;
+
+        let doc_a = File::text("a.txt", "content A");
+        let mut am_a = doc_a.to_automerge()?;
+        let id_a = darn_core::generate_sedimentree_id();
+        darn_core::sedimentree::store_document(darn.subduction(), id_a, &mut am_a).await?;
+
+        let doc_b = File::text("b.txt", "content B");
+        let mut am_b = doc_b.to_automerge()?;
+        let id_b = darn_core::generate_sedimentree_id();
+        darn_core::sedimentree::store_document(darn.subduction(), id_b, &mut am_b).await?;
+
+        let digest_a = darn_core::sedimentree::compute_digest(darn.subduction(), id_a).await?;
+        let digest_b = darn_core::sedimentree::compute_digest(darn.subduction(), id_b).await?;
+
+        assert_ne!(
+            digest_a, digest_b,
+            "different content should produce different digests"
+        );
+
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn sedimentree_add_changes_stores_incremental() -> TestResult {
+    use automerge::{ReadDoc, transaction::Transactable};
+    use darn_core::file::File;
+
+    with_env_async(|env| async move {
+        env.init();
+        let darn = env.open().await;
+
+        let doc = File::text("incremental.txt", "version 1");
+        let mut am_doc = doc.to_automerge()?;
+        let id = darn_core::generate_sedimentree_id();
+        darn_core::sedimentree::store_document(darn.subduction(), id, &mut am_doc).await?;
+
+        // Make an incremental change
+        let heads_before: Vec<_> = am_doc.get_heads().into_iter().collect();
+        am_doc
+            .transact::<_, _, automerge::AutomergeError>(|tx| {
+                let (_, content_id) = tx.get(automerge::ROOT, "content")?.expect("content field");
+                let old_len = tx.text(&content_id)?.chars().count();
+                tx.splice_text(
+                    &content_id,
+                    0,
+                    old_len.try_into().unwrap_or(isize::MAX),
+                    "version 2",
+                )?;
+                Ok(())
+            })
+            .map_err(|f| f.error)?;
+
+        let count =
+            darn_core::sedimentree::add_changes(darn.subduction(), id, &mut am_doc, &heads_before)
+                .await?;
+        assert_eq!(count, 1, "should have stored exactly 1 new change");
+
+        let loaded = darn_core::sedimentree::load_document(darn.subduction(), id)
+            .await?
+            .expect("should exist");
+        let loaded_file = File::from_automerge(&loaded)?;
+        assert_eq!(
+            loaded_file.content,
+            darn_core::file::content::Content::Text("version 2".into())
+        );
+
+        Ok(())
+    })
+    .await
+}
+
+// ==========================================================================
+// Discovery: scan tolerates unreadable entries
+// ==========================================================================
+
+#[cfg(unix)]
+#[tokio::test]
+async fn scan_tolerates_unreadable_file() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+
+    with_env_async(|env| async move {
+        env.init();
+        let darn = env.open().await;
+        let manifest = darn.load_manifest()?;
+
+        std::fs::write(env.workspace().join("readable.txt"), "hello")?;
+        let unreadable = env.workspace().join("unreadable.txt");
+        std::fs::write(&unreadable, "secret")?;
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000))?;
+
+        // scan_new_files only lists candidates — it doesn't read content
+        let paths = darn.scan_new_files(&manifest)?;
+        assert!(
+            paths.iter().any(|p| p.ends_with("readable.txt")),
+            "readable file should be discovered"
+        );
+
+        // Restore permissions for cleanup
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o644))?;
+
+        Ok(())
+    })
+    .await
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ingest_reports_errors_for_unreadable_files() -> TestResult {
+    use std::os::unix::fs::PermissionsExt;
+
+    with_env_async(|env| async move {
+        env.init();
+        let darn = env.open().await;
+        let mut manifest = darn.load_manifest()?;
+
+        std::fs::write(env.workspace().join("good.txt"), "readable")?;
+        let bad = env.workspace().join("bad.txt");
+        std::fs::write(&bad, "unreadable")?;
+        std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o000))?;
+
+        let paths = darn.scan_new_files(&manifest)?;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let result = darn
+            .ingest_files(paths, &mut manifest, false, |_| {}, &cancel)
+            .await?;
+
+        assert!(
+            result.new_files.iter().any(|p| p.ends_with("good.txt")),
+            "readable file should be ingested"
+        );
+        assert!(
+            result.errors.iter().any(|(p, _)| p.ends_with("bad.txt")),
+            "unreadable file should produce an error, errors: {:?}",
+            result.errors
+        );
+
+        // Restore permissions for cleanup
+        std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o644))?;
 
         Ok(())
     })

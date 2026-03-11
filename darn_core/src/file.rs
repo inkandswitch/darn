@@ -28,6 +28,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use automerge::{Automerge, AutomergeError, ObjType, ROOT, ReadDoc, transaction::Transactable};
 use thiserror::Error;
 
@@ -80,6 +83,16 @@ impl File {
         }
     }
 
+    /// Creates a new immutable text file document (LWW string, no character merging).
+    #[must_use]
+    pub fn immutable(name: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            name: name::Name::new(name),
+            content: content::Content::ImmutableString(content.into()),
+            metadata: metadata::Metadata::default(),
+        }
+    }
+
     /// Creates a file document from a filesystem path.
     ///
     /// Automatically detects whether the file is text or binary using streaming
@@ -89,7 +102,7 @@ impl File {
     ///
     /// Returns an error if the file cannot be read.
     pub fn from_path(path: &Path) -> Result<Self, ReadFileError> {
-        Self::from_path_with_attributes(path, None)
+        Self::from_path_full(path, None, None, false)
     }
 
     /// Creates a file document from a filesystem path with attribute rules.
@@ -105,29 +118,65 @@ impl File {
         path: &Path,
         attributes: Option<&AttributeRules>,
     ) -> Result<Self, ReadFileError> {
+        Self::from_path_full(path, None, attributes, false)
+    }
+
+    /// Creates a file document from a filesystem path with full options.
+    ///
+    /// `match_path` is the path used for attribute glob matching. When files
+    /// live under a workspace root, pass the _workspace-relative_ path so
+    /// that directory-prefix globs like `dist/**` match correctly. If `None`,
+    /// the absolute `path` is used (which still works for filename-only
+    /// globs like `*.lock`).
+    ///
+    /// When `force_immutable` is true, text files are stored as
+    /// [`Content::ImmutableString`] (LWW string) instead of [`Content::Text`]
+    /// (character-level CRDT). Binary files are unaffected. This only
+    /// applies to _newly ingested_ files — already-tracked files keep their
+    /// existing type on refresh.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read.
+    pub fn from_path_full(
+        path: &Path,
+        match_path: Option<&Path>,
+        attributes: Option<&AttributeRules>,
+        force_immutable: bool,
+    ) -> Result<Self, ReadFileError> {
         let name = name::Name::from_path(path)
             .ok_or_else(|| ReadFileError::InvalidPath(path.to_path_buf()))?;
 
         let file_metadata = std::fs::metadata(path)?;
 
         #[cfg(unix)]
-        let permissions = {
-            use std::os::unix::fs::PermissionsExt;
-            file_metadata.permissions().mode() & 0o777
-        };
+        let permissions = { file_metadata.permissions().mode() & 0o777 };
 
         #[cfg(not(unix))]
         let permissions = 0o644;
 
-        // Check if attributes specify a file type
-        let file_content = match attributes.and_then(|a| a.get_attribute(path)) {
+        // Check if attributes specify a file type.
+        // Use match_path (workspace-relative) for glob matching so that
+        // directory-prefix patterns like `dist/**` work correctly even
+        // when `path` is absolute.
+        let glob_path = match_path.unwrap_or(path);
+        let file_content = match attributes.and_then(|a| a.get_attribute(glob_path)) {
             Some(file_type::FileType::Binary) => {
-                // Explicitly binary - read as bytes without UTF-8 check
+                // Explicitly binary — read as bytes without UTF-8 check
                 content::Content::Bytes(std::fs::read(path)?)
             }
+            Some(file_type::FileType::Immutable) => {
+                // Explicitly immutable — LWW string
+                content::Content::ImmutableString(std::fs::read_to_string(path)?)
+            }
             Some(file_type::FileType::Text) => {
-                // Explicitly text - read as string (will fail if not valid UTF-8)
-                content::Content::Text(std::fs::read_to_string(path)?)
+                // Explicitly text — force_immutable overrides to LWW string
+                let s = std::fs::read_to_string(path)?;
+                if force_immutable {
+                    content::Content::ImmutableString(s)
+                } else {
+                    content::Content::Text(s)
+                }
             }
             None => {
                 // Large files default to binary — character-level CRDT is too expensive
@@ -135,7 +184,17 @@ impl File {
                     content::Content::Bytes(std::fs::read(path)?)
                 } else {
                     // Auto-detect using streaming UTF-8 validation
-                    streaming_utf8_read(path)?
+                    let detected = streaming_utf8_read(path)?;
+                    if force_immutable {
+                        match detected {
+                            content::Content::Text(s) => content::Content::ImmutableString(s),
+                            content::Content::Bytes(_) | content::Content::ImmutableString(_) => {
+                                detected
+                            }
+                        }
+                    } else {
+                        detected
+                    }
                 }
             }
         };
@@ -166,7 +225,8 @@ impl File {
         let mut doc = Automerge::new();
 
         let extension = extract_extension(self.name.as_str());
-        let mime_type = mime_type_for_extension(&extension, self.content.is_text());
+        let is_readable_text = self.content.is_text() || self.content.is_immutable_string();
+        let mime_type = mime_type_for_extension(&extension, is_readable_text);
         let mode = self.metadata.mode();
 
         doc.transact::<_, _, AutomergeError>(|tx| {
@@ -188,6 +248,13 @@ impl File {
                         ROOT,
                         "content",
                         automerge::ScalarValue::Bytes(bytes.clone()),
+                    )?;
+                }
+                content::Content::ImmutableString(text) => {
+                    tx.put(
+                        ROOT,
+                        "content",
+                        automerge::ScalarValue::Str(text.clone().into()),
                     )?;
                 }
             }
@@ -219,7 +286,8 @@ impl File {
         let mut doc = Automerge::new();
 
         let extension = extract_extension(self.name.as_str());
-        let mime_type = mime_type_for_extension(&extension, self.content.is_text());
+        let is_readable_text = self.content.is_text() || self.content.is_immutable_string();
+        let mime_type = mime_type_for_extension(&extension, is_readable_text);
         let mode = self.metadata.mode();
         let name = self.name;
         let content = self.content;
@@ -233,16 +301,23 @@ impl File {
             let name_obj = tx.put_object(ROOT, "name", ObjType::Text)?;
             tx.splice_text(&name_obj, 0, 0, name.as_str())?;
 
-            match content {
-                content::Content::Text(ref text) => {
+            match &content {
+                content::Content::Text(text) => {
                     let text_obj = tx.put_object(ROOT, "content", ObjType::Text)?;
                     tx.splice_text(&text_obj, 0, 0, text)?;
                 }
-                content::Content::Bytes(ref bytes) => {
+                content::Content::Bytes(bytes) => {
                     tx.put(
                         ROOT,
                         "content",
                         automerge::ScalarValue::Bytes(bytes.clone()),
+                    )?;
+                }
+                content::Content::ImmutableString(text) => {
+                    tx.put(
+                        ROOT,
+                        "content",
+                        automerge::ScalarValue::Str(text.clone().into()),
                     )?;
                 }
             }
@@ -275,15 +350,24 @@ impl File {
                 let text = doc.text(&id)?;
                 content::Content::Text(text)
             }
-            Some((automerge::Value::Scalar(s), _)) => {
-                if let automerge::ScalarValue::Bytes(bytes) = s.as_ref() {
-                    content::Content::Bytes(bytes.clone())
-                } else {
+            Some((automerge::Value::Scalar(s), _)) => match s.as_ref() {
+                automerge::ScalarValue::Bytes(bytes) => content::Content::Bytes(bytes.clone()),
+                automerge::ScalarValue::Str(smol_str) => {
+                    content::Content::ImmutableString(smol_str.to_string())
+                }
+                automerge::ScalarValue::Int(_)
+                | automerge::ScalarValue::Uint(_)
+                | automerge::ScalarValue::F64(_)
+                | automerge::ScalarValue::Counter(_)
+                | automerge::ScalarValue::Timestamp(_)
+                | automerge::ScalarValue::Boolean(_)
+                | automerge::ScalarValue::Unknown { .. }
+                | automerge::ScalarValue::Null => {
                     return Err(DeserializeError::InvalidSchema(
-                        "content must be Text or Bytes".into(),
+                        "content must be Text, Str, or Bytes".into(),
                     ));
                 }
-            }
+            },
             _ => {
                 return Err(DeserializeError::InvalidSchema(
                     "missing content field".into(),
@@ -291,8 +375,9 @@ impl File {
             }
         };
 
-        #[allow(clippy::wildcard_enum_match_arm)]
         // Read permissions from metadata.permissions (Patchwork convention)
+        #[allow(clippy::wildcard_enum_match_arm)]
+        // automerge::Value has many variants; we only care about Map
         let permissions = match doc.get(ROOT, "metadata")? {
             Some((automerge::Value::Object(ObjType::Map), metadata_id)) => {
                 match doc.get(&metadata_id, "permissions")? {
@@ -325,13 +410,14 @@ impl File {
     /// Returns an error if the file cannot be written.
     pub fn write_to_staging(&self, path: &Path) -> Result<(), WriteFileError> {
         match &self.content {
-            content::Content::Text(text) => std::fs::write(path, text)?,
+            content::Content::Text(text) | content::Content::ImmutableString(text) => {
+                std::fs::write(path, text)?;
+            }
             content::Content::Bytes(bytes) => std::fs::write(path, bytes)?,
         }
 
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(self.metadata.mode());
             std::fs::set_permissions(path, perms)?;
         }
@@ -357,7 +443,9 @@ impl File {
 
         // Write content to temp file
         match &self.content {
-            content::Content::Text(text) => std::fs::write(&temp_path, text)?,
+            content::Content::Text(text) | content::Content::ImmutableString(text) => {
+                std::fs::write(&temp_path, text)?;
+            }
             content::Content::Bytes(bytes) => std::fs::write(&temp_path, bytes)?,
         }
 
@@ -365,7 +453,6 @@ impl File {
         // with correct mode immediately
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(self.metadata.mode());
             if let Err(e) = std::fs::set_permissions(&temp_path, perms) {
                 drop(std::fs::remove_file(&temp_path));
@@ -595,6 +682,19 @@ mod tests {
 
     #[allow(clippy::expect_used)]
     #[test]
+    fn immutable_automerge_roundtrip() {
+        check!().with_type::<String>().for_each(|text: &String| {
+            let doc = File::immutable("test.txt", text);
+            let am = doc.to_automerge().expect("to_automerge");
+            let loaded = File::from_automerge(&am).expect("from_automerge");
+
+            assert_eq!(doc.name, loaded.name);
+            assert_eq!(doc.content, loaded.content);
+        });
+    }
+
+    #[allow(clippy::expect_used)]
+    #[test]
     fn permissions_automerge_roundtrip() {
         check!().with_type::<u16>().for_each(|&bits| {
             let mode = u32::from(bits) & 0o777;
@@ -655,7 +755,7 @@ mod tests {
     fn large_file_respects_text_attribute() -> TestResult {
         use crate::attributes::AttributeRules;
         use crate::dotfile::{AttributeMap, DarnConfig};
-        use crate::workspace::WorkspaceId;
+        use crate::workspace::id::WorkspaceId;
         use sedimentree_core::id::SedimentreeId;
 
         let dir = tempfile::tempdir()?;
@@ -665,9 +765,11 @@ mod tests {
         let config = DarnConfig::with_fields(
             WorkspaceId::from_bytes([1; 16]),
             SedimentreeId::new([2; 32]),
+            false,
             Vec::new(),
             AttributeMap {
                 binary: Vec::new(),
+                immutable: Vec::new(),
                 text: vec!["*.txt".to_string()],
             },
         );
@@ -685,6 +787,127 @@ mod tests {
             matches!(doc.content, content::Content::Text(_)),
             "explicit text attribute should override size heuristic"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn from_path_full_applies_dist_glob_with_absolute_path() -> TestResult {
+        use crate::attributes::AttributeRules;
+        use crate::dotfile::{AttributeMap, DarnConfig};
+        use crate::workspace::id::WorkspaceId;
+        use sedimentree_core::id::SedimentreeId;
+
+        let dir = tempfile::tempdir()?;
+
+        // Create .darn config with dist/** as immutable
+        let config = DarnConfig::with_fields(
+            WorkspaceId::from_bytes([1; 16]),
+            SedimentreeId::new([2; 32]),
+            false,
+            Vec::new(),
+            AttributeMap {
+                binary: Vec::new(),
+                immutable: vec!["dist/**".to_string()],
+                text: Vec::new(),
+            },
+        );
+        config.save(dir.path())?;
+
+        // Create dist/tool.js at an absolute path
+        std::fs::create_dir_all(dir.path().join("dist"))?;
+        let file_path = dir.path().join("dist/tool.js");
+        std::fs::write(&file_path, "console.log('hello')")?;
+
+        let attrs = AttributeRules::from_workspace_root(dir.path())?;
+        // file_path is absolute: /tmp/.../dist/tool.js
+        // The dist/** glob must still match it.
+        // Pass workspace-relative path for glob matching
+        let rel_path = Path::new("dist/tool.js");
+        let doc = File::from_path_full(&file_path, Some(rel_path), Some(&attrs), false)?;
+
+        assert!(
+            matches!(doc.content, content::Content::ImmutableString(_)),
+            "dist/tool.js should be immutable when dist/** pattern is set, got: {:?}",
+            file_type::FileType::from(&doc.content)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn from_path_full_dist_glob_does_not_match_src() -> TestResult {
+        use crate::attributes::AttributeRules;
+        use crate::dotfile::{AttributeMap, DarnConfig};
+        use crate::workspace::id::WorkspaceId;
+        use sedimentree_core::id::SedimentreeId;
+
+        let dir = tempfile::tempdir()?;
+
+        let config = DarnConfig::with_fields(
+            WorkspaceId::from_bytes([1; 16]),
+            SedimentreeId::new([2; 32]),
+            false,
+            Vec::new(),
+            AttributeMap {
+                binary: Vec::new(),
+                immutable: vec!["dist/**".to_string()],
+                text: Vec::new(),
+            },
+        );
+        config.save(dir.path())?;
+
+        // Create src/tool.tsx (should NOT be immutable)
+        std::fs::create_dir_all(dir.path().join("src"))?;
+        let file_path = dir.path().join("src/tool.tsx");
+        std::fs::write(&file_path, "export default function() {}")?;
+
+        let attrs = AttributeRules::from_workspace_root(dir.path())?;
+        let rel_path = Path::new("src/tool.tsx");
+        let doc = File::from_path_full(&file_path, Some(rel_path), Some(&attrs), false)?;
+
+        assert!(
+            matches!(doc.content, content::Content::Text(_)),
+            "src/tool.tsx should be text (auto-detected), got: {:?}",
+            file_type::FileType::from(&doc.content)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn from_path_full_filename_glob_works_with_absolute_path() -> TestResult {
+        use crate::attributes::AttributeRules;
+        use crate::dotfile::{AttributeMap, DarnConfig};
+        use crate::workspace::id::WorkspaceId;
+        use sedimentree_core::id::SedimentreeId;
+
+        let dir = tempfile::tempdir()?;
+
+        let config = DarnConfig::with_fields(
+            WorkspaceId::from_bytes([1; 16]),
+            SedimentreeId::new([2; 32]),
+            false,
+            Vec::new(),
+            AttributeMap {
+                binary: Vec::new(),
+                immutable: vec!["*.lock".to_string()],
+                text: Vec::new(),
+            },
+        );
+        config.save(dir.path())?;
+
+        let file_path = dir.path().join("Cargo.lock");
+        std::fs::write(&file_path, "# This file is automatically @generated")?;
+
+        let attrs = AttributeRules::from_workspace_root(dir.path())?;
+        // Filename-only globs work even without match_path
+        let doc = File::from_path_full(&file_path, None, Some(&attrs), false)?;
+
+        assert!(
+            matches!(doc.content, content::Content::ImmutableString(_)),
+            "Cargo.lock should be immutable with *.lock pattern"
+        );
+
         Ok(())
     }
 

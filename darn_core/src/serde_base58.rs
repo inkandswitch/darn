@@ -30,6 +30,8 @@ pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<[u8; 32
 }
 
 /// Serde module for `SedimentreeId` (wraps 32-byte array).
+///
+/// Serializes as plain base58 of all 32 bytes (internal storage format).
 pub mod sedimentree_id {
     use sedimentree_core::id::SedimentreeId;
     use serde::{Deserializer, Serializer};
@@ -53,6 +55,57 @@ pub mod sedimentree_id {
     ) -> Result<SedimentreeId, D::Error> {
         let bytes = super::deserialize(deserializer)?;
         Ok(SedimentreeId::new(bytes))
+    }
+}
+
+/// Serde module for `SedimentreeId` as an Automerge URL.
+///
+/// Serializes and deserializes as `automerge:<bs58check(first 16 bytes)>`.
+/// The 16-byte payload is zero-padded to 32 bytes for `SedimentreeId`.
+pub mod automerge_url {
+    use sedimentree_core::id::SedimentreeId;
+    use serde::{Deserialize, Deserializer, Serializer, de};
+
+    use crate::directory::{bs58check_decode, sedimentree_id_to_url};
+
+    /// Serialize `SedimentreeId` as an Automerge URL.
+    ///
+    /// # Errors
+    ///
+    /// Returns a serializer error if the output format rejects the string.
+    pub fn serialize<S: Serializer>(id: &SedimentreeId, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&sedimentree_id_to_url(*id))
+    }
+
+    /// Deserialize an Automerge URL to `SedimentreeId`.
+    ///
+    /// Expects `automerge:<bs58check>` encoding a 16-byte document ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the input is not a valid automerge URL.
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<SedimentreeId, D::Error> {
+        let s = String::deserialize(deserializer)?;
+
+        let encoded = s
+            .strip_prefix("automerge:")
+            .ok_or_else(|| de::Error::custom(format!("expected 'automerge:' prefix, got: {s}")))?;
+
+        let bytes = bs58check_decode(encoded)
+            .map_err(|e| de::Error::custom(format!("invalid automerge URL: {e}")))?;
+
+        if bytes.len() != 16 {
+            return Err(de::Error::custom(format!(
+                "automerge URL must encode 16 bytes, got {}",
+                bytes.len()
+            )));
+        }
+
+        let mut arr = [0u8; 32];
+        arr[..16].copy_from_slice(&bytes);
+        Ok(SedimentreeId::new(arr))
     }
 }
 
@@ -206,6 +259,74 @@ pub mod synced_digests {
         }
 
         Ok(map)
+    }
+}
+
+#[allow(clippy::panic)]
+#[cfg(test)]
+mod tests {
+    use bolero::check;
+    use sedimentree_core::id::SedimentreeId;
+
+    #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
+    struct Wrapper {
+        #[serde(with = "super::automerge_url")]
+        id: SedimentreeId,
+    }
+
+    #[allow(clippy::expect_used)] // bolero closures return (), can't use TestResult
+    #[test]
+    fn automerge_url_roundtrip() {
+        check!()
+            .with_type::<[u8; 16]>()
+            .for_each(|id_bytes: &[u8; 16]| {
+                let mut full = [0u8; 32];
+                full[..16].copy_from_slice(id_bytes);
+                let original = SedimentreeId::new(full);
+
+                let w = Wrapper { id: original };
+                let json = serde_json::to_string(&w).expect("serialize");
+                assert!(
+                    json.contains("automerge:"),
+                    "serialized form must contain 'automerge:' prefix"
+                );
+
+                let recovered: Wrapper = serde_json::from_str(&json).expect("deserialize");
+                assert_eq!(recovered.id, original, "roundtrip must preserve identity");
+            });
+    }
+
+    #[test]
+    fn automerge_url_rejects_plain_bs58() {
+        let plain_bs58 = bs58::encode([42u8; 32]).into_string();
+        let json = format!(r#"{{"id":"{plain_bs58}"}}"#);
+        let result = serde_json::from_str::<Wrapper>(&json);
+        assert!(
+            result.is_err(),
+            "plain bs58 without automerge: prefix must be rejected"
+        );
+    }
+
+    /// A valid bs58check encoding of 8 bytes should be rejected
+    /// by the length check, not the checksum check.
+    #[test]
+    fn automerge_url_rejects_wrong_payload_length() {
+        use sha2::{Digest, Sha256};
+
+        let payload = [0xAB_u8; 8];
+        let checksum = Sha256::digest(Sha256::digest(payload));
+        let mut buf = Vec::with_capacity(12);
+        buf.extend_from_slice(&payload);
+        #[allow(clippy::indexing_slicing)] // SHA-256 always produces 32 bytes; 4 < 32
+        buf.extend_from_slice(&checksum[..4]);
+        let encoded = bs58::encode(&buf).into_string();
+
+        let json = format!(r#"{{"id":"automerge:{encoded}"}}"#);
+        let result = serde_json::from_str::<Wrapper>(&json);
+        assert!(
+            result.is_err(),
+            "8-byte payload should be rejected (need 16)"
+        );
     }
 }
 

@@ -145,38 +145,47 @@ pub enum IgnoreMutateError {
     Dotfile(#[from] crate::dotfile::DotfileError),
 }
 
-#[allow(clippy::expect_used, clippy::panic)]
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace::WorkspaceId;
+    use crate::workspace::id::WorkspaceId;
     use bolero::check;
     use sedimentree_core::id::SedimentreeId;
     use testresult::TestResult;
 
     /// Create a `.darn` config file for testing.
-    fn create_test_config(root: &Path, ignore: Vec<String>) {
+    fn create_test_config(
+        root: &Path,
+        ignore: Vec<String>,
+    ) -> Result<(), crate::dotfile::DotfileError> {
         let id = WorkspaceId::from_bytes([1; 16]);
         let sed_id = SedimentreeId::new([2; 32]);
-        let config =
-            DarnConfig::with_fields(id, sed_id, ignore, crate::dotfile::AttributeMap::default());
-        config.save(root).expect("save test config");
+        let config = DarnConfig::with_fields(
+            id,
+            sed_id,
+            false,
+            ignore,
+            crate::dotfile::AttributeMap::default(),
+        );
+        config.save(root)
     }
 
     #[test]
-    fn darn_file_always_ignored() {
-        let dir = tempfile::tempdir().expect("create tempdir");
-        create_test_config(dir.path(), Vec::new());
-        let rules = IgnoreRules::from_workspace_root(dir.path()).expect("build rules");
+    fn darn_file_always_ignored() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        create_test_config(dir.path(), Vec::new())?;
+        let rules = IgnoreRules::from_workspace_root(dir.path())?;
 
         // .darn file should be ignored
         assert!(rules.is_ignored(Path::new(".darn"), false));
+        Ok(())
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn non_darn_paths_not_ignored_by_default() {
         let dir = tempfile::tempdir().expect("create tempdir");
-        create_test_config(dir.path(), Vec::new());
+        create_test_config(dir.path(), Vec::new()).expect("save test config");
         let rules = IgnoreRules::from_workspace_root(dir.path()).expect("build rules");
 
         check!().with_type::<String>().for_each(|segment: &String| {
@@ -201,7 +210,7 @@ mod tests {
     #[test]
     fn config_ignore_patterns_respected() -> TestResult {
         let dir = tempfile::tempdir()?;
-        create_test_config(dir.path(), vec!["*.log".to_string(), "target/".to_string()]);
+        create_test_config(dir.path(), vec!["*.log".to_string(), "target/".to_string()])?;
 
         let rules = IgnoreRules::from_workspace_root(dir.path())?;
 
@@ -220,7 +229,7 @@ mod tests {
         create_test_config(
             dir.path(),
             vec!["*.log".to_string(), "!important.log".to_string()],
-        );
+        )?;
 
         let rules = IgnoreRules::from_workspace_root(dir.path())?;
 
@@ -245,7 +254,7 @@ mod tests {
     #[test]
     fn add_and_remove_pattern() -> TestResult {
         let dir = tempfile::tempdir()?;
-        create_test_config(dir.path(), Vec::new());
+        create_test_config(dir.path(), Vec::new())?;
 
         // Add a pattern
         assert!(add_pattern(dir.path(), "*.log")?);

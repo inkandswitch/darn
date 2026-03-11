@@ -30,3 +30,43 @@ impl RefreshDiff {
         self.updated.len()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn updated_files_not_empty() {
+        let diff = RefreshDiff {
+            updated: vec![PathBuf::from("foo.txt")],
+            ..Default::default()
+        };
+        assert!(!diff.is_empty());
+        assert_eq!(diff.updated_count(), 1);
+    }
+
+    #[test]
+    fn errors_make_not_empty() {
+        let err = RefreshError::InvalidDocument("test".into());
+        let diff = RefreshDiff {
+            errors: vec![(PathBuf::from("bad.txt"), err)],
+            ..Default::default()
+        };
+        assert!(!diff.is_empty(), "errors should make is_empty false");
+        assert_eq!(diff.updated_count(), 0);
+    }
+
+    /// `is_empty` intentionally ignores `missing` — missing files are not
+    /// actionable changes, just informational.
+    #[test]
+    fn missing_alone_is_still_empty() {
+        let diff = RefreshDiff {
+            missing: vec![PathBuf::from("gone.txt")],
+            ..Default::default()
+        };
+        assert!(
+            diff.is_empty(),
+            "missing files alone should not make is_empty false"
+        );
+    }
+}

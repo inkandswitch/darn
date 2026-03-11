@@ -6,14 +6,21 @@
 pub mod refresh_diff;
 
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
+use futures::{StreamExt, stream};
 use sedimentree_core::id::SedimentreeId;
 use sedimentree_fs_storage::FsStorage;
-use subduction_core::{connection::Connection, peer::id::PeerId};
+#[cfg(feature = "iroh")]
+use subduction_core::connection::nonce_cache::NonceCache;
+use subduction_core::{
+    connection::{Connection, handshake::Audience},
+    peer::id::PeerId,
+};
 use subduction_crypto::signer::memory::MemorySigner;
 use subduction_websocket::tokio::{TimeoutTokio, client::TokioWebSocketClient};
 use thiserror::Error;
@@ -41,7 +48,7 @@ use crate::{
         DarnSubduction, SubductionInitError,
     },
     sync_progress::{ApplyResult, SyncProgressEvent, SyncSummary},
-    workspace::{WorkspaceId, WorkspaceLayout, WorkspaceRegistry, registry::WorkspaceEntry},
+    workspace::{id::WorkspaceId, layout::WorkspaceLayout},
 };
 use refresh_diff::RefreshDiff;
 
@@ -115,24 +122,6 @@ impl Darn {
         // Create .darn marker file with default ignore/attribute patterns
         let config = DarnConfig::create(&root, id, root_directory_id)?;
 
-        // Register in global registry
-        let mut registry = WorkspaceRegistry::load()?;
-        registry.register(
-            id,
-            WorkspaceEntry {
-                original_path: root.clone(),
-                name: root
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("workspace")
-                    .to_string(),
-                created_at: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_secs()),
-            },
-        );
-        registry.save()?;
-
         // Ensure global signer exists
         let signer_dir = config::global_signer_dir()?;
         let signer = signer::load_or_generate(&signer_dir)?;
@@ -189,24 +178,6 @@ impl Darn {
         // Create .darn marker file with default ignore/attribute patterns
         let config = DarnConfig::create(&root, id, root_directory_id)?;
 
-        // Register in global registry
-        let mut registry = WorkspaceRegistry::load()?;
-        registry.register(
-            id,
-            WorkspaceEntry {
-                original_path: root.clone(),
-                name: root
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("workspace")
-                    .to_string(),
-                created_at: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_secs()),
-            },
-        );
-        registry.save()?;
-
         // Ensure global signer exists
         let signer_dir = config::global_signer_dir()?;
         let signer = signer::load_or_generate(&signer_dir)?;
@@ -239,31 +210,6 @@ impl Darn {
         let root = Self::find_root(path)?;
         let config = DarnConfig::load(&root)?;
         let layout = WorkspaceLayout::new(config.id)?;
-
-        // Auto-heal registry if workspace was moved
-        if let Ok(mut registry) = WorkspaceRegistry::load() {
-            let needs_update = registry
-                .get(config.id)
-                .is_none_or(|entry| entry.original_path != root);
-
-            if needs_update {
-                registry.register(
-                    config.id,
-                    WorkspaceEntry {
-                        original_path: root.clone(),
-                        name: root
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("workspace")
-                            .to_string(),
-                        created_at: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map_or(0, |d| d.as_secs()),
-                    },
-                );
-                drop(registry.save());
-            }
-        }
 
         let signer = Self::load_signer_static()?;
         let storage = Self::storage_from_layout(&layout)?;
@@ -466,9 +412,10 @@ impl Darn {
         // Load attribute rules for consistent file type detection
         let attributes = AttributeRules::from_workspace_root(&self.root).ok();
 
-        // Read current file content
+        // Read current file content, coercing to match the stored file type
         let current_fs_digest = content_hash::hash_file(&path)?;
-        let new_file = File::from_path_with_attributes(&path, attributes.as_ref())?;
+        let mut new_file = File::from_path_with_attributes(&path, attributes.as_ref())?;
+        new_file.content = new_file.content.coerce_to(entry.file_type);
 
         // Load existing Automerge doc from sedimentree
         let mut am_doc = sedimentree::load_document(&self.subduction, entry.sedimentree_id)
@@ -509,9 +456,6 @@ impl Darn {
     ///
     /// Returns a summary of which files were updated, missing, or had errors.
     pub async fn refresh_all(&self, manifest: &mut Manifest) -> RefreshDiff {
-        use futures::{StreamExt, stream};
-        use std::sync::Mutex;
-
         let mut diff = RefreshDiff::default();
 
         // Phase 1: Classify files (fast — only compares hashes)
@@ -525,6 +469,7 @@ impl Darn {
                 FileState::Modified => modified.push(RefreshCandidate {
                     path,
                     sedimentree_id: entry.sedimentree_id,
+                    file_type: entry.file_type,
                     current_fs_digest: entry.file_system_digest,
                 }),
             }
@@ -534,10 +479,7 @@ impl Darn {
             return diff;
         }
 
-        // Phase 2: Refresh files in parallel
-        let concurrency = std::thread::available_parallelism()
-            .map(std::num::NonZero::get)
-            .unwrap_or(4);
+        let concurrency = crate::concurrency::io_bound();
 
         let results: Mutex<Vec<RefreshResult>> = Mutex::new(Vec::new());
 
@@ -598,7 +540,8 @@ impl Darn {
         }
 
         let attributes = AttributeRules::from_workspace_root(&self.root).ok();
-        let new_file = File::from_path_with_attributes(&path, attributes.as_ref())?;
+        let mut new_file = File::from_path_with_attributes(&path, attributes.as_ref())?;
+        new_file.content = new_file.content.coerce_to(candidate.file_type);
 
         // Load existing doc
         let mut am_doc = sedimentree::load_document(&self.subduction, sed_id)
@@ -623,31 +566,19 @@ impl Darn {
         }))
     }
 
-    /// Apply remote changes to local files after sync.
-    ///
-    /// For each tracked file, checks if the sedimentree digest changed (indicating
-    /// remote changes were received). If so, loads the merged CRDT document and
-    /// writes it to disk.
-    ///
-    /// Also discovers new files from the remote directory tree that aren't in
-    /// the local manifest.
-    ///
-    /// # Errors
-    ///
-    /// Individual file errors are collected in the result; this method doesn't
-    /// fail on individual file errors.
     /// Stage all remote changes for batch application to the workspace.
     ///
-    /// This is the slow "prepare" phase: loads CRDT documents, serializes
-    /// file content, and writes everything to a staging directory. No
-    /// workspace files are modified.
-    ///
-    /// Call [`StagedUpdate::commit`] to apply the changes.
+    /// This is the slow "prepare" phase: for each tracked file whose
+    /// sedimentree digest changed (indicating remote updates), loads the
+    /// merged CRDT document, serializes the content, and writes it to a
+    /// staging directory. Also discovers new files from the remote
+    /// directory tree that aren't in the local manifest. No workspace
+    /// files are modified until [`StagedUpdate::commit`] is called.
     ///
     /// # Errors
     ///
-    /// Returns errors from individual file operations in `ApplyResult`.
-    /// The `StagedUpdate` contains only the successfully staged operations.
+    /// Individual file errors are collected in [`ApplyResult`]; the
+    /// `StagedUpdate` contains only the successfully staged operations.
     #[allow(clippy::too_many_lines)]
     pub async fn stage_remote_changes(
         &self,
@@ -711,11 +642,7 @@ impl Darn {
                 }
             };
 
-            let file_type = if file.content.is_text() {
-                FileType::Text
-            } else {
-                FileType::Binary
-            };
+            let file_type = FileType::from(&file.content);
 
             if let Err(e) = staged.stage_write(
                 &file,
@@ -865,11 +792,7 @@ impl Darn {
                         }
                     };
 
-                    let file_type = if file.content.is_text() {
-                        FileType::Text
-                    } else {
-                        FileType::Binary
-                    };
+                    let file_type = FileType::from(&file.content);
 
                     let sed_digest =
                         match sedimentree::compute_digest(&self.subduction, entry.sedimentree_id)
@@ -920,8 +843,6 @@ impl Darn {
         staged: &mut StagedUpdate,
         errors: &mut ApplyResult,
     ) -> Result<(), SedimentreeError> {
-        use std::collections::HashSet;
-
         let mut remote_ids = HashSet::new();
         let root_dir_id = manifest.root_directory_id();
         self.collect_remote_sedimentree_ids(root_dir_id, &mut remote_ids)
@@ -1008,8 +929,6 @@ impl Darn {
         manifest: &Manifest,
         peer_id: &PeerId,
     ) -> Result<usize, SyncError> {
-        use std::collections::HashSet;
-
         tracing::debug!("sync_missing_sedimentrees: starting");
 
         // Collect IDs we already have
@@ -1152,6 +1071,7 @@ impl Darn {
         &self,
         paths: Vec<PathBuf>,
         manifest: &mut Manifest,
+        force_immutable: bool,
         on_progress: F,
         cancel: &CancellationToken,
     ) -> Result<DiscoverResult, DiscoverError>
@@ -1163,6 +1083,7 @@ impl Darn {
             &self.root,
             &self.subduction,
             manifest,
+            force_immutable,
             on_progress,
             cancel,
         )
@@ -1219,7 +1140,7 @@ impl Darn {
     async fn connect_peer_ws(
         &self,
         ws_url: &str,
-        audience: subduction_core::connection::handshake::Audience,
+        audience: Audience,
     ) -> Result<(AuthenticatedDarnConnection, PeerId), SyncError> {
         let uri: Uri = ws_url.parse()?;
         let signer = self.load_signer()?;
@@ -1252,7 +1173,7 @@ impl Darn {
         &self,
         node_id: &str,
         relay_url: Option<&str>,
-        audience: subduction_core::connection::handshake::Audience,
+        audience: Audience,
     ) -> Result<(AuthenticatedDarnConnection, PeerId), SyncError> {
         let public_key: iroh::PublicKey = node_id.parse().map_err(SyncError::IrohNodeId)?;
 
@@ -1302,8 +1223,6 @@ impl Darn {
     /// The loop runs until the `cancel` token is triggered (e.g., on Ctrl+C).
     #[cfg(feature = "iroh")]
     pub async fn accept_iroh_connections(&self, cancel: CancellationToken) {
-        use subduction_core::connection::{handshake::Audience, nonce_cache::NonceCache};
-
         let signer = match self.load_signer() {
             Ok(s) => s,
             Err(e) => {
@@ -1585,6 +1504,19 @@ impl InitializedDarn {
         self.layout.manifest_path()
     }
 
+    /// Set `force_immutable` in the `.darn` config and save it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the config file cannot be written.
+    pub fn set_force_immutable(
+        &mut self,
+        force_immutable: bool,
+    ) -> Result<(), crate::dotfile::DotfileError> {
+        self.config.force_immutable = force_immutable;
+        self.config.save(&self.root)
+    }
+
     /// Get the peer ID from the global signer.
     ///
     /// # Errors
@@ -1772,6 +1704,7 @@ impl UnopenedDarn {
 struct RefreshCandidate {
     path: PathBuf,
     sedimentree_id: SedimentreeId,
+    file_type: crate::file::file_type::FileType,
     current_fs_digest: sedimentree_core::crypto::digest::Digest<content_hash::FileSystemContent>,
 }
 

@@ -192,3 +192,71 @@ impl ApplyResult {
         !self.deleted.is_empty()
     }
 }
+
+#[allow(clippy::panic)]
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bolero::check;
+    use subduction_core::connection::stats::SyncStats;
+
+    /// `add_sync_stats` is additive: after N calls the summary fields
+    /// equal the element-wise sum, and `sedimentrees_synced == N`.
+    #[allow(clippy::similar_names)]
+    #[test]
+    fn sync_summary_accumulates_stats() {
+        check!()
+            .with_type::<Vec<(u16, u16, u16, u16)>>()
+            .for_each(|entries| {
+                let mut summary = SyncSummary::new();
+                let mut want_commits_recv = 0;
+                let mut want_frags_recv = 0;
+                let mut want_commits_sent = 0;
+                let mut want_frags_sent = 0;
+
+                for &(cr, fr, cs, fs) in entries {
+                    let (cr, fr, cs, fs) = (cr as usize, fr as usize, cs as usize, fs as usize);
+                    summary.add_sync_stats(&SyncStats {
+                        commits_received: cr,
+                        fragments_received: fr,
+                        commits_sent: cs,
+                        fragments_sent: fs,
+                    });
+                    want_commits_recv += cr;
+                    want_frags_recv += fr;
+                    want_commits_sent += cs;
+                    want_frags_sent += fs;
+                }
+
+                assert_eq!(summary.sedimentrees_synced, entries.len());
+                assert_eq!(summary.commits_received, want_commits_recv);
+                assert_eq!(summary.fragments_received, want_frags_recv);
+                assert_eq!(summary.commits_sent, want_commits_sent);
+                assert_eq!(summary.fragments_sent, want_frags_sent);
+                assert_eq!(
+                    summary.total_received(),
+                    want_commits_recv + want_frags_recv
+                );
+                assert_eq!(summary.total_sent(), want_commits_sent + want_frags_sent);
+                assert_eq!(summary.any_success(), !entries.is_empty());
+            });
+    }
+
+    #[test]
+    fn apply_result_total_affected_is_sum_of_categories() {
+        let r = ApplyResult {
+            updated: vec![PathBuf::from("a.txt")],
+            merged: vec![PathBuf::from("b.txt")],
+            created: vec![PathBuf::from("c.txt"), PathBuf::from("d.txt")],
+            deleted: vec![PathBuf::from("e.txt")],
+            errors: Vec::new(),
+        };
+        assert_eq!(
+            r.total_affected(),
+            r.updated.len() + r.merged.len() + r.created.len() + r.deleted.len()
+        );
+        assert!(r.any_changes());
+        assert!(r.has_deletions());
+        assert!(!r.has_errors());
+    }
+}

@@ -32,10 +32,12 @@ pub fn generate_sedimentree_id() -> SedimentreeId {
 
 pub mod atomic_write;
 pub mod attributes;
+pub mod concurrency;
 pub mod config;
 pub mod darn;
 pub mod directory;
 pub mod discover;
+pub mod doc_edit;
 pub mod dotfile;
 pub mod file;
 pub mod ignore;

@@ -229,7 +229,8 @@ mod tests {
 
     use crate::file::{file_type::FileType, state::FileState};
     use content_hash::{self, FileSystemContent};
-    use tracked::{Sedimentree, Tracked};
+    use sedimentree_core::sedimentree::Sedimentree;
+    use tracked::Tracked;
 
     fn random_id() -> Result<SedimentreeId, getrandom::Error> {
         let mut bytes = [0u8; 32];

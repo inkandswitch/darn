@@ -10,7 +10,9 @@
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use darn_core::doc_edit::EditOp;
 use eyre::Result;
+use output::Verbosity;
 use tracing_subscriber::{EnvFilter, fmt};
 
 mod commands;
@@ -34,15 +36,20 @@ async fn main() -> Result<()> {
     fmt().with_env_filter(filter).init();
 
     let porcelain = cli.porcelain;
-    let out = output::Output::new(porcelain);
+    let verbosity = match (cli.silent, cli.quiet) {
+        (true, _) => Verbosity::Silent,
+        (_, true) => Verbosity::Quiet,
+        _ => Verbosity::Normal,
+    };
+    let out = output::Output::new(porcelain, verbosity);
 
-    // Apply Catppuccin Mocha theme for all cliclack prompts (skip in porcelain mode)
-    if !porcelain {
+    // Apply Catppuccin Mocha theme for all cliclack prompts (skip in non-interactive modes)
+    if !out.is_non_interactive() {
         theme::apply();
     }
 
     // Ensure signer exists before running commands
-    if !setup::ensure_signer(porcelain)? {
+    if !setup::ensure_signer(out)? {
         return Ok(());
     }
 
@@ -51,7 +58,17 @@ async fn main() -> Result<()> {
             path,
             peer,
             peer_name,
-        } => commands::init(&path, peer.as_deref(), peer_name.as_deref(), out).await,
+            force_immutable,
+        } => {
+            commands::init(
+                &path,
+                peer.as_deref(),
+                peer_name.as_deref(),
+                force_immutable,
+                out,
+            )
+            .await
+        }
         Commands::Clone { root_id, path } => commands::clone_cmd(&root_id, &path, out).await,
         Commands::Ignore { patterns } => commands::ignore(&patterns, out),
         Commands::Unignore { patterns } => commands::unignore(&patterns, out),
@@ -61,8 +78,13 @@ async fn main() -> Result<()> {
             peer,
             dry_run,
             force,
-        } => commands::sync_cmd(peer.as_deref(), dry_run, force, out).await,
-        Commands::Watch { interval, no_track } => commands::watch(&interval, no_track, out).await,
+            force_immutable,
+        } => commands::sync_cmd(peer.as_deref(), dry_run, force, force_immutable, out).await,
+        Commands::Watch {
+            interval,
+            no_track,
+            force_immutable,
+        } => commands::watch(&interval, no_track, force_immutable, out).await,
         Commands::Info => commands::info(out),
         Commands::Peer { command } => match command {
             PeerCommands::Add {
@@ -75,6 +97,19 @@ async fn main() -> Result<()> {
             PeerCommands::List => commands::peer_list(out),
             PeerCommands::Remove { name } => commands::peer_remove(&name, out),
         },
+        Commands::Doc { command } => match command {
+            DocCommands::Edit {
+                doc_url,
+                create,
+                operation,
+            } => {
+                let op = match operation {
+                    DocEditOp::Append { path, values } => EditOp::Append { path, values },
+                    DocEditOp::Clear { path } => EditOp::Clear { path },
+                };
+                commands::doc_edit(&doc_url, op, create, out).await
+            }
+        },
     }
 }
 
@@ -82,6 +117,7 @@ async fn main() -> Result<()> {
 #[derive(Debug, Parser)]
 #[command(name = "darn")]
 #[command(version, about, long_about = None)]
+#[allow(clippy::struct_excessive_bools)]
 struct Cli {
     /// Enable verbose output
     #[arg(short, long, global = true)]
@@ -90,6 +126,14 @@ struct Cli {
     /// Machine-readable output (no spinners, no color, tab-separated)
     #[arg(long, global = true)]
     porcelain: bool,
+
+    /// Suppress spinners and per-item detail; show only final summaries and errors
+    #[arg(short, long, global = true)]
+    quiet: bool,
+
+    /// Suppress all output except errors (printed to stderr)
+    #[arg(long, global = true)]
+    silent: bool,
 
     #[command(subcommand)]
     command: Commands,
@@ -110,6 +154,10 @@ enum Commands {
         /// Name for the peer (defaults to hostname from URL)
         #[arg(long, requires = "peer")]
         peer_name: Option<String>,
+
+        /// Store new text files as immutable strings (LWW, no character merging)
+        #[arg(long)]
+        force_immutable: bool,
     },
 
     /// Clone a workspace by root directory ID (syncs from global peers)
@@ -156,6 +204,10 @@ enum Commands {
         /// Skip confirmation for new file discovery
         #[arg(long, short)]
         force: bool,
+
+        /// Store new text files as immutable strings (LWW, no character merging)
+        #[arg(long)]
+        force_immutable: bool,
     },
 
     /// Watch for file changes and auto-sync
@@ -167,6 +219,10 @@ enum Commands {
         /// Disable auto-tracking of new files
         #[arg(long)]
         no_track: bool,
+
+        /// Store new text files as immutable strings (LWW, no character merging)
+        #[arg(long)]
+        force_immutable: bool,
     },
 
     /// Show info about global config and current workspace
@@ -176,6 +232,12 @@ enum Commands {
     Peer {
         #[command(subcommand)]
         command: PeerCommands,
+    },
+
+    /// Operate on Automerge documents directly
+    Doc {
+        #[command(subcommand)]
+        command: DocCommands,
     },
 }
 
@@ -211,6 +273,45 @@ enum PeerCommands {
     Remove {
         /// Name of the peer to remove
         name: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DocCommands {
+    /// Edit an Automerge document by path
+    ///
+    /// Operates on any Automerge document stored in Subduction, without
+    /// requiring a workspace. Connects to global peers, syncs the target
+    /// document, applies the edit, and syncs back.
+    Edit {
+        /// Automerge URL of the document (e.g., `automerge:2u4x5b6JdSMDkyyMrQRzb8dreHhL`)
+        doc_url: String,
+
+        /// Create the document if it doesn't exist (initializes the target path as an empty list)
+        #[arg(long)]
+        create: bool,
+
+        #[command(subcommand)]
+        operation: DocEditOp,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DocEditOp {
+    /// Append values to a list (idempotent — skips duplicates)
+    Append {
+        /// Dot-separated path to the target list (e.g., `modules`)
+        path: String,
+
+        /// Values to append
+        #[arg(required = true, num_args = 1..)]
+        values: Vec<String>,
+    },
+
+    /// Remove all elements from a list
+    Clear {
+        /// Dot-separated path to the target list (e.g., `modules`)
+        path: String,
     },
 }
 
