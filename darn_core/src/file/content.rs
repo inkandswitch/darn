@@ -28,7 +28,6 @@ pub enum Content {
     /// (appears as a plain string, not a `Uint8Array`), but without
     /// character-level merge support.
     ImmutableString(String),
-    // TODO Consider adding large file support with external blob references
 }
 
 impl Content {

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use sedimentree_core::{crypto::digest::Digest, id::SedimentreeId};
 use serde::{Deserialize, Serialize};
 
-pub use sedimentree_core::sedimentree::Sedimentree;
+use sedimentree_core::sedimentree::Sedimentree;
 
 use super::content_hash::{self, FileSystemContent};
 use crate::{

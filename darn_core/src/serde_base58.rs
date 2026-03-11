@@ -30,6 +30,8 @@ pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<[u8; 32
 }
 
 /// Serde module for `SedimentreeId` (wraps 32-byte array).
+///
+/// Serializes as plain base58 of all 32 bytes (internal storage format).
 pub mod sedimentree_id {
     use sedimentree_core::id::SedimentreeId;
     use serde::{Deserializer, Serializer};
@@ -53,6 +55,59 @@ pub mod sedimentree_id {
     ) -> Result<SedimentreeId, D::Error> {
         let bytes = super::deserialize(deserializer)?;
         Ok(SedimentreeId::new(bytes))
+    }
+}
+
+/// Serde module for `SedimentreeId` as an Automerge URL.
+///
+/// Serializes as `automerge:<bs58check(first 16 bytes)>`.
+/// Deserializes from either:
+/// - New format: `automerge:<bs58check>` (16-byte payload, zero-padded to 32)
+/// - Legacy format: plain base58 of all 32 bytes (for backward compatibility)
+pub mod automerge_url {
+    use sedimentree_core::id::SedimentreeId;
+    use serde::{Deserialize, Deserializer, Serializer, de};
+
+    use crate::directory::{bs58check_decode, sedimentree_id_to_url};
+
+    /// Serialize `SedimentreeId` as an Automerge URL.
+    ///
+    /// # Errors
+    ///
+    /// Returns a serializer error if the output format rejects the string.
+    pub fn serialize<S: Serializer>(id: &SedimentreeId, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&sedimentree_id_to_url(*id))
+    }
+
+    /// Deserialize an Automerge URL to `SedimentreeId`.
+    ///
+    /// Expects `automerge:<bs58check>` encoding a 16-byte document ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the input is not a valid automerge URL.
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<SedimentreeId, D::Error> {
+        let s = String::deserialize(deserializer)?;
+
+        let encoded = s
+            .strip_prefix("automerge:")
+            .ok_or_else(|| de::Error::custom(format!("expected 'automerge:' prefix, got: {s}")))?;
+
+        let bytes = bs58check_decode(encoded)
+            .map_err(|e| de::Error::custom(format!("invalid automerge URL: {e}")))?;
+
+        if bytes.len() != 16 {
+            return Err(de::Error::custom(format!(
+                "automerge URL must encode 16 bytes, got {}",
+                bytes.len()
+            )));
+        }
+
+        let mut arr = [0u8; 32];
+        arr[..16].copy_from_slice(&bytes);
+        Ok(SedimentreeId::new(arr))
     }
 }
 

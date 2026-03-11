@@ -30,7 +30,3 @@
 pub mod id;
 pub mod layout;
 pub mod registry;
-
-pub use id::WorkspaceId;
-pub use layout::WorkspaceLayout;
-pub use registry::WorkspaceRegistry;

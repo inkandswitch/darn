@@ -41,7 +41,7 @@ use crate::{
         DarnSubduction, SubductionInitError,
     },
     sync_progress::{ApplyResult, SyncProgressEvent, SyncSummary},
-    workspace::{WorkspaceId, WorkspaceLayout},
+    workspace::{id::WorkspaceId, layout::WorkspaceLayout},
 };
 use refresh_diff::RefreshDiff;
 

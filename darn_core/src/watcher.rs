@@ -29,7 +29,7 @@ use std::{
     time::Duration,
 };
 
-use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode, DebounceEventResult, Debouncer};
+use notify_debouncer_mini::{DebounceEventResult, Debouncer, new_debouncer, notify::RecursiveMode};
 use thiserror::Error;
 use tokio::sync::mpsc;
 
@@ -149,7 +149,7 @@ pub struct Watcher {
     /// Workspace root path.
     root: PathBuf,
 
-    /// Watcher configuration.
+    /// Watcher configuration (included in `Debug` output).
     #[allow(dead_code)]
     config: WatcherConfig,
 }
@@ -459,7 +459,7 @@ mod tests {
     #[test]
     fn event_processor_ignores_config_patterns() -> TestResult {
         use crate::dotfile::{AttributeMap, DarnConfig};
-        use crate::workspace::WorkspaceId;
+        use crate::workspace::id::WorkspaceId;
 
         let temp_dir = tempfile::tempdir()?;
         let manifest = Manifest::new();

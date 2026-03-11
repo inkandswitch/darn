@@ -9,7 +9,7 @@
 //! ```json
 //! {
 //!   "id": "a1b2c3d4e5f6...",
-//!   "root_directory_id": "5K8v3QmXyz...",
+//!   "root_directory_id": "automerge:2u4x5b6JdSMDkyyMrQRzb8dreHhL",
 //!   "ignore": [".git/", "*.log"],
 //!   "attributes": {
 //!     "binary": ["*.lock", "*.min.js"],
@@ -25,7 +25,7 @@ use sedimentree_core::id::SedimentreeId;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{serde_base58, workspace::WorkspaceId};
+use crate::{serde_base58, workspace::id::WorkspaceId};
 
 /// Name of the dotfile marker.
 pub const DOTFILE_NAME: &str = ".darn";
@@ -46,8 +46,11 @@ const DEFAULT_IGNORE: &[&str] = &[
     ".env",
 ];
 
-/// Default binary attribute patterns written on `darn init`.
-const DEFAULT_BINARY: &[&str] = &[
+/// Default immutable attribute patterns written on `darn init`.
+///
+/// These are valid UTF-8 files where character-level CRDT merging would
+/// produce semantically invalid results. Stored as LWW strings.
+const DEFAULT_IMMUTABLE: &[&str] = &[
     // Source maps
     "*.js.map",
     "*.css.map",
@@ -72,8 +75,8 @@ pub struct DarnConfig {
     /// Workspace identifier (hex-encoded, derived from canonical path).
     pub id: WorkspaceId,
 
-    /// Root directory sedimentree ID (base58-encoded).
-    #[serde(with = "serde_base58::sedimentree_id")]
+    /// Root directory sedimentree ID (serialized as `automerge:` URL).
+    #[serde(with = "serde_base58::automerge_url")]
     pub root_directory_id: SedimentreeId,
 
     /// When true, newly ingested text files use LWW string semantics
@@ -223,8 +226,8 @@ fn default_ignore_patterns() -> Vec<String> {
 /// Default attribute map for a new workspace.
 fn default_attribute_map() -> AttributeMap {
     AttributeMap {
-        binary: DEFAULT_BINARY.iter().map(|s| (*s).to_string()).collect(),
-        immutable: Vec::new(),
+        binary: Vec::new(),
+        immutable: DEFAULT_IMMUTABLE.iter().map(|s| (*s).to_string()).collect(),
         text: Vec::new(),
     }
 }
@@ -256,7 +259,10 @@ mod tests {
     fn roundtrip() -> TestResult {
         let dir = tempfile::tempdir()?;
         let id = WorkspaceId::from_bytes([1; 16]);
-        let sed_id = SedimentreeId::new([2; 32]);
+        // Use a realistic SedimentreeId: 16 random bytes + 16 zero bytes
+        let mut bytes = [0u8; 32];
+        bytes[..16].copy_from_slice(&[2; 16]);
+        let sed_id = SedimentreeId::new(bytes);
 
         let config = DarnConfig::create(dir.path(), id, sed_id)?;
         let loaded = DarnConfig::load(dir.path())?;
@@ -273,7 +279,9 @@ mod tests {
     fn force_immutable_roundtrip() -> TestResult {
         let dir = tempfile::tempdir()?;
         let id = WorkspaceId::from_bytes([3; 16]);
-        let sed_id = SedimentreeId::new([4; 32]);
+        let mut bytes = [0u8; 32];
+        bytes[..16].copy_from_slice(&[4; 16]);
+        let sed_id = SedimentreeId::new(bytes);
 
         let config = DarnConfig::with_fields(
             id,
@@ -308,7 +316,9 @@ mod tests {
     fn force_immutable_false_omitted_from_json() -> TestResult {
         let dir = tempfile::tempdir()?;
         let id = WorkspaceId::from_bytes([5; 16]);
-        let sed_id = SedimentreeId::new([6; 32]);
+        let mut bytes = [0u8; 32];
+        bytes[..16].copy_from_slice(&[6; 16]);
+        let sed_id = SedimentreeId::new(bytes);
 
         let config = DarnConfig::create(dir.path(), id, sed_id)?;
         assert!(!config.force_immutable);
@@ -326,7 +336,9 @@ mod tests {
     fn find_root_finds_dotfile() -> TestResult {
         let dir = tempfile::tempdir()?;
         let id = WorkspaceId::from_bytes([1; 16]);
-        let sed_id = SedimentreeId::new([2; 32]);
+        let mut bytes = [0u8; 32];
+        bytes[..16].copy_from_slice(&[2; 16]);
+        let sed_id = SedimentreeId::new(bytes);
         DarnConfig::create(dir.path(), id, sed_id)?;
 
         let subdir = dir.path().join("a").join("b");
@@ -350,7 +362,9 @@ mod tests {
     fn defaults_populated() -> TestResult {
         let dir = tempfile::tempdir()?;
         let id = WorkspaceId::from_bytes([1; 16]);
-        let sed_id = SedimentreeId::new([2; 32]);
+        let mut bytes = [0u8; 32];
+        bytes[..16].copy_from_slice(&[2; 16]);
+        let sed_id = SedimentreeId::new(bytes);
 
         let config = DarnConfig::create(dir.path(), id, sed_id)?;
 
@@ -360,12 +374,19 @@ mod tests {
             "should contain .git/"
         );
         assert!(
-            !config.attributes.binary.is_empty(),
-            "binary patterns should have defaults"
+            config.attributes.binary.is_empty(),
+            "binary patterns should be empty by default"
         );
         assert!(
-            config.attributes.binary.contains(&"Cargo.lock".to_string()),
-            "should contain Cargo.lock"
+            !config.attributes.immutable.is_empty(),
+            "immutable patterns should have defaults"
+        );
+        assert!(
+            config
+                .attributes
+                .immutable
+                .contains(&"Cargo.lock".to_string()),
+            "should contain Cargo.lock in immutable"
         );
 
         Ok(())
@@ -379,6 +400,50 @@ mod tests {
         std::fs::create_dir_all(dir.path().join(".darn"))?;
         let result = DarnConfig::find_root(dir.path());
         assert!(result.is_err(), ".darn directory should not match");
+
+        Ok(())
+    }
+
+    #[test]
+    fn root_directory_id_serialized_as_automerge_url() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let id = WorkspaceId::from_bytes([7; 16]);
+        let mut bytes = [0u8; 32];
+        bytes[..16].copy_from_slice(&[8; 16]);
+        let sed_id = SedimentreeId::new(bytes);
+
+        DarnConfig::create(dir.path(), id, sed_id)?;
+
+        let json = std::fs::read_to_string(dir.path().join(DOTFILE_NAME))?;
+        assert!(
+            json.contains("\"root_directory_id\": \"automerge:"),
+            "root_directory_id should be an automerge URL, got: {json}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn plain_bs58_root_directory_id_rejected() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let id = WorkspaceId::from_bytes([9; 16]);
+        let mut bytes = [0u8; 32];
+        bytes[..16].copy_from_slice(&[10; 16]);
+        let sed_id = SedimentreeId::new(bytes);
+
+        // Write a .darn file with the old plain-bs58 format (no automerge: prefix)
+        let legacy_json = serde_json::json!({
+            "id": id.to_string(),
+            "root_directory_id": bs58::encode(sed_id.as_bytes()).into_string(),
+            "ignore": [".git/"],
+        });
+        std::fs::write(
+            dir.path().join(DOTFILE_NAME),
+            serde_json::to_string_pretty(&legacy_json)?,
+        )?;
+
+        let result = DarnConfig::load(dir.path());
+        assert!(result.is_err(), "plain bs58 should be rejected");
 
         Ok(())
     }

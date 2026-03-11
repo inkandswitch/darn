@@ -8,8 +8,7 @@
 //! ```json
 //! {
 //!   "attributes": {
-//!     "binary": ["*.lock", "*.min.js", "*.map"],
-//!     "immutable": ["dist/**"],
+//!     "immutable": ["dist/**", "*.lock", "*.min.js", "*.map"],
 //!     "text": ["*.md"]
 //!   }
 //! }
@@ -19,6 +18,11 @@
 //! - `immutable` — LWW string, no character merging (Automerge `ScalarValue::Str`)
 //! - `text` — Character-level CRDT merging (Automerge `Text`)
 //! - `binary` — Last-writer-wins binary (Automerge `Bytes`)
+//!
+//! Files that are valid UTF-8 but semantically wrong to character-merge
+//! (source maps, minified files, lock files) are classified as `immutable`
+//! by default. Binary is reserved for actual non-text content (images, Wasm,
+//! fonts, etc.) which auto-detection handles.
 
 use std::path::Path;
 
@@ -27,20 +31,20 @@ use thiserror::Error;
 
 use crate::{dotfile::DarnConfig, file::file_type::FileType};
 
-/// Default patterns that should be treated as binary even if they contain valid UTF-8.
+/// Default patterns that should be treated as immutable (LWW string).
 ///
-/// These are files where character-level merging would produce semantically
-/// invalid results, even though the content is technically valid UTF-8.
-/// These are compiled into the rules even when `attributes` is empty in the config.
-const DEFAULT_BINARY_PATTERNS: &[&str] = &[
-    // Source maps contain VLQ-encoded binary data as base64
+/// These are valid UTF-8 files where character-level CRDT merging would
+/// produce semantically invalid results. They are stored as LWW strings
+/// rather than Text CRDTs.
+const DEFAULT_IMMUTABLE_PATTERNS: &[&str] = &[
+    // Source maps: VLQ-encoded mappings, meaningless to character-merge
     "*.js.map",
     "*.css.map",
     "*.map",
-    // Minified files are often single lines; char-level merge is meaningless
+    // Minified files: typically single lines, character-merge is meaningless
     "*.min.js",
     "*.min.css",
-    // Lock files should be regenerated, not merged
+    // Lock files: machine-generated, should be replaced wholesale
     "*.lock",
     "package-lock.json",
     "pnpm-lock.yaml",
@@ -52,15 +56,14 @@ const DEFAULT_BINARY_PATTERNS: &[&str] = &[
 ];
 
 /// Attribute matcher for a workspace.
-#[allow(clippy::struct_field_names)]
 #[derive(Debug, Clone)]
 pub struct AttributeRules {
-    /// Glob set for binary patterns.
-    binary_globs: GlobSet,
-    /// Glob set for immutable text patterns.
-    immutable_globs: GlobSet,
-    /// Glob set for text patterns.
-    text_globs: GlobSet,
+    /// Glob set for binary patterns (user-configured only).
+    binary: GlobSet,
+    /// Glob set for immutable text patterns (defaults + user-configured).
+    immutable: GlobSet,
+    /// Glob set for text patterns (user-configured only).
+    text: GlobSet,
 }
 
 impl AttributeRules {
@@ -74,30 +77,31 @@ impl AttributeRules {
         let mut immutable_builder = GlobSetBuilder::new();
         let mut text_builder = GlobSetBuilder::new();
 
-        // Add default binary patterns
-        for pattern in DEFAULT_BINARY_PATTERNS {
-            binary_builder.add(Glob::new(pattern)?);
+        // Default immutable patterns: source maps, minified files, lock files.
+        // These are valid UTF-8 but semantically wrong to character-merge.
+        for pattern in DEFAULT_IMMUTABLE_PATTERNS {
+            immutable_builder.add(Glob::new(pattern)?);
         }
 
-        // Add user-configured binary patterns from .darn
+        // User-configured binary patterns from .darn
         for pattern in &config.attributes.binary {
             binary_builder.add(Glob::new(pattern)?);
         }
 
-        // Add user-configured immutable patterns from .darn
+        // User-configured immutable patterns from .darn
         for pattern in &config.attributes.immutable {
             immutable_builder.add(Glob::new(pattern)?);
         }
 
-        // Add user-configured text patterns from .darn
+        // User-configured text patterns from .darn
         for pattern in &config.attributes.text {
             text_builder.add(Glob::new(pattern)?);
         }
 
         Ok(Self {
-            binary_globs: binary_builder.build()?,
-            immutable_globs: immutable_builder.build()?,
-            text_globs: text_builder.build()?,
+            binary: binary_builder.build()?,
+            immutable: immutable_builder.build()?,
+            text: text_builder.build()?,
         })
     }
 
@@ -119,23 +123,27 @@ impl AttributeRules {
     /// Get the attribute for a file path.
     ///
     /// Returns `Some(FileType)` if an explicit rule matches, `None` for auto-detect.
-    /// Priority: immutable > text > binary (most specific user override wins).
+    /// Priority: immutable > text > binary.
+    ///
+    /// For directory-prefix patterns like `dist/**`, pass a workspace-relative
+    /// path (e.g. `dist/tool.js`). Absolute paths will only match filename-only
+    /// globs like `*.lock`.
     #[must_use]
     pub fn get_attribute(&self, path: &Path) -> Option<FileType> {
         let path_str = path.to_string_lossy();
 
-        // Check immutable patterns first (highest user priority)
-        if self.immutable_globs.is_match(path_str.as_ref()) {
+        // Immutable patterns first (defaults + user)
+        if self.immutable.is_match(path_str.as_ref()) {
             return Some(FileType::Immutable);
         }
 
-        // Check text patterns (user overrides)
-        if self.text_globs.is_match(path_str.as_ref()) {
+        // User-configured text patterns
+        if self.text.is_match(path_str.as_ref()) {
             return Some(FileType::Text);
         }
 
-        // Check binary patterns (defaults + user patterns)
-        if self.binary_globs.is_match(path_str.as_ref()) {
+        // User-configured binary patterns
+        if self.binary.is_match(path_str.as_ref()) {
             return Some(FileType::Binary);
         }
 
@@ -157,18 +165,20 @@ impl AttributeRules {
 
 impl Default for AttributeRules {
     fn default() -> Self {
-        let mut binary_builder = GlobSetBuilder::new();
+        let mut immutable_builder = GlobSetBuilder::new();
 
-        for pattern in DEFAULT_BINARY_PATTERNS {
+        for pattern in DEFAULT_IMMUTABLE_PATTERNS {
             if let Ok(glob) = Glob::new(pattern) {
-                binary_builder.add(glob);
+                immutable_builder.add(glob);
             }
         }
 
         Self {
-            binary_globs: binary_builder.build().unwrap_or_else(|_| GlobSet::empty()),
-            immutable_globs: GlobSet::empty(),
-            text_globs: GlobSet::empty(),
+            binary: GlobSet::empty(),
+            immutable: immutable_builder
+                .build()
+                .unwrap_or_else(|_| GlobSet::empty()),
+            text: GlobSet::empty(),
         }
     }
 }
@@ -191,18 +201,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_binary_patterns() {
+    fn default_immutable_patterns() {
         let rules = AttributeRules::default();
 
-        assert!(rules.is_binary(Path::new("foo.js.map")));
-        assert!(rules.is_binary(Path::new("src/bundle.min.js")));
-        assert!(rules.is_binary(Path::new("styles.min.css")));
-        assert!(rules.is_binary(Path::new("package-lock.json")));
-        assert!(rules.is_binary(Path::new("Cargo.lock")));
+        assert_eq!(
+            rules.get_attribute(Path::new("foo.js.map")),
+            Some(FileType::Immutable)
+        );
+        assert_eq!(
+            rules.get_attribute(Path::new("src/bundle.min.js")),
+            Some(FileType::Immutable)
+        );
+        assert_eq!(
+            rules.get_attribute(Path::new("styles.min.css")),
+            Some(FileType::Immutable)
+        );
+        assert_eq!(
+            rules.get_attribute(Path::new("package-lock.json")),
+            Some(FileType::Immutable)
+        );
+        assert_eq!(
+            rules.get_attribute(Path::new("Cargo.lock")),
+            Some(FileType::Immutable)
+        );
 
-        assert!(!rules.is_binary(Path::new("foo.js")));
-        assert!(!rules.is_binary(Path::new("src/main.rs")));
-        assert!(!rules.is_binary(Path::new("README.md")));
+        assert_eq!(rules.get_attribute(Path::new("foo.js")), None);
+        assert_eq!(rules.get_attribute(Path::new("src/main.rs")), None);
+        assert_eq!(rules.get_attribute(Path::new("README.md")), None);
     }
 
     #[test]
@@ -213,7 +238,7 @@ mod tests {
         assert_eq!(rules.get_attribute(Path::new("README.md")), None);
         assert_eq!(
             rules.get_attribute(Path::new("foo.js.map")),
-            Some(FileType::Binary)
+            Some(FileType::Immutable)
         );
     }
 
@@ -221,17 +246,173 @@ mod tests {
     fn absolute_paths_match_patterns() {
         let rules = AttributeRules::default();
 
-        assert!(
-            rules.is_binary(Path::new("/Users/test/project/bundle.js.map")),
-            "Absolute path to .js.map should be binary"
+        assert_eq!(
+            rules.get_attribute(Path::new("/Users/test/project/bundle.js.map")),
+            Some(FileType::Immutable),
+            "Absolute path to .js.map should be immutable"
         );
-        assert!(
-            rules.is_binary(Path::new("/private/tmp/darn-tenfold/assets/worker.js.map")),
-            "Deep absolute path to .js.map should be binary"
+        assert_eq!(
+            rules.get_attribute(Path::new("/private/tmp/darn-tenfold/assets/worker.js.map")),
+            Some(FileType::Immutable),
+            "Deep absolute path to .js.map should be immutable"
         );
-        assert!(
-            !rules.is_binary(Path::new("/Users/test/project/bundle.js")),
-            "Absolute path to .js should NOT be binary"
+        assert_eq!(
+            rules.get_attribute(Path::new("/Users/test/project/bundle.js")),
+            None,
+            "Absolute path to .js should auto-detect"
+        );
+    }
+
+    #[test]
+    fn directory_prefixed_immutable_patterns() {
+        use crate::dotfile::{AttributeMap, DarnConfig};
+        use crate::workspace::id::WorkspaceId;
+        use sedimentree_core::id::SedimentreeId;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = DarnConfig::with_fields(
+            WorkspaceId::from_bytes([1; 16]),
+            SedimentreeId::new([2; 32]),
+            false,
+            Vec::new(),
+            AttributeMap {
+                binary: Vec::new(),
+                immutable: vec!["dist/**".to_string()],
+                text: Vec::new(),
+            },
+        );
+        config.save(dir.path()).expect("save config");
+
+        let rules = AttributeRules::from_workspace_root(dir.path()).expect("load rules");
+
+        assert_eq!(
+            rules.get_attribute(Path::new("dist/index.js")),
+            Some(FileType::Immutable),
+            "relative dist/index.js should be immutable"
+        );
+        assert_eq!(
+            rules.get_attribute(Path::new("dist/assets/chunk.js")),
+            Some(FileType::Immutable),
+            "relative dist/assets/chunk.js should be immutable"
+        );
+
+        assert_eq!(
+            rules.get_attribute(Path::new("src/main.ts")),
+            None,
+            "src/main.ts should auto-detect"
+        );
+    }
+
+    /// `get_attribute` requires workspace-relative paths for directory-prefix
+    /// globs like `dist/**`. Absolute paths won't match such patterns (by
+    /// design — callers are responsible for stripping the workspace root).
+    /// Filename-only globs like `*.lock` work regardless.
+    #[test]
+    fn absolute_path_does_not_match_directory_prefix_glob() {
+        use crate::dotfile::{AttributeMap, DarnConfig};
+        use crate::workspace::id::WorkspaceId;
+        use sedimentree_core::id::SedimentreeId;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = DarnConfig::with_fields(
+            WorkspaceId::from_bytes([1; 16]),
+            SedimentreeId::new([2; 32]),
+            false,
+            Vec::new(),
+            AttributeMap {
+                binary: Vec::new(),
+                immutable: vec!["dist/**".to_string()],
+                text: Vec::new(),
+            },
+        );
+        config.save(dir.path()).expect("save config");
+
+        let rules = AttributeRules::from_workspace_root(dir.path()).expect("load rules");
+
+        // Absolute paths do NOT match directory-prefix globs — this is expected.
+        // Callers must pass workspace-relative paths for correct matching.
+        assert_eq!(
+            rules.get_attribute(Path::new("/Users/test/project/dist/tool.js")),
+            None,
+            "absolute path should not match dist/** (caller must pass relative path)"
+        );
+
+        // Relative paths DO match
+        assert_eq!(
+            rules.get_attribute(Path::new("dist/tool.js")),
+            Some(FileType::Immutable),
+            "relative dist/tool.js should match dist/** pattern"
+        );
+        assert_eq!(
+            rules.get_attribute(Path::new("dist/assets/chunk-ABC.js")),
+            Some(FileType::Immutable),
+            "relative nested dist/ path should match dist/** pattern"
+        );
+    }
+
+    /// Filename-only globs like `*.lock` work with both absolute and relative paths.
+    #[test]
+    fn filename_only_glob_matches_absolute_and_relative() {
+        let rules = AttributeRules::default();
+
+        assert_eq!(
+            rules.get_attribute(Path::new("Cargo.lock")),
+            Some(FileType::Immutable),
+            "relative Cargo.lock should match"
+        );
+        assert_eq!(
+            rules.get_attribute(Path::new("/Users/test/project/Cargo.lock")),
+            Some(FileType::Immutable),
+            "absolute Cargo.lock should match (filename-only glob)"
+        );
+        assert_eq!(
+            rules.get_attribute(Path::new("/Users/test/project/src/main.rs")),
+            None,
+            "absolute src/main.rs should not match any default pattern"
+        );
+    }
+
+    #[test]
+    fn dist_immutable_covers_all_file_types() {
+        use crate::dotfile::{AttributeMap, DarnConfig};
+        use crate::workspace::id::WorkspaceId;
+        use sedimentree_core::id::SedimentreeId;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = DarnConfig::with_fields(
+            WorkspaceId::from_bytes([1; 16]),
+            SedimentreeId::new([2; 32]),
+            false,
+            Vec::new(),
+            AttributeMap {
+                binary: Vec::new(),
+                immutable: vec!["dist/**".to_string()],
+                text: Vec::new(),
+            },
+        );
+        config.save(dir.path()).expect("save config");
+
+        let rules = AttributeRules::from_workspace_root(dir.path()).expect("load rules");
+
+        assert_eq!(
+            rules.get_attribute(Path::new("dist/index.js")),
+            Some(FileType::Immutable),
+        );
+        assert_eq!(
+            rules.get_attribute(Path::new("dist/index.js.map")),
+            Some(FileType::Immutable),
+        );
+        assert_eq!(
+            rules.get_attribute(Path::new("dist/bundle.min.js")),
+            Some(FileType::Immutable),
+        );
+        assert_eq!(
+            rules.get_attribute(Path::new("dist/tool.css")),
+            Some(FileType::Immutable),
+        );
+        assert_eq!(
+            rules.get_attribute(Path::new("dist/assets/chunk.css.map")),
+            Some(FileType::Immutable),
         );
     }
 }

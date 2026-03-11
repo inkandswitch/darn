@@ -19,7 +19,7 @@ use darn_core::{
     file::state::FileState,
     ignore,
     staged_update::StagedUpdate,
-    workspace::WorkspaceId,
+    workspace::id::WorkspaceId,
 };
 use testresult::TestResult;
 
@@ -821,6 +821,320 @@ async fn full_local_workflow() -> TestResult {
         darn.save_manifest(&manifest)?;
         let reloaded = darn.load_manifest()?;
         assert_eq!(reloaded.iter().count(), 2);
+
+        Ok(())
+    })
+    .await
+}
+
+// ==========================================================================
+// Root directory document contains both files and folders
+// ==========================================================================
+
+#[tokio::test]
+async fn root_dir_doc_contains_root_level_files() -> TestResult {
+    use darn_core::directory::Directory;
+
+    with_env_async(|env| async move {
+        env.init();
+        let darn = env.open().await;
+        let mut manifest = darn.load_manifest()?;
+
+        // Create root-level files AND subdirectory files
+        std::fs::create_dir_all(env.workspace().join("dist"))?;
+        std::fs::write(env.workspace().join("package.json"), r#"{"name":"test"}"#)?;
+        std::fs::write(
+            env.workspace().join("tsconfig.json"),
+            r#"{"compilerOptions":{}}"#,
+        )?;
+        std::fs::write(env.workspace().join("dist/index.js"), "console.log('hi')")?;
+        std::fs::write(
+            env.workspace().join("dist/style.css"),
+            "body { color: red }",
+        )?;
+
+        let paths = darn.scan_new_files(&manifest)?;
+        assert_eq!(paths.len(), 4, "expected 4 files, got: {paths:?}");
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let result = darn
+            .ingest_files(paths, &mut manifest, false, |_| {}, &cancel)
+            .await?;
+        assert_eq!(result.new_files.len(), 4);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+        // Now read the root directory Automerge document and verify its contents
+        let root_dir_id = manifest.root_directory_id();
+        let root_doc = darn_core::sedimentree::load_document(darn.subduction(), root_dir_id)
+            .await?
+            .expect("root directory document should exist");
+
+        let root_dir = Directory::from_automerge(&root_doc)?;
+
+        // Root dir should contain: dist (folder), package.json (file), tsconfig.json (file)
+        let entry_names: Vec<String> = root_dir.entries.iter().map(|e| e.name.clone()).collect();
+
+        assert!(
+            root_dir.get("dist").is_some(),
+            "root dir should contain 'dist' folder. entries: {entry_names:?}"
+        );
+        assert!(
+            root_dir.get("package.json").is_some(),
+            "root dir should contain 'package.json'. entries: {entry_names:?}"
+        );
+        assert!(
+            root_dir.get("tsconfig.json").is_some(),
+            "root dir should contain 'tsconfig.json'. entries: {entry_names:?}"
+        );
+
+        // Verify entry types
+        let dist_entry = root_dir.get("dist").expect("dist should exist");
+        assert_eq!(
+            dist_entry.entry_type,
+            darn_core::directory::entry::EntryType::Folder
+        );
+
+        let pkg_entry = root_dir
+            .get("package.json")
+            .expect("package.json should exist");
+        assert_eq!(
+            pkg_entry.entry_type,
+            darn_core::directory::entry::EntryType::File
+        );
+
+        Ok(())
+    })
+    .await
+}
+
+// ==========================================================================
+// Attribute-based file type classification during ingestion
+// ==========================================================================
+
+#[tokio::test]
+async fn dist_files_ingested_as_immutable() -> TestResult {
+    use darn_core::file::file_type::FileType;
+
+    with_env_async(|env| async move {
+        env.init();
+
+        // Add dist/** to immutable patterns in .darn config
+        let mut config = darn_core::dotfile::DarnConfig::load(env.workspace())?;
+        config.attributes.immutable.push("dist/**".to_string());
+        config.save(env.workspace())?;
+
+        let darn = env.open().await;
+        let mut manifest = darn.load_manifest()?;
+
+        // Create dist/ files and a src/ file
+        std::fs::create_dir_all(env.workspace().join("dist"))?;
+        std::fs::write(env.workspace().join("dist/tool.js"), "console.log('tool')")?;
+        std::fs::write(env.workspace().join("dist/tool.css"), "body { color: red }")?;
+        std::fs::write(
+            env.workspace().join("dist/chunk-ABC123.js"),
+            "export const x = 1",
+        )?;
+        std::fs::create_dir_all(env.workspace().join("src"))?;
+        std::fs::write(env.workspace().join("src/main.ts"), "const x: number = 1")?;
+        std::fs::write(env.workspace().join("package.json"), r#"{"name":"test"}"#)?;
+
+        let paths = darn.scan_new_files(&manifest)?;
+        assert_eq!(paths.len(), 5, "expected 5 files, got: {paths:?}");
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let result = darn
+            .ingest_files(paths, &mut manifest, false, |_| {}, &cancel)
+            .await?;
+        assert_eq!(result.new_files.len(), 5);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+        // dist/ files must be Immutable
+        let tool_js = manifest
+            .get_by_path(Path::new("dist/tool.js"))
+            .expect("dist/tool.js should be tracked");
+        assert_eq!(
+            tool_js.file_type,
+            FileType::Immutable,
+            "dist/tool.js should be immutable (dist/** pattern)"
+        );
+
+        let tool_css = manifest
+            .get_by_path(Path::new("dist/tool.css"))
+            .expect("dist/tool.css should be tracked");
+        assert_eq!(
+            tool_css.file_type,
+            FileType::Immutable,
+            "dist/tool.css should be immutable (dist/** pattern)"
+        );
+
+        let chunk = manifest
+            .get_by_path(Path::new("dist/chunk-ABC123.js"))
+            .expect("dist/chunk-ABC123.js should be tracked");
+        assert_eq!(
+            chunk.file_type,
+            FileType::Immutable,
+            "dist/chunk-ABC123.js should be immutable (dist/** pattern)"
+        );
+
+        // src/ files must NOT be Immutable
+        let main_ts = manifest
+            .get_by_path(Path::new("src/main.ts"))
+            .expect("src/main.ts should be tracked");
+        assert_eq!(
+            main_ts.file_type,
+            FileType::Text,
+            "src/main.ts should be text (auto-detected)"
+        );
+
+        // Root-level files must NOT be Immutable (unless matched by other patterns)
+        let pkg = manifest
+            .get_by_path(Path::new("package.json"))
+            .expect("package.json should be tracked");
+        assert_eq!(
+            pkg.file_type,
+            FileType::Text,
+            "package.json should be text (auto-detected)"
+        );
+
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn default_immutable_patterns_applied_during_ingestion() -> TestResult {
+    use darn_core::file::file_type::FileType;
+
+    with_env_async(|env| async move {
+        env.init();
+
+        let darn = env.open().await;
+        let mut manifest = darn.load_manifest()?;
+
+        // Create files that match default immutable patterns
+        std::fs::write(
+            env.workspace().join("package-lock.json"),
+            r#"{"lockfileVersion":3}"#,
+        )?;
+        std::fs::write(
+            env.workspace().join("app.js.map"),
+            r#"{"version":3,"mappings":"AAAA"}"#,
+        )?;
+        std::fs::write(env.workspace().join("bundle.min.js"), "var a=1;")?;
+        // And a regular file that should auto-detect as text
+        std::fs::write(env.workspace().join("README.md"), "# Hello")?;
+
+        let paths = darn.scan_new_files(&manifest)?;
+        assert_eq!(paths.len(), 4);
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let result = darn
+            .ingest_files(paths, &mut manifest, false, |_| {}, &cancel)
+            .await?;
+        assert_eq!(result.new_files.len(), 4);
+
+        let lock = manifest
+            .get_by_path(Path::new("package-lock.json"))
+            .expect("package-lock.json should be tracked");
+        assert_eq!(
+            lock.file_type,
+            FileType::Immutable,
+            "package-lock.json should be immutable (default pattern)"
+        );
+
+        let sourcemap = manifest
+            .get_by_path(Path::new("app.js.map"))
+            .expect("app.js.map should be tracked");
+        assert_eq!(
+            sourcemap.file_type,
+            FileType::Immutable,
+            "app.js.map should be immutable (default pattern)"
+        );
+
+        let minified = manifest
+            .get_by_path(Path::new("bundle.min.js"))
+            .expect("bundle.min.js should be tracked");
+        assert_eq!(
+            minified.file_type,
+            FileType::Immutable,
+            "bundle.min.js should be immutable (default pattern)"
+        );
+
+        let readme = manifest
+            .get_by_path(Path::new("README.md"))
+            .expect("README.md should be tracked");
+        assert_eq!(
+            readme.file_type,
+            FileType::Text,
+            "README.md should be text (auto-detected)"
+        );
+
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn nested_dist_files_ingested_as_immutable() -> TestResult {
+    use darn_core::file::file_type::FileType;
+
+    with_env_async(|env| async move {
+        env.init();
+
+        // Add dist/** to immutable patterns
+        let mut config = darn_core::dotfile::DarnConfig::load(env.workspace())?;
+        config.attributes.immutable.push("dist/**".to_string());
+        config.save(env.workspace())?;
+
+        let darn = env.open().await;
+        let mut manifest = darn.load_manifest()?;
+
+        // Create deeply nested dist files
+        std::fs::create_dir_all(env.workspace().join("dist/assets/fonts"))?;
+        std::fs::write(env.workspace().join("dist/assets/chunk-XYZ.js"), "// chunk")?;
+        std::fs::write(
+            env.workspace().join("dist/assets/fonts/inter.woff2"),
+            vec![0u8; 100],
+        )?;
+        std::fs::write(env.workspace().join("dist/index.html"), "<html></html>")?;
+
+        let paths = darn.scan_new_files(&manifest)?;
+        assert_eq!(paths.len(), 3);
+
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let result = darn
+            .ingest_files(paths, &mut manifest, false, |_| {}, &cancel)
+            .await?;
+        assert_eq!(result.new_files.len(), 3);
+        assert!(result.errors.is_empty());
+
+        let nested_js = manifest
+            .get_by_path(Path::new("dist/assets/chunk-XYZ.js"))
+            .expect("nested dist js should be tracked");
+        assert_eq!(
+            nested_js.file_type,
+            FileType::Immutable,
+            "dist/assets/chunk-XYZ.js should be immutable"
+        );
+
+        // Binary file in dist/ — should still be binary since it's not valid UTF-8
+        let font = manifest
+            .get_by_path(Path::new("dist/assets/fonts/inter.woff2"))
+            .expect("font should be tracked");
+        assert_eq!(
+            font.file_type,
+            FileType::Immutable,
+            "dist/assets/fonts/inter.woff2: immutable rule takes priority over auto-detect"
+        );
+
+        let html = manifest
+            .get_by_path(Path::new("dist/index.html"))
+            .expect("html should be tracked");
+        assert_eq!(
+            html.file_type,
+            FileType::Immutable,
+            "dist/index.html should be immutable"
+        );
 
         Ok(())
     })

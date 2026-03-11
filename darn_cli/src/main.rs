@@ -59,7 +59,14 @@ async fn main() -> Result<()> {
             peer_name,
             force_immutable,
         } => {
-            commands::init(&path, peer.as_deref(), peer_name.as_deref(), force_immutable, out).await
+            commands::init(
+                &path,
+                peer.as_deref(),
+                peer_name.as_deref(),
+                force_immutable,
+                out,
+            )
+            .await
         }
         Commands::Clone { root_id, path } => commands::clone_cmd(&root_id, &path, out).await,
         Commands::Ignore { patterns } => commands::ignore(&patterns, out),

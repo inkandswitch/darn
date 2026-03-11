@@ -28,7 +28,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use automerge::{transaction::Transactable, Automerge, AutomergeError, ObjType, ReadDoc, ROOT};
+use automerge::{Automerge, AutomergeError, ObjType, ROOT, ReadDoc, transaction::Transactable};
 use thiserror::Error;
 
 use crate::attributes::AttributeRules;
@@ -99,7 +99,7 @@ impl File {
     ///
     /// Returns an error if the file cannot be read.
     pub fn from_path(path: &Path) -> Result<Self, ReadFileError> {
-        Self::from_path_full(path, None, false)
+        Self::from_path_full(path, None, None, false)
     }
 
     /// Creates a file document from a filesystem path with attribute rules.
@@ -115,10 +115,16 @@ impl File {
         path: &Path,
         attributes: Option<&AttributeRules>,
     ) -> Result<Self, ReadFileError> {
-        Self::from_path_full(path, attributes, false)
+        Self::from_path_full(path, None, attributes, false)
     }
 
     /// Creates a file document from a filesystem path with full options.
+    ///
+    /// `match_path` is the path used for attribute glob matching. When files
+    /// live under a workspace root, pass the _workspace-relative_ path so
+    /// that directory-prefix globs like `dist/**` match correctly. If `None`,
+    /// the absolute `path` is used (which still works for filename-only
+    /// globs like `*.lock`).
     ///
     /// When `force_immutable` is true, text files are stored as
     /// [`Content::ImmutableString`] (LWW string) instead of [`Content::Text`]
@@ -131,6 +137,7 @@ impl File {
     /// Returns an error if the file cannot be read.
     pub fn from_path_full(
         path: &Path,
+        match_path: Option<&Path>,
         attributes: Option<&AttributeRules>,
         force_immutable: bool,
     ) -> Result<Self, ReadFileError> {
@@ -148,8 +155,12 @@ impl File {
         #[cfg(not(unix))]
         let permissions = 0o644;
 
-        // Check if attributes specify a file type
-        let file_content = match attributes.and_then(|a| a.get_attribute(path)) {
+        // Check if attributes specify a file type.
+        // Use match_path (workspace-relative) for glob matching so that
+        // directory-prefix patterns like `dist/**` work correctly even
+        // when `path` is absolute.
+        let glob_path = match_path.unwrap_or(path);
+        let file_content = match attributes.and_then(|a| a.get_attribute(glob_path)) {
             Some(file_type::FileType::Binary) => {
                 // Explicitly binary — read as bytes without UTF-8 check
                 content::Content::Bytes(std::fs::read(path)?)
@@ -746,7 +757,7 @@ mod tests {
     fn large_file_respects_text_attribute() -> TestResult {
         use crate::attributes::AttributeRules;
         use crate::dotfile::{AttributeMap, DarnConfig};
-        use crate::workspace::WorkspaceId;
+        use crate::workspace::id::WorkspaceId;
         use sedimentree_core::id::SedimentreeId;
 
         let dir = tempfile::tempdir()?;
@@ -778,6 +789,127 @@ mod tests {
             matches!(doc.content, content::Content::Text(_)),
             "explicit text attribute should override size heuristic"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn from_path_full_applies_dist_glob_with_absolute_path() -> TestResult {
+        use crate::attributes::AttributeRules;
+        use crate::dotfile::{AttributeMap, DarnConfig};
+        use crate::workspace::id::WorkspaceId;
+        use sedimentree_core::id::SedimentreeId;
+
+        let dir = tempfile::tempdir()?;
+
+        // Create .darn config with dist/** as immutable
+        let config = DarnConfig::with_fields(
+            WorkspaceId::from_bytes([1; 16]),
+            SedimentreeId::new([2; 32]),
+            false,
+            Vec::new(),
+            AttributeMap {
+                binary: Vec::new(),
+                immutable: vec!["dist/**".to_string()],
+                text: Vec::new(),
+            },
+        );
+        config.save(dir.path())?;
+
+        // Create dist/tool.js at an absolute path
+        std::fs::create_dir_all(dir.path().join("dist"))?;
+        let file_path = dir.path().join("dist/tool.js");
+        std::fs::write(&file_path, "console.log('hello')")?;
+
+        let attrs = AttributeRules::from_workspace_root(dir.path())?;
+        // file_path is absolute: /tmp/.../dist/tool.js
+        // The dist/** glob must still match it.
+        // Pass workspace-relative path for glob matching
+        let rel_path = Path::new("dist/tool.js");
+        let doc = File::from_path_full(&file_path, Some(rel_path), Some(&attrs), false)?;
+
+        assert!(
+            matches!(doc.content, content::Content::ImmutableString(_)),
+            "dist/tool.js should be immutable when dist/** pattern is set, got: {:?}",
+            file_type::FileType::from(&doc.content)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn from_path_full_dist_glob_does_not_match_src() -> TestResult {
+        use crate::attributes::AttributeRules;
+        use crate::dotfile::{AttributeMap, DarnConfig};
+        use crate::workspace::id::WorkspaceId;
+        use sedimentree_core::id::SedimentreeId;
+
+        let dir = tempfile::tempdir()?;
+
+        let config = DarnConfig::with_fields(
+            WorkspaceId::from_bytes([1; 16]),
+            SedimentreeId::new([2; 32]),
+            false,
+            Vec::new(),
+            AttributeMap {
+                binary: Vec::new(),
+                immutable: vec!["dist/**".to_string()],
+                text: Vec::new(),
+            },
+        );
+        config.save(dir.path())?;
+
+        // Create src/tool.tsx (should NOT be immutable)
+        std::fs::create_dir_all(dir.path().join("src"))?;
+        let file_path = dir.path().join("src/tool.tsx");
+        std::fs::write(&file_path, "export default function() {}")?;
+
+        let attrs = AttributeRules::from_workspace_root(dir.path())?;
+        let rel_path = Path::new("src/tool.tsx");
+        let doc = File::from_path_full(&file_path, Some(rel_path), Some(&attrs), false)?;
+
+        assert!(
+            matches!(doc.content, content::Content::Text(_)),
+            "src/tool.tsx should be text (auto-detected), got: {:?}",
+            file_type::FileType::from(&doc.content)
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn from_path_full_filename_glob_works_with_absolute_path() -> TestResult {
+        use crate::attributes::AttributeRules;
+        use crate::dotfile::{AttributeMap, DarnConfig};
+        use crate::workspace::id::WorkspaceId;
+        use sedimentree_core::id::SedimentreeId;
+
+        let dir = tempfile::tempdir()?;
+
+        let config = DarnConfig::with_fields(
+            WorkspaceId::from_bytes([1; 16]),
+            SedimentreeId::new([2; 32]),
+            false,
+            Vec::new(),
+            AttributeMap {
+                binary: Vec::new(),
+                immutable: vec!["*.lock".to_string()],
+                text: Vec::new(),
+            },
+        );
+        config.save(dir.path())?;
+
+        let file_path = dir.path().join("Cargo.lock");
+        std::fs::write(&file_path, "# This file is automatically @generated")?;
+
+        let attrs = AttributeRules::from_workspace_root(dir.path())?;
+        // Filename-only globs work even without match_path
+        let doc = File::from_path_full(&file_path, None, Some(&attrs), false)?;
+
+        assert!(
+            matches!(doc.content, content::Content::ImmutableString(_)),
+            "Cargo.lock should be immutable with *.lock pattern"
+        );
+
         Ok(())
     }
 

@@ -2051,7 +2051,12 @@ async fn track_single_file(
 
     // Create File from path (with attribute rules + force_immutable)
     let attributes = AttributeRules::from_workspace_root(darn.root()).ok();
-    let doc = File::from_path_full(&full_path, attributes.as_ref(), force_immutable)?;
+    let doc = File::from_path_full(
+        &full_path,
+        Some(relative_path),
+        attributes.as_ref(),
+        force_immutable,
+    )?;
     let file_type = FileType::from(&doc.content);
 
     // Convert to Automerge

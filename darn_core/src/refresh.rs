@@ -1,6 +1,6 @@
 //! Refresh error types and Automerge content update helpers.
 
-use automerge::{transaction::Transactable, Automerge, AutomergeError, ObjType, ReadDoc, ROOT};
+use automerge::{Automerge, AutomergeError, ObjType, ROOT, ReadDoc, transaction::Transactable};
 use thiserror::Error;
 
 use crate::file::content::Content;

@@ -148,7 +148,7 @@ pub enum IgnoreMutateError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspace::WorkspaceId;
+    use crate::workspace::id::WorkspaceId;
     use bolero::check;
     use sedimentree_core::id::SedimentreeId;
     use testresult::TestResult;

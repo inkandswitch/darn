@@ -231,11 +231,16 @@ async fn store_single_file(
     // CPU-intensive work: file read + Automerge conversion
     // Run on blocking threadpool to avoid starving the async runtime
     let path_owned = path.to_path_buf();
+    let rel_path = relative_path.clone();
     let attributes_default = attributes.clone();
     let (file_type, am_doc) = tokio::task::spawn_blocking(move || {
-        let doc =
-            File::from_path_full(&path_owned, Some(&attributes_default), force_immutable)
-                .map_err(FileProcessError::Read)?;
+        let doc = File::from_path_full(
+            &path_owned,
+            Some(rel_path.as_path()),
+            Some(&attributes_default),
+            force_immutable,
+        )
+        .map_err(FileProcessError::Read)?;
 
         let file_type = FileType::from(&doc.content);
 

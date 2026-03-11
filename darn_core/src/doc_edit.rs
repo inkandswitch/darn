@@ -256,12 +256,12 @@ mod tests {
 
     /// Helper: get the length of the "modules" list.
     fn modules_len(doc: &Automerge) -> Result<usize, EditError> {
-        let (_, list_id) = doc
-            .get(automerge::ROOT, "modules")?
-            .ok_or_else(|| EditError::PathNotFound {
-                segment: "modules".into(),
-                path: "modules".into(),
-            })?;
+        let (_, list_id) =
+            doc.get(automerge::ROOT, "modules")?
+                .ok_or_else(|| EditError::PathNotFound {
+                    segment: "modules".into(),
+                    path: "modules".into(),
+                })?;
         Ok(doc.length(&list_id))
     }
 
@@ -403,10 +403,7 @@ mod tests {
             .get(automerge::ROOT, "modules")?
             .ok_or("modules missing")?;
 
-        let (Value::Scalar(scalar), _) = doc
-            .get(&list_id, 0)?
-            .ok_or("first item missing")?
-        else {
+        let (Value::Scalar(scalar), _) = doc.get(&list_id, 0)?.ok_or("first item missing")? else {
             return Err("expected scalar".into());
         };
         assert_eq!(scalar.to_str(), Some("automerge:new"));

@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::WorkspaceId;
+use super::id::WorkspaceId;
 use crate::config::{self, NoConfigDir};
 
 /// Subdirectory names within the global config.

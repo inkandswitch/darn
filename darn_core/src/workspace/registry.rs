@@ -12,7 +12,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::WorkspaceId;
+use super::id::WorkspaceId;
 use crate::config::{self, NoConfigDir};
 
 /// Registry filename within the config directory.
