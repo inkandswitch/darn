@@ -270,6 +270,13 @@ mod tests {
     use bolero::check;
     use sedimentree_core::id::SedimentreeId;
 
+    #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
+    struct Wrapper {
+        #[serde(with = "super::automerge_url")]
+        id: SedimentreeId,
+    }
+
+    #[allow(clippy::expect_used)] // bolero closures return (), can't use TestResult
     #[test]
     fn automerge_url_roundtrip() {
         check!()
@@ -278,12 +285,6 @@ mod tests {
                 let mut full = [0u8; 32];
                 full[..16].copy_from_slice(id_bytes);
                 let original = SedimentreeId::new(full);
-
-                #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
-                struct Wrapper {
-                    #[serde(with = "super::automerge_url")]
-                    id: SedimentreeId,
-                }
 
                 let w = Wrapper { id: original };
                 let json = serde_json::to_string(&w).expect("serialize");
@@ -299,15 +300,8 @@ mod tests {
 
     #[test]
     fn automerge_url_rejects_plain_bs58() {
-        #[derive(serde::Deserialize)]
-        struct Wrapper {
-            #[serde(with = "super::automerge_url")]
-            #[allow(dead_code)]
-            id: SedimentreeId,
-        }
-
         let plain_bs58 = bs58::encode([42u8; 32]).into_string();
-        let json = format!(r#"{{"id":"{}"}}"#, plain_bs58);
+        let json = format!(r#"{{"id":"{plain_bs58}"}}"#);
         let result = serde_json::from_str::<Wrapper>(&json);
         assert!(
             result.is_err(),
@@ -321,18 +315,11 @@ mod tests {
     fn automerge_url_rejects_wrong_payload_length() {
         use sha2::{Digest, Sha256};
 
-        #[derive(serde::Deserialize)]
-        struct Wrapper {
-            #[serde(with = "super::automerge_url")]
-            #[allow(dead_code)]
-            id: SedimentreeId,
-        }
-
-        // Build a valid bs58check string encoding 8 bytes (not 16)
         let payload = [0xAB_u8; 8];
-        let checksum = Sha256::digest(Sha256::digest(&payload));
+        let checksum = Sha256::digest(Sha256::digest(payload));
         let mut buf = Vec::with_capacity(12);
         buf.extend_from_slice(&payload);
+        #[allow(clippy::indexing_slicing)] // SHA-256 always produces 32 bytes; 4 < 32
         buf.extend_from_slice(&checksum[..4]);
         let encoded = bs58::encode(&buf).into_string();
 

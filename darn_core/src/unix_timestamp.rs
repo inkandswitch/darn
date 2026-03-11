@@ -63,13 +63,14 @@ mod tests {
     use super::*;
     use bolero::check;
 
+    #[allow(clippy::expect_used)] // bolero closures return (), can't use TestResult
     #[test]
     fn cbor_roundtrip() {
         check!().with_type::<u64>().for_each(|secs: &u64| {
             let ts = UnixTimestamp::from_secs(*secs);
             let mut buf = Vec::new();
-            minicbor::encode(&ts, &mut buf).expect("encode");
-            let decoded: UnixTimestamp = minicbor::decode(&buf).expect("decode");
+            minicbor::encode(ts, &mut buf).expect("CBOR encode");
+            let decoded: UnixTimestamp = minicbor::decode(&buf).expect("CBOR decode");
             assert_eq!(decoded, ts);
         });
     }

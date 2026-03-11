@@ -117,12 +117,13 @@ mod tests {
     }
 
     /// The streaming hash (via `io::copy`) must agree with the in-memory hash.
+    #[allow(clippy::expect_used)] // bolero closures return (), can't use TestResult
     #[test]
     fn hash_file_matches_hash_bytes() {
         check!().with_type::<Vec<u8>>().for_each(|data: &Vec<u8>| {
-            let dir = tempfile::tempdir().expect("tempdir");
+            let dir = tempfile::tempdir().expect("create tempdir");
             let path = dir.path().join("test.bin");
-            std::fs::write(&path, data).expect("write");
+            std::fs::write(&path, data).expect("write test file");
 
             let file_digest = hash_file(&path).expect("hash_file");
             let bytes_digest = hash_bytes(data);

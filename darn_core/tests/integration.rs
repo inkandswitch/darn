@@ -1320,11 +1320,8 @@ async fn sedimentree_add_changes_stores_incremental() -> TestResult {
         let heads_before: Vec<_> = am_doc.get_heads().into_iter().collect();
         am_doc
             .transact::<_, _, automerge::AutomergeError>(|tx| {
-                let (_, content_id) = tx
-                    .get(automerge::ROOT, "content")
-                    .unwrap()
-                    .expect("content field");
-                let old_len = tx.text(&content_id).unwrap().chars().count();
+                let (_, content_id) = tx.get(automerge::ROOT, "content")?.expect("content field");
+                let old_len = tx.text(&content_id)?.chars().count();
                 tx.splice_text(
                     &content_id,
                     0,

@@ -202,40 +202,43 @@ mod tests {
 
     /// `add_sync_stats` is additive: after N calls the summary fields
     /// equal the element-wise sum, and `sedimentrees_synced == N`.
+    #[allow(clippy::similar_names)]
     #[test]
     fn sync_summary_accumulates_stats() {
         check!()
             .with_type::<Vec<(u16, u16, u16, u16)>>()
             .for_each(|entries| {
-                let mut s = SyncSummary::new();
-                let mut exp_cr = 0;
-                let mut exp_fr = 0;
-                let mut exp_cs = 0;
-                let mut exp_fs = 0;
+                let mut summary = SyncSummary::new();
+                let mut want_commits_recv = 0;
+                let mut want_frags_recv = 0;
+                let mut want_commits_sent = 0;
+                let mut want_frags_sent = 0;
 
                 for &(cr, fr, cs, fs) in entries {
-                    let (cr, fr, cs, fs) =
-                        (cr as usize, fr as usize, cs as usize, fs as usize);
-                    s.add_sync_stats(&SyncStats {
+                    let (cr, fr, cs, fs) = (cr as usize, fr as usize, cs as usize, fs as usize);
+                    summary.add_sync_stats(&SyncStats {
                         commits_received: cr,
                         fragments_received: fr,
                         commits_sent: cs,
                         fragments_sent: fs,
                     });
-                    exp_cr += cr;
-                    exp_fr += fr;
-                    exp_cs += cs;
-                    exp_fs += fs;
+                    want_commits_recv += cr;
+                    want_frags_recv += fr;
+                    want_commits_sent += cs;
+                    want_frags_sent += fs;
                 }
 
-                assert_eq!(s.sedimentrees_synced, entries.len());
-                assert_eq!(s.commits_received, exp_cr);
-                assert_eq!(s.fragments_received, exp_fr);
-                assert_eq!(s.commits_sent, exp_cs);
-                assert_eq!(s.fragments_sent, exp_fs);
-                assert_eq!(s.total_received(), exp_cr + exp_fr);
-                assert_eq!(s.total_sent(), exp_cs + exp_fs);
-                assert_eq!(s.any_success(), !entries.is_empty());
+                assert_eq!(summary.sedimentrees_synced, entries.len());
+                assert_eq!(summary.commits_received, want_commits_recv);
+                assert_eq!(summary.fragments_received, want_frags_recv);
+                assert_eq!(summary.commits_sent, want_commits_sent);
+                assert_eq!(summary.fragments_sent, want_frags_sent);
+                assert_eq!(
+                    summary.total_received(),
+                    want_commits_recv + want_frags_recv
+                );
+                assert_eq!(summary.total_sent(), want_commits_sent + want_frags_sent);
+                assert_eq!(summary.any_success(), !entries.is_empty());
             });
     }
 
