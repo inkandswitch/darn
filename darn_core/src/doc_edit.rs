@@ -403,10 +403,8 @@ mod tests {
             .get(automerge::ROOT, "modules")?
             .ok_or("modules missing")?;
 
-        let (Value::Scalar(scalar), _) = doc.get(&list_id, 0)?.ok_or("first item missing")? else {
-            return Err("expected scalar".into());
-        };
-        assert_eq!(scalar.to_str(), Some("automerge:new"));
+        let (value, _) = doc.get(&list_id, 0)?.ok_or("first item missing")?;
+        assert_eq!(value.to_str(), Some("automerge:new"));
 
         Ok(())
     }

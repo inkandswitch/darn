@@ -8,7 +8,7 @@
 //! ```json
 //! {
 //!   "attributes": {
-//!     "immutable": ["dist/**", "*.lock", "*.min.js", "*.map"],
+//!     "immutable": ["vendor/**"],
 //!     "text": ["*.md"]
 //!   }
 //! }
@@ -37,22 +37,25 @@ use crate::{dotfile::DarnConfig, file::file_type::FileType};
 /// produce semantically invalid results. They are stored as LWW strings
 /// rather than Text CRDTs.
 const DEFAULT_IMMUTABLE_PATTERNS: &[&str] = &[
-    // Source maps: VLQ-encoded mappings, meaningless to character-merge
-    "*.js.map",
-    "*.css.map",
-    "*.map",
-    // Minified files: typically single lines, character-merge is meaningless
-    "*.min.js",
-    "*.min.css",
+    // Build output directories: contents are machine-generated artifacts
+    "build/**",
+    "dist/**",
     // Lock files: machine-generated, should be replaced wholesale
     "*.lock",
-    "package-lock.json",
-    "pnpm-lock.yaml",
-    "yarn.lock",
     "Cargo.lock",
     "Gemfile.lock",
-    "poetry.lock",
     "composer.lock",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "poetry.lock",
+    "yarn.lock",
+    // Minified files: typically single lines, character-merge is meaningless
+    "*.min.css",
+    "*.min.js",
+    // Source maps: VLQ-encoded mappings, meaningless to character-merge
+    "*.css.map",
+    "*.js.map",
+    "*.map",
 ];
 
 /// Attribute matcher for a workspace.
@@ -222,6 +225,18 @@ mod tests {
         );
         assert_eq!(
             rules.get_attribute(Path::new("Cargo.lock")),
+            Some(FileType::Immutable)
+        );
+        assert_eq!(
+            rules.get_attribute(Path::new("dist/index.html")),
+            Some(FileType::Immutable)
+        );
+        assert_eq!(
+            rules.get_attribute(Path::new("dist/assets/chunk-abc.js")),
+            Some(FileType::Immutable)
+        );
+        assert_eq!(
+            rules.get_attribute(Path::new("build/output.js")),
             Some(FileType::Immutable)
         );
 
