@@ -258,7 +258,7 @@ async fn store_single_file(
     // Store as sedimentree commits
     sedimentree::store_document(subduction, sedimentree_id, &mut am_doc)
         .await
-        .map_err(FileProcessError::Sedimentree)?;
+        .map_err(|e| FileProcessError::Sedimentree(Box::new(e)))?;
 
     // Compute digests (hash is CPU-bound, run on blocking pool)
     let path_for_hash = path.to_path_buf();
@@ -269,7 +269,7 @@ async fn store_single_file(
             .map_err(FileProcessError::Hash)?;
     let sedimentree_digest = sedimentree::compute_digest(subduction, sedimentree_id)
         .await
-        .map_err(FileProcessError::Sedimentree)?;
+        .map_err(|e| FileProcessError::Sedimentree(Box::new(e)))?;
 
     Ok(StoredFile {
         discovered: DiscoveredFile {
@@ -298,7 +298,7 @@ async fn register_file_in_directory(
     let parent_dir_id =
         sedimentree::ensure_parent_directories(subduction, root_dir_id, relative_path)
             .await
-            .map_err(FileProcessError::Sedimentree)?;
+            .map_err(|e| FileProcessError::Sedimentree(Box::new(e)))?;
 
     let file_name = relative_path
         .file_name()
@@ -312,7 +312,7 @@ async fn register_file_in_directory(
         stored.discovered.sedimentree_id,
     )
     .await
-    .map_err(FileProcessError::Sedimentree)?;
+    .map_err(|e| FileProcessError::Sedimentree(Box::new(e)))?;
 
     Ok(())
 }
@@ -346,7 +346,7 @@ pub enum FileProcessError {
 
     /// Sedimentree storage error.
     #[error("storage error: {0}")]
-    Sedimentree(#[from] SedimentreeError),
+    Sedimentree(Box<SedimentreeError>),
 
     /// Failed to hash file.
     #[error("hash error: {0}")]
