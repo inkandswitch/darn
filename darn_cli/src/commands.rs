@@ -42,9 +42,9 @@ use tungstenite::http::Uri;
 
 use crate::output::Output;
 
-/// Style for command references in messages (mauve color).
+/// Style for command references in messages.
 const fn cmd_style() -> Style {
-    Style::new().color256(183) // Approximate mauve
+    Style::new().cyan()
 }
 
 /// Format a command for display with color.
@@ -684,6 +684,7 @@ pub(crate) fn tree(out: Output) -> eyre::Result<()> {
 
     // Build file list
     let mut file_list = String::new();
+    let bold = Style::new().bold();
     let yellow = Style::new().yellow();
     let red = Style::new().red();
     let dim = Style::new().dim();
@@ -706,7 +707,7 @@ pub(crate) fn tree(out: Output) -> eyre::Result<()> {
             file_list,
             "{} {}  {}",
             styled_indicator,
-            entry.relative_path.display(),
+            bold.apply_to(entry.relative_path.display()),
             dim.apply_to(&url)
         )
         .expect("write to string");

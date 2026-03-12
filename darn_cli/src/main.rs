@@ -10,6 +10,8 @@
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use cliclack::{Theme, ThemeState};
+use console::Style;
 use darn_core::doc_edit::EditOp;
 use eyre::Result;
 use output::Verbosity;
@@ -18,7 +20,27 @@ use tracing_subscriber::{EnvFilter, fmt};
 mod commands;
 mod output;
 mod setup;
-mod theme;
+
+/// Cliclack theme override: the default dims note boxes and body text.
+#[derive(Debug, Clone, Copy, Default)]
+struct DarnTheme;
+
+impl Theme for DarnTheme {
+    fn bar_color(&self, state: &ThemeState) -> Style {
+        match state {
+            ThemeState::Submit => Style::new().dim(),
+            ThemeState::Active => Style::new().cyan(),
+            ThemeState::Cancel | ThemeState::Error(_) => Style::new().red(),
+        }
+    }
+
+    fn input_style(&self, state: &ThemeState) -> Style {
+        match state {
+            ThemeState::Cancel => Style::new().dim().strikethrough(),
+            ThemeState::Submit | _ => Style::new(),
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -43,9 +65,9 @@ async fn main() -> Result<()> {
     };
     let out = output::Output::new(porcelain, verbosity);
 
-    // Apply Catppuccin Mocha theme for all cliclack prompts (skip in non-interactive modes)
+    // Override cliclack's default dim note boxes and body text
     if !out.is_non_interactive() {
-        theme::apply();
+        cliclack::set_theme(DarnTheme);
     }
 
     // Ensure signer exists before running commands
