@@ -38,6 +38,9 @@ pub struct DiscoverResult {
     /// Successfully discovered and stored files.
     pub new_files: Vec<PathBuf>,
 
+    /// Number of directory Automerge docs created or updated.
+    pub directories: usize,
+
     /// Files that failed to process: (path, error message).
     pub errors: Vec<(PathBuf, String)>,
 
@@ -388,7 +391,7 @@ pub(crate) async fn ingest_files_parallel<F>(
     force_immutable: bool,
     on_progress: F,
     cancel: &CancellationToken,
-) -> (Vec<DiscoveredFile>, Vec<(PathBuf, String)>, bool)
+) -> (Vec<DiscoveredFile>, usize, Vec<(PathBuf, String)>, bool)
 where
     F: Fn(DiscoverProgress<'_>) + Send + Sync,
 {
@@ -396,7 +399,7 @@ where
     let total = paths.len();
 
     if total == 0 {
-        return (Vec::new(), Vec::new(), false);
+        return (Vec::new(), 0, Vec::new(), false);
     }
 
     // Load attribute rules for file type detection
@@ -597,7 +600,13 @@ where
             .unwrap_or_default(),
     };
 
-    (final_results, final_errors, cancel.is_cancelled())
+    let num_directories = unique_parents.len();
+    (
+        final_results,
+        num_directories,
+        final_errors,
+        cancel.is_cancelled(),
+    )
 }
 
 #[allow(clippy::panic)]

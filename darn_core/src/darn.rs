@@ -1078,7 +1078,7 @@ impl Darn {
     where
         F: Fn(DiscoverProgress<'_>) + Send + Sync,
     {
-        let (discovered, errors, cancelled) = discover::ingest_files_parallel(
+        let (discovered, directories, errors, cancelled) = discover::ingest_files_parallel(
             paths,
             &self.root,
             &self.subduction,
@@ -1101,6 +1101,7 @@ impl Darn {
 
         Ok(DiscoverResult {
             new_files,
+            directories,
             errors,
             cancelled,
         })
