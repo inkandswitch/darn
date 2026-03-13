@@ -933,11 +933,11 @@ async fn sync_discover_files(
         }
     };
 
-    spinner.stop(format!("Found {} new file(s)", candidates.len()));
-
     if candidates.is_empty() {
+        spinner.stop("No new files found");
         return Ok(());
     }
+    spinner.stop("Scan complete");
 
     // Convert absolute paths to relative for display
     let relative_paths: Vec<PathBuf> = candidates
