@@ -14,18 +14,18 @@ class Darn < Formula
 
   on_macos do
     url "https://github.com/inkandswitch/darn/releases/download/v#{version}/darn-macos-aarch64-#{version}"
-    sha256 "a5df9fe868f1d81a80ad092c0cf4fd112952a63022a9e42a6a7ce28f35d74415"
+    sha256 "3455c5c64aa8e48297e7beb67b8f70418ad59b8db231f469f5a16d775b1d229e"
   end
 
   on_linux do
     on_arm do
       url "https://github.com/inkandswitch/darn/releases/download/v#{version}/darn-linux-aarch64-musl-#{version}"
-      sha256 "74c5d5d61690792852b2deeb164adcbc6f7a62f9b943cc7f6b839813791b12ce"
+      sha256 "1516054a72a8ba2e11636d08ba0bed91c41db404530615850ae1a0dc458777af"
     end
 
     on_intel do
       url "https://github.com/inkandswitch/darn/releases/download/v#{version}/darn-linux-x86_64-musl-#{version}"
-      sha256 "30359c1217de49557d44d0df70e088855e8b8f748011db0f9e08247d4e1d7c65"
+      sha256 "5dcab30c099a6ebbc025377ba72e5178ab4b8f829fe3d60d507c35718acdc40f"
     end
   end
 
