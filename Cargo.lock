@@ -920,7 +920,7 @@ dependencies = [
 
 [[package]]
 name = "darn_cli"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "assert_cmd",
  "bs58",
@@ -950,7 +950,7 @@ dependencies = [
 
 [[package]]
 name = "darn_core"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "automerge",
  "blake3",
