@@ -133,10 +133,8 @@ pub(crate) async fn init(
 ) -> eyre::Result<()> {
     out.intro("darn init")?;
 
-    // Initialize workspace structure
     let mut initialized = Darn::init(path)?;
 
-    // Set force_immutable in the .darn config if requested
     if force_immutable {
         initialized.set_force_immutable(true)?;
     }
@@ -152,13 +150,10 @@ pub(crate) async fn init(
         out.kv("root_dir_id", &root_dir_url)?;
     }
 
-    // Peer registration
     let peer_added = if let Some(url) = peer_url {
-        // Non-interactive: --peer flag provided
         let name = peer_name_override.map_or_else(|| peer_name_from_url(url), String::from);
         add_peer_during_init(&name, url, out)?
     } else if !out.is_porcelain() {
-        // Interactive: prompt the user
         prompt_peer_during_init(out)?
     } else {
         false
@@ -2301,7 +2296,7 @@ pub(crate) fn url(out: Output) -> eyre::Result<()> {
         let dim = console::Style::new().dim();
         eprintln!(
             "{}",
-            dim.apply_to("Tip: use this URL with `darn clone` on another machine")
+            dim.apply_to(format!("Tip: run `darn clone {root_url}` on another machine"))
         );
     }
 
