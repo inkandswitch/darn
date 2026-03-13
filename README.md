@@ -10,9 +10,9 @@ A CLI for managing CRDT-backed files with automatic conflict resolution and peer
 
 ```mermaid
 graph LR
-    A["🖥️ Your Machine\nproject/\n├── .darn\n└── ..."]
-    B["🖥️ Peer's Machine\nproject/\n├── .darn\n└── ..."]
-    C["🖥️ Another Peer\nproject/\n├── .darn\n└── ..."]
+    A["🖥️ Your Machine\nproject/<br/>├── .darn\n└── ..."]
+    B["🖥️ Peer's Machine\nproject/<br/>├── .darn\n└── ..."]
+    C["🖥️ Another Peer\nproject/<br/>├── .darn\n└── ..."]
 
     A -- sync --> B
     B -- sync --> A
