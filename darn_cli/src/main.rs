@@ -34,10 +34,11 @@ impl Theme for DarnTheme {
         }
     }
 
+    #[allow(clippy::wildcard_enum_match_arm)] // ThemeState::Error has data; wildcard is cleaner
     fn input_style(&self, state: &ThemeState) -> Style {
         match state {
             ThemeState::Cancel => Style::new().dim().strikethrough(),
-            ThemeState::Submit | _ => Style::new(),
+            _ => Style::new(),
         }
     }
 }
