@@ -8,14 +8,16 @@ A CLI for managing CRDT-backed files with automatic conflict resolution and peer
 
 `darn` brings collaborative editing to your filesystem. Files are stored as [Automerge] documents and synchronized peer-to-peer using [Subduction]. Think of it as "Dropbox meets git" - but without merge conflicts or the vendor lock-in.
 
-```
-┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐
-│   Your Machine  │      │  Peer's Machine │      │  Another Peer   │
-│                 │ sync │                 │ sync │                 │
-│  project/       │─────▶│  project/       │─────▶│  project/       │
-│  ├── .darn      │◀─────│  ├── .darn      │◀─────│  ├── .darn      │
-│  └── ...        │      │  └── ...        │      │  └── ...        │
-└─────────────────┘      └─────────────────┘      └─────────────────┘
+```mermaid
+graph LR
+    A["🖥️ Your Machine\nproject/\n├── .darn\n└── ..."]
+    B["🖥️ Peer's Machine\nproject/\n├── .darn\n└── ..."]
+    C["🖥️ Another Peer\nproject/\n├── .darn\n└── ..."]
+
+    A -- sync --> B
+    B -- sync --> A
+    B -- sync --> C
+    C -- sync --> B
 ```
 
 ## Features
