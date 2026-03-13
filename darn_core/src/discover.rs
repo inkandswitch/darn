@@ -601,7 +601,12 @@ where
     };
 
     let num_directories = unique_parents.len();
-    (final_results, num_directories, final_errors, cancel.is_cancelled())
+    (
+        final_results,
+        num_directories,
+        final_errors,
+        cancel.is_cancelled(),
+    )
 }
 
 #[allow(clippy::panic)]

@@ -231,10 +231,18 @@ fn prompt_peer_during_init(out: Output) -> eyre::Result<bool> {
     }
 
     let default_url = "wss://subduction.sync.inkandswitch.com";
-    let url: String = out.input("Server URL (press Enter to accept default)", default_url, Some(default_url))?;
+    let url: String = out.input(
+        "Server URL (press Enter to accept default)",
+        default_url,
+        Some(default_url),
+    )?;
 
     let default_name = peer_name_from_url(&url);
-    let name: String = out.input("Server name (Enter to accept default)", &default_name, Some(&default_name))?;
+    let name: String = out.input(
+        "Server name (Enter to accept default)",
+        &default_name,
+        Some(&default_name),
+    )?;
 
     add_peer_during_init(&name, &url, out)
 }
@@ -1136,6 +1144,8 @@ async fn continue_sync(
 
     // Step 3: Connect and sync with each peer (with progress bars)
     let mut sync_success = false;
+    let mut total_received: usize = 0;
+    let mut total_sent: usize = 0;
 
     for peer in &mut peers {
         let was_discovery = peer.is_discovery();
@@ -1144,6 +1154,8 @@ async fn continue_sync(
             Ok(summary) => {
                 if summary.any_success() {
                     sync_success = true;
+                    total_received += summary.total_received();
+                    total_sent += summary.total_sent();
                     if out.is_porcelain() {
                         out.detail_porcelain(&format!(
                             "synced\t{}\t{}\t{}\t{}",
@@ -1265,8 +1277,13 @@ async fn continue_sync(
         }
 
         darn.save_manifest(&manifest)?;
-        out.summary("Sync complete")?;
-        out.outro("")?;
+
+        let root_url = sedimentree_id_to_url(manifest.root_directory_id());
+        if total_received == 0 && total_sent == 0 {
+            out.outro(&format!("Workspace {root_url} up to date"))?;
+        } else {
+            out.outro(&format!("Successfully synced workspace {root_url}"))?;
+        }
     } else {
         out.summary("Sync failed")?;
         out.outro("")?;
@@ -2296,7 +2313,9 @@ pub(crate) fn url(out: Output) -> eyre::Result<()> {
         let dim = console::Style::new().dim();
         eprintln!(
             "{}",
-            dim.apply_to(format!("Tip: run `darn clone {root_url}` on another machine"))
+            dim.apply_to(format!(
+                "Tip: run `darn clone {root_url}` on another machine"
+            ))
         );
     }
 
