@@ -10,9 +10,9 @@ A CLI for managing CRDT-backed files with automatic conflict resolution and peer
 
 ```mermaid
 graph LR
-    A["🖥️ Your Machine<br/>project/<br/>&nbsp;&nbsp;&nbsp;&nbsp;├── .darn<br/>└── ..."]
-    B["🖥️ Peer's Machine<br/>project/<br/>&nbsp;&nbsp;&nbsp;&nbsp;├── .darn<br/>└── ..."]
-    C["🖥️ Another Peer<br/>project/<br/>&nbsp;&nbsp;&nbsp;&nbsp;├── .darn<br/>└── ..."]
+    A["🖥️ Your Machine<br/><code>project/.darn/</code>"]
+    B["🖥️ Peer's Machine<br/><code>project/.darn/</code>"]
+    C["🖥️ Another Peer<br/><code>project/.darn/</code>"]
 
     A -- sync --> B
     B -- sync --> A
@@ -83,9 +83,14 @@ cargo install --path darn_cli
 
 ### Nix
 
+For faster builds, use the [Cachix](https://cachix.org) binary cache:
+
 ```bash
-nix build   # or: nix develop
+cachix use inkandswitch   # one-time setup
+nix build                 # or: nix develop
 ```
+
+Without Cachix, `nix build` will compile everything from source (slow).
 
 ## Crates
 

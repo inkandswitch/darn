@@ -87,37 +87,35 @@
         packages = {
           darn = pkgs.rustPlatform.buildRustPackage {
             pname = "darn";
-            version = "0.4.0";
+            version = "0.5.1";
             meta = {
-              description = "Distributed Automerge Resource Navigator";
+              description = "Directory-based Automerge Replication Node";
               longDescription = ''
-                A filesystem CLI for managing CRDT-backed files using
-                Subduction (P2P sync) and Automerge (CRDT documents).
-                Enables local-first, collaborative file management with
-                automatic conflict resolution and peer-to-peer synchronization.
+                A CLI for managing CRDT-backed files with automatic conflict
+                resolution and peer-to-peer synchronization. Uses Automerge
+                for conflict-free merging and Subduction for P2P sync.
               '';
               homepage = "https://github.com/inkandswitch/darn";
-              license = [
-                pkgs.lib.licenses.mit
-                pkgs.lib.licenses.asl20
-              ];
-              maintainers = [pkgs.lib.maintainers.expede];
+              license = with pkgs.lib.licenses; [mit asl20];
               platforms = pkgs.lib.platforms.unix;
               mainProgram = "darn";
             };
 
-            src = ./.;
+            src = pkgs.lib.cleanSource ./.;
 
             cargoLock = {
               lockFile = ./Cargo.lock;
             };
 
-            buildInputs = pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.openssl];
             nativeBuildInputs = [pkgs.pkg-config];
+
+            buildInputs =
+              pkgs.lib.optionals pkgs.stdenv.isLinux [pkgs.openssl]
+              ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [pkgs.apple-sdk];
 
             cargoBuildFlags = ["--bin" "darn"];
 
-            doCheck = !pkgs.stdenv.buildPlatform.canExecute pkgs.stdenv.hostPlatform;
+            doCheck = pkgs.stdenv.buildPlatform.canExecute pkgs.stdenv.hostPlatform;
 
             checkPhase = ''
               cargo test --release --locked
