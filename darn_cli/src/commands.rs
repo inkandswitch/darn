@@ -225,26 +225,21 @@ fn add_peer_during_init(name: &str, url: &str, out: Output) -> eyre::Result<bool
 fn prompt_peer_during_init(out: Output) -> eyre::Result<bool> {
     let existing_peers = peer::list_peers()?;
 
-    let prompt = if existing_peers.is_empty() {
-        "Add a sync server?"
-    } else {
+    if !existing_peers.is_empty() {
         let names: Vec<_> = existing_peers.iter().map(|p| p.name.as_str()).collect();
-        cliclack::log::remark(format!("Existing server(s): {}", names.join(", ")))?;
-        "Add another sync server?"
-    };
-
-    if !out.confirm(prompt, existing_peers.is_empty())? {
-        return Ok(!existing_peers.is_empty());
+        out.info(&format!("Using server(s): {}", names.join(", ")))?;
+        return Ok(true);
     }
 
-    let url: String = out.input("Server URL", "ws://localhost:9000", None)?;
-
-    if url.is_empty() {
-        return Ok(!existing_peers.is_empty());
+    if !out.confirm("Add a sync server?", true)? {
+        return Ok(false);
     }
+
+    let default_url = "wss://subduction.sync.inkandswitch.com";
+    let url: String = out.input("Server URL (press Enter to accept default)", default_url, Some(default_url))?;
 
     let default_name = peer_name_from_url(&url);
-    let name: String = out.input("Server name", &default_name, Some(&default_name))?;
+    let name: String = out.input("Server name (Enter to accept default)", &default_name, Some(&default_name))?;
 
     add_peer_during_init(&name, &url, out)
 }
@@ -1025,10 +1020,18 @@ async fn sync_ingest_files(
     match result {
         Ok(DiscoverResult {
             new_files,
+            directories,
             errors,
             cancelled,
         }) => {
-            progress_bar.stop(format!("Processed {total_files} file(s)"));
+            let dir_part = if directories > 0 {
+                format!(" and {directories} folder(s)")
+            } else {
+                String::new()
+            };
+            progress_bar.stop(format!(
+                "Processed {total_files} file(s){dir_part} as Automerge docs"
+            ));
 
             if cancelled {
                 out.warning("Processing cancelled")?;
@@ -1045,8 +1048,6 @@ async fn sync_ingest_files(
                     for path in &new_files {
                         out.kv("tracked", &path.display().to_string())?;
                     }
-                } else {
-                    out.success(&format!("Tracking {} new file(s)", new_files.len()))?;
                 }
                 for path in &new_files {
                     info!(path = %path.display(), "Tracked file");
@@ -1156,15 +1157,6 @@ async fn continue_sync(
                             summary.total_received(),
                             summary.total_sent()
                         ));
-                    } else {
-                        let green = Style::new().green();
-                        let file_count = manifest.len();
-                        out.success(&format!(
-                            "{} synced {file_count} file(s) (▼{} ▲{})",
-                            green.apply_to(&peer.name),
-                            summary.total_received(),
-                            summary.total_sent()
-                        ))?;
                     }
 
                     // If we connected via discovery mode, update to known mode with learned peer ID
@@ -2293,6 +2285,24 @@ pub(crate) fn peer_remove(name: &str, out: Output) -> eyre::Result<()> {
         out.detail_porcelain(&format!("not_found\t{name}"));
     } else {
         out.warning(&format!("Peer not found: {name}"))?;
+    }
+
+    Ok(())
+}
+
+/// Print the root document URL for the current workspace.
+pub(crate) fn url(out: Output) -> eyre::Result<()> {
+    let darn = Darn::open_without_subduction(Path::new("."))?;
+    let manifest = darn.load_manifest()?;
+    let root_url = sedimentree_id_to_url(manifest.root_directory_id());
+    println!("{root_url}");
+
+    if !out.is_porcelain() && !out.is_quiet() {
+        let dim = console::Style::new().dim();
+        eprintln!(
+            "{}",
+            dim.apply_to("Tip: use this URL with `darn clone` on another machine")
+        );
     }
 
     Ok(())

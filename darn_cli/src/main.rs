@@ -108,6 +108,7 @@ async fn main() -> Result<()> {
             force_immutable,
         } => commands::watch(&interval, no_track, force_immutable, out).await,
         Commands::Info => commands::info(out),
+        Commands::Url => commands::url(out),
         Commands::Peer { command } => match command {
             PeerCommands::Add {
                 name,
@@ -249,6 +250,9 @@ enum Commands {
 
     /// Show info about global config and current workspace
     Info,
+
+    /// Print the root document URL for this workspace
+    Url,
 
     /// Manage peers
     Peer {
