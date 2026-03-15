@@ -17,20 +17,17 @@ use future_form::Sendable;
 use futures::future::BoxFuture;
 use sedimentree_core::commit::CountLeadingZeroBytes;
 use sedimentree_fs_storage::FsStorage;
-
 use subduction_core::{
     connection::{
         Connection,
         authenticated::Authenticated,
         message::{BatchSyncRequest, BatchSyncResponse, Message, RequestId},
-        nonce_cache::NonceCache,
     },
-    peer::id::PeerId,
     policy::open::OpenPolicy,
-    sharded_map::ShardedMap,
     subduction::{
         Subduction,
-        error::{AttachError, HydrationError, IoError},
+        builder::SubductionBuilder,
+        error::{AddConnectionError, HydrationError, IoError},
     },
 };
 use subduction_crypto::signer::memory::MemorySigner;
@@ -38,9 +35,6 @@ use subduction_websocket::tokio::{TimeoutTokio, TokioSpawn, client::TokioWebSock
 use thiserror::Error;
 
 use crate::config::{self, NoConfigDir};
-
-/// Default number of pending blob requests allowed per connection.
-const DEFAULT_MAX_PENDING_BLOB_REQUESTS: usize = 64;
 
 /// Type alias for the concrete WebSocket client connection.
 pub type WsConnection = TokioWebSocketClient<MemorySigner, TimeoutTokio>;
@@ -133,14 +127,6 @@ impl Connection<Sendable> for DarnConnection {
     type CallError = DarnCallError;
     type DisconnectionError = DarnDisconnectionError;
 
-    fn peer_id(&self) -> PeerId {
-        match self {
-            Self::WebSocket(c) => c.peer_id(),
-            #[cfg(feature = "iroh")]
-            Self::Iroh(c) => c.peer_id(),
-        }
-    }
-
     fn next_request_id(&self) -> BoxFuture<'_, RequestId> {
         match self {
             Self::WebSocket(c) => c.next_request_id(),
@@ -223,15 +209,10 @@ pub type DarnSubduction = Subduction<
     256,
 >;
 
-/// Concrete error type for attach operations.
+/// Concrete error type for adding connections.
 ///
 /// Uses `Infallible` for the policy rejection type since `OpenPolicy` always allows connections.
-pub type DarnAttachError = AttachError<Sendable, FsStorage, DarnConnection, Infallible>;
-
-/// Concrete error type for registration operations.
-///
-/// Uses `Infallible` for the policy rejection type since `OpenPolicy` always allows connections.
-pub type DarnRegistrationError = subduction_core::subduction::error::RegistrationError<Infallible>;
+pub type DarnAddConnectionError = AddConnectionError<Infallible>;
 
 /// Concrete error type for I/O operations during sync.
 pub type DarnIoError = IoError<Sendable, FsStorage, DarnConnection>;
@@ -259,20 +240,14 @@ pub fn create_storage_at(path: &Path) -> Result<FsStorage, StorageError> {
 
 /// Create a new Subduction instance and spawn its background tasks.
 ///
-/// The listener and manager futures are spawned onto the tokio runtime.
+/// The listener, handler, and manager futures are spawned onto the tokio runtime.
 #[must_use]
 pub fn spawn(signer: MemorySigner, storage: FsStorage) -> Arc<DarnSubduction> {
-    let (subduction, listener_fut, manager_fut) = DarnSubduction::new(
-        None, // discovery_id - not using mDNS discovery yet
-        signer,
-        storage,
-        OpenPolicy,
-        NonceCache::default(),
-        CountLeadingZeroBytes,
-        ShardedMap::new(),
-        TokioSpawn,
-        DEFAULT_MAX_PENDING_BLOB_REQUESTS,
-    );
+    let (subduction, _handler, listener_fut, manager_fut) = SubductionBuilder::new()
+        .signer(signer)
+        .storage(storage, Arc::new(OpenPolicy))
+        .spawner(TokioSpawn)
+        .build::<Sendable, DarnConnection>();
 
     tokio::spawn(async move {
         if let Err(e) = listener_fut.await {
@@ -291,7 +266,8 @@ pub fn spawn(signer: MemorySigner, storage: FsStorage) -> Arc<DarnSubduction> {
 
 /// Hydrate a Subduction instance from existing storage and spawn its background tasks.
 ///
-/// This loads all existing sedimentrees from storage.
+/// This loads all existing sedimentrees from storage, pre-populates a
+/// `ShardedMap`, and builds Subduction with the hydrated state.
 ///
 /// # Errors
 ///
@@ -300,19 +276,44 @@ pub async fn hydrate(
     signer: MemorySigner,
     storage: FsStorage,
 ) -> Result<Arc<DarnSubduction>, SubductionInitError> {
-    let (subduction, listener_fut, manager_fut) = Box::pin(DarnSubduction::hydrate(
-        None,
-        signer,
-        storage,
-        OpenPolicy,
-        NonceCache::default(),
-        CountLeadingZeroBytes,
-        ShardedMap::new(),
-        TokioSpawn,
-        DEFAULT_MAX_PENDING_BLOB_REQUESTS,
-    ))
-    .await
-    .map_err(SubductionInitError::Hydration)?;
+    use sedimentree_core::sedimentree::Sedimentree;
+    use subduction_core::{sharded_map::ShardedMap, storage::traits::Storage};
+
+    // Hydrate: load all sedimentree state from storage
+    let sedimentrees = Arc::new(ShardedMap::new());
+    let ids = Storage::<Sendable>::load_all_sedimentree_ids(&storage)
+        .await
+        .map_err(|e| SubductionInitError::Hydration(HydrationError::LoadAllIdsError(e)))?;
+
+    for id in ids {
+        let verified_commits = Storage::<Sendable>::load_loose_commits(&storage, id)
+            .await
+            .map_err(|e| {
+                SubductionInitError::Hydration(HydrationError::LoadLooseCommitsError(e))
+            })?;
+        let verified_fragments = Storage::<Sendable>::load_fragments(&storage, id)
+            .await
+            .map_err(|e| SubductionInitError::Hydration(HydrationError::LoadFragmentsError(e)))?;
+
+        let commits = verified_commits
+            .into_iter()
+            .map(|vm| vm.into_full_parts().1)
+            .collect();
+        let fragments = verified_fragments
+            .into_iter()
+            .map(|vm| vm.into_full_parts().1)
+            .collect();
+
+        let tree = Sedimentree::new(fragments, commits);
+        sedimentrees.insert(id, tree).await;
+    }
+
+    let (subduction, _handler, listener_fut, manager_fut) = SubductionBuilder::new()
+        .signer(signer)
+        .storage(storage, Arc::new(OpenPolicy))
+        .spawner(TokioSpawn)
+        .sedimentrees(sedimentrees)
+        .build::<Sendable, DarnConnection>();
 
     tokio::spawn(async move {
         if let Err(e) = listener_fut.await {

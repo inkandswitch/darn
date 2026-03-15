@@ -17,10 +17,7 @@ use sedimentree_core::id::SedimentreeId;
 use sedimentree_fs_storage::FsStorage;
 #[cfg(feature = "iroh")]
 use subduction_core::connection::nonce_cache::NonceCache;
-use subduction_core::{
-    connection::{Connection, handshake::Audience},
-    peer::id::PeerId,
-};
+use subduction_core::{connection::handshake::audience::Audience, peer::id::PeerId};
 use subduction_crypto::signer::memory::MemorySigner;
 use subduction_websocket::tokio::{TimeoutTokio, client::TokioWebSocketClient};
 use thiserror::Error;
@@ -44,8 +41,8 @@ use crate::{
     signer::{self, LoadSignerError, SignerError},
     staged_update::{StageError, StagedUpdate},
     subduction::{
-        self, AuthenticatedDarnConnection, DarnAttachError, DarnIoError, DarnRegistrationError,
-        DarnSubduction, SubductionInitError,
+        self, AuthenticatedDarnConnection, DarnAddConnectionError, DarnIoError, DarnSubduction,
+        SubductionInitError,
     },
     sync_progress::{ApplyResult, SyncProgressEvent, SyncSummary},
     workspace::{id::WorkspaceId, layout::WorkspaceLayout},
@@ -1265,17 +1262,17 @@ impl Darn {
                 ) => {
                     match result {
                         Ok(accept_result) => {
-                            let peer_id = accept_result.peer_id;
+                            let peer_id = accept_result.authenticated.peer_id();
                             tracing::info!(%peer_id, "Accepted incoming Iroh connection");
 
                             tokio::spawn(async move {
                                 if let Err(e) = accept_result.listener_task.await {
-                                    tracing::error!(%peer_id, "Iroh listener error: {e:?}");
+                                    tracing::error!("Iroh listener error: {e:?}");
                                 }
                             });
                             tokio::spawn(async move {
                                 if let Err(e) = accept_result.sender_task.await {
-                                    tracing::error!(%peer_id, "Iroh sender error: {e:?}");
+                                    tracing::error!("Iroh sender error: {e:?}");
                                 }
                             });
 
@@ -1283,8 +1280,8 @@ impl Darn {
                                 .authenticated
                                 .map(crate::subduction::DarnConnection::Iroh);
 
-                            if let Err(e) = self.subduction.register(authenticated).await {
-                                tracing::error!(%peer_id, "Failed to register Iroh connection: {e:?}");
+                            if let Err(e) = self.subduction.add_connection(authenticated).await {
+                                tracing::error!(%peer_id, "Failed to add Iroh connection: {e:?}");
                             }
                         }
                         Err(e) => {
@@ -1306,15 +1303,19 @@ impl Darn {
 
         tracing::info!("Connected to peer {}", peer_id);
 
-        // Register the authenticated connection (without auto-syncing - we use full_sync below)
-        self.subduction.register(authenticated_connection).await?;
+        // Add the authenticated connection
+        self.subduction
+            .add_connection(authenticated_connection)
+            .await?;
 
         // Perform full sync with all connected peers
-        let (success, stats, call_errors, io_errors) =
-            self.subduction.full_sync(Some(Self::DEFAULT_TIMEOUT)).await;
+        let (success, stats, call_errors, io_errors) = self
+            .subduction
+            .full_sync_with_all_peers(Some(Self::DEFAULT_TIMEOUT))
+            .await;
 
         for (conn, err) in &call_errors {
-            tracing::warn!("Sync error with {:?}: {err:?}", Connection::peer_id(conn));
+            tracing::warn!("Sync error with {:?}: {err:?}", conn.peer_id());
         }
 
         for (id, err) in &io_errors {
@@ -1356,8 +1357,10 @@ impl Darn {
 
         on_progress(SyncProgressEvent::Connected { peer_id });
 
-        // Register the authenticated connection (without auto-syncing - we handle sync manually below)
-        self.subduction.register(authenticated_connection).await?;
+        // Add the authenticated connection (without auto-syncing - we handle sync manually below)
+        self.subduction
+            .add_connection(authenticated_connection)
+            .await?;
 
         // Collect ALL sedimentree IDs to sync (root, all directories, and all files)
         let root_dir_id = manifest.root_directory_id();
@@ -1422,7 +1425,7 @@ impl Darn {
                         tracing::warn!(
                             "Sync error for {:?} with {:?}: {err:?}",
                             sed_id,
-                            Connection::peer_id(conn)
+                            conn.peer_id()
                         );
                     }
 
@@ -1895,13 +1898,9 @@ pub enum SyncError {
     #[error(transparent)]
     IrohConnection(#[from] subduction_iroh::error::ConnectError),
 
-    /// Error attaching connection.
+    /// Error adding connection.
     #[error(transparent)]
-    Attach(#[from] DarnAttachError),
-
-    /// Error registering connection.
-    #[error(transparent)]
-    Registration(#[from] DarnRegistrationError),
+    AddConnection(#[from] DarnAddConnectionError),
 
     /// Sync error.
     #[error(transparent)]
