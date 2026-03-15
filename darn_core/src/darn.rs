@@ -1267,12 +1267,12 @@ impl Darn {
 
                             tokio::spawn(async move {
                                 if let Err(e) = accept_result.listener_task.await {
-                                    tracing::error!("Iroh listener error: {e:?}");
+                                    tracing::error!(%peer_id, "Iroh listener error: {e:?}");
                                 }
                             });
                             tokio::spawn(async move {
                                 if let Err(e) = accept_result.sender_task.await {
-                                    tracing::error!("Iroh sender error: {e:?}");
+                                    tracing::error!(%peer_id, "Iroh sender error: {e:?}");
                                 }
                             });
 
