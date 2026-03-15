@@ -240,7 +240,7 @@ pub fn create_storage_at(path: &Path) -> Result<FsStorage, StorageError> {
 
 /// Create a new Subduction instance and spawn its background tasks.
 ///
-/// The listener, handler, and manager futures are spawned onto the tokio runtime.
+/// The listener and manager futures are spawned onto the tokio runtime.
 #[must_use]
 pub fn spawn(signer: MemorySigner, storage: FsStorage) -> Arc<DarnSubduction> {
     let (subduction, _handler, listener_fut, manager_fut) = SubductionBuilder::new()

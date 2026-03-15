@@ -315,7 +315,7 @@ pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path, out: Output) -> ey
     for peer in &peers {
         match darn.connect_peer(peer).await {
             Ok((connection, peer_id)) => {
-                // Register connection (without auto-syncing - we sync specific sedimentrees below)
+                // Add connection (without auto-syncing - we sync specific sedimentrees below)
                 if let Err(e) = darn.subduction().add_connection(connection).await {
                     info!(%e, peer = %peer.name, "Failed to add connection");
                     continue;
