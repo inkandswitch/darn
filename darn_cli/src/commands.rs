@@ -34,7 +34,7 @@ use darn_core::{
 };
 use futures::StreamExt as _;
 use sedimentree_core::id::SedimentreeId;
-use subduction_core::{connection::Connection, peer::id::PeerId, storage::traits::Storage};
+use subduction_core::{peer::id::PeerId, storage::traits::Storage};
 use subduction_websocket::tokio::{TimeoutTokio, client::TokioWebSocketClient};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -315,9 +315,9 @@ pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path, out: Output) -> ey
     for peer in &peers {
         match darn.connect_peer(peer).await {
             Ok((connection, peer_id)) => {
-                // Register connection (without auto-syncing - we sync specific sedimentrees below)
-                if let Err(e) = darn.subduction().register(connection).await {
-                    info!(%e, peer = %peer.name, "Failed to register connection");
+                // Add connection (without auto-syncing - we sync specific sedimentrees below)
+                if let Err(e) = darn.subduction().add_connection(connection).await {
+                    info!(%e, peer = %peer.name, "Failed to add connection");
                     continue;
                 }
                 info!(peer = %peer.name, %peer_id, "Connected");
@@ -382,7 +382,7 @@ pub(crate) async fn clone_cmd(root_id_str: &str, path: &Path, out: Output) -> ey
 
             async move {
                 match subduction
-                    .sync_all(entry.sedimentree_id, true, timeout)
+                    .sync_with_all_peers(entry.sedimentree_id, true, timeout)
                     .await
                 {
                     Ok(sync_result) => {
@@ -499,7 +499,9 @@ async fn collect_clone_entries(
     total_sent: &AtomicUsize,
 ) -> eyre::Result<Vec<CloneEntry>> {
     // Sync this directory's sedimentree from peers
-    let sync_result = subduction.sync_all(dir_id, true, timeout).await?;
+    let sync_result = subduction
+        .sync_with_all_peers(dir_id, true, timeout)
+        .await?;
     for (success, stats, _errors) in sync_result.values() {
         if *success {
             total_received.fetch_add(stats.total_received(), Ordering::Relaxed);
@@ -2610,8 +2612,8 @@ async fn connect_global_peers(
                         let peer_id = authenticated.peer_id();
                         let authenticated =
                             authenticated.map(|c| DarnConnection::WebSocket(Box::new(c)));
-                        if let Err(e) = subduction.register(authenticated).await {
-                            info!(%e, peer = %peer.name, "Failed to register");
+                        if let Err(e) = subduction.add_connection(authenticated).await {
+                            info!(%e, peer = %peer.name, "Failed to add connection");
                             continue;
                         }
                         connected.push(peer_id);
@@ -2652,7 +2654,7 @@ async fn sync_sedimentree_with_peers(
                     sent += stats.total_sent();
                 }
                 for (conn, err) in &errors {
-                    tracing::warn!("Sync error with {:?}: {err:?}", Connection::peer_id(conn));
+                    tracing::warn!("Sync error with {:?}: {err:?}", conn.peer_id());
                 }
             }
             Err(e) => {
