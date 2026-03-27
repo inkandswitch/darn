@@ -16,10 +16,12 @@ use futures::{StreamExt, stream};
 use sedimentree_core::id::SedimentreeId;
 use sedimentree_fs_storage::FsStorage;
 #[cfg(feature = "iroh")]
-use subduction_core::connection::nonce_cache::NonceCache;
-use subduction_core::{connection::handshake::audience::Audience, peer::id::PeerId};
+use subduction_core::nonce_cache::NonceCache;
+use subduction_core::{
+    handshake::audience::Audience, peer::id::PeerId, transport::message::MessageTransport,
+};
 use subduction_crypto::signer::memory::MemorySigner;
-use subduction_websocket::tokio::{TimeoutTokio, client::TokioWebSocketClient};
+use subduction_websocket::tokio::client::TokioWebSocketClient;
 use thiserror::Error;
 use tungstenite::http::Uri;
 
@@ -42,7 +44,7 @@ use crate::{
     staged_update::{StageError, StagedUpdate},
     subduction::{
         self, AuthenticatedDarnConnection, DarnAddConnectionError, DarnIoError, DarnSubduction,
-        SubductionInitError,
+        DarnTransport, SubductionInitError,
     },
     sync_progress::{ApplyResult, SyncProgressEvent, SyncSummary},
     workspace::{id::WorkspaceId, layout::WorkspaceLayout},
@@ -1144,8 +1146,7 @@ impl Darn {
         let signer = self.load_signer()?;
 
         let (authenticated, listener_fut, sender_fut) =
-            TokioWebSocketClient::new(uri, TimeoutTokio, Self::DEFAULT_TIMEOUT, signer, audience)
-                .await?;
+            TokioWebSocketClient::new(uri, signer, audience).await?;
 
         tokio::spawn(async move {
             if let Err(e) = listener_fut.await {
@@ -1159,8 +1160,9 @@ impl Darn {
         });
 
         let actual_peer_id = authenticated.peer_id();
-        let authenticated =
-            authenticated.map(|c| crate::subduction::DarnConnection::WebSocket(Box::new(c)));
+        let authenticated = authenticated
+            .map(|c| DarnTransport::WebSocket(Box::new(c)))
+            .map(MessageTransport::new);
 
         Ok((authenticated, actual_peer_id))
     }
@@ -1183,15 +1185,8 @@ impl Darn {
 
         let signer = self.load_signer()?;
 
-        let result = subduction_iroh::client::connect(
-            &self.iroh_endpoint,
-            addr,
-            Self::DEFAULT_TIMEOUT,
-            TimeoutTokio,
-            &signer,
-            audience,
-        )
-        .await?;
+        let result =
+            subduction_iroh::client::connect(&self.iroh_endpoint, addr, &signer, audience).await?;
 
         tokio::spawn(async move {
             if let Err(e) = result.listener_task.await {
@@ -1207,7 +1202,8 @@ impl Darn {
         let actual_peer_id = result.authenticated.peer_id();
         let authenticated = result
             .authenticated
-            .map(crate::subduction::DarnConnection::Iroh);
+            .map(DarnTransport::Iroh)
+            .map(MessageTransport::new);
 
         Ok((authenticated, actual_peer_id))
     }
@@ -1252,8 +1248,6 @@ impl Darn {
                 }
                 result = subduction_iroh::server::accept_one(
                     &self.iroh_endpoint,
-                    Self::DEFAULT_TIMEOUT,
-                    TimeoutTokio,
                     &signer,
                     &nonce_cache,
                     our_peer_id,
@@ -1262,7 +1256,7 @@ impl Darn {
                 ) => {
                     match result {
                         Ok(accept_result) => {
-                            let peer_id = accept_result.authenticated.peer_id();
+                            let peer_id = accept_result.peer_id;
                             tracing::info!(%peer_id, "Accepted incoming Iroh connection");
 
                             tokio::spawn(async move {
@@ -1278,7 +1272,8 @@ impl Darn {
 
                             let authenticated = accept_result
                                 .authenticated
-                                .map(crate::subduction::DarnConnection::Iroh);
+                                .map(DarnTransport::Iroh)
+                                .map(MessageTransport::new);
 
                             if let Err(e) = self.subduction.add_connection(authenticated).await {
                                 tracing::error!(%peer_id, "Failed to add Iroh connection: {e:?}");
@@ -1843,7 +1838,7 @@ impl FileOutsideWorkspace {
 }
 
 /// Result of syncing with a peer.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct SyncResult {
     /// The peer ID we connected to.
     pub peer_id: PeerId,

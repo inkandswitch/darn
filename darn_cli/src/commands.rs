@@ -28,14 +28,16 @@ use darn_core::{
     peer::{self, Peer, PeerAddress, PeerName},
     sedimentree, signer,
     staged_update::StagedUpdate,
-    subduction::{self, DarnConnection, DarnSubduction},
+    subduction::{self, DarnSubduction, DarnTransport},
     sync_progress::SyncProgressEvent,
     watcher::{WatchEvent, WatchEventProcessor, Watcher, WatcherConfig},
 };
 use futures::StreamExt as _;
 use sedimentree_core::id::SedimentreeId;
-use subduction_core::{peer::id::PeerId, storage::traits::Storage};
-use subduction_websocket::tokio::{TimeoutTokio, client::TokioWebSocketClient};
+use subduction_core::{
+    peer::id::PeerId, storage::traits::Storage, transport::message::MessageTransport,
+};
+use subduction_websocket::tokio::client::TokioWebSocketClient;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use tungstenite::http::Uri;
@@ -2579,7 +2581,7 @@ fn info_human_workspace(dim: &Style) -> eyre::Result<()> {
 
 /// Connect to all global peers for standalone document operations.
 ///
-/// Returns the number of successfully connected peers.
+/// Returns the peer IDs of successfully connected peers.
 ///
 /// # Errors
 ///
@@ -2588,7 +2590,6 @@ async fn connect_global_peers(
     subduction: &DarnSubduction,
     signer_dir: &Path,
     peers: &[Peer],
-    timeout: Duration,
 ) -> eyre::Result<Vec<PeerId>> {
     let mut connected = Vec::new();
 
@@ -2597,21 +2598,14 @@ async fn connect_global_peers(
             PeerAddress::WebSocket { url } => {
                 let uri: Uri = url.parse()?;
                 let peer_signer = signer::load(signer_dir)?;
-                match TokioWebSocketClient::new(
-                    uri,
-                    TimeoutTokio,
-                    timeout,
-                    peer_signer,
-                    peer.audience,
-                )
-                .await
-                {
+                match TokioWebSocketClient::new(uri, peer_signer, peer.audience).await {
                     Ok((authenticated, listener_fut, sender_fut)) => {
                         tokio::spawn(async move { drop(listener_fut.await) });
                         tokio::spawn(async move { drop(sender_fut.await) });
                         let peer_id = authenticated.peer_id();
-                        let authenticated =
-                            authenticated.map(|c| DarnConnection::WebSocket(Box::new(c)));
+                        let authenticated = authenticated
+                            .map(|c| DarnTransport::WebSocket(Box::new(c)))
+                            .map(MessageTransport::new);
                         if let Err(e) = subduction.add_connection(authenticated).await {
                             info!(%e, peer = %peer.name, "Failed to add connection");
                             continue;
@@ -2698,7 +2692,7 @@ pub(crate) async fn doc_edit(
     }
 
     let spinner = out.spinner("Connecting to peers...");
-    let peer_ids = connect_global_peers(&subduction, &signer_dir, &peers, timeout).await?;
+    let peer_ids = connect_global_peers(&subduction, &signer_dir, &peers).await?;
     if peer_ids.is_empty() {
         spinner.stop("Failed to connect");
         eyre::bail!("Could not connect to any peers");

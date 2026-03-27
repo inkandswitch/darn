@@ -7,28 +7,28 @@
 //! Storage is shared globally at `~/.config/darn/storage/` for deduplication
 //! across workspaces.
 //!
-//! The [`DarnConnection`] enum abstracts over WebSocket and Iroh transports,
-//! implementing the `Connection<Sendable>` trait so that the Subduction engine
-//! is transport-agnostic.
+//! The [`DarnTransport`] enum abstracts over WebSocket and Iroh transports,
+//! implementing the `Transport<Sendable>` trait so that the Subduction engine
+//! is transport-agnostic. It is wrapped in [`MessageTransport`] to provide
+//! the typed `Connection<Sendable, SyncMessage>` required by Subduction.
 
-use std::{convert::Infallible, path::Path, sync::Arc, time::Duration};
+use std::{convert::Infallible, path::Path, sync::Arc};
 
 use future_form::Sendable;
 use futures::future::BoxFuture;
 use sedimentree_core::commit::CountLeadingZeroBytes;
 use sedimentree_fs_storage::FsStorage;
 use subduction_core::{
-    connection::{
-        Connection,
-        authenticated::Authenticated,
-        message::{BatchSyncRequest, BatchSyncResponse, Message, RequestId},
-    },
+    authenticated::Authenticated,
+    connection::message::SyncMessage,
+    handler::sync::SyncHandler,
     policy::open::OpenPolicy,
     subduction::{
         Subduction,
         builder::SubductionBuilder,
         error::{AddConnectionError, HydrationError, IoError},
     },
+    transport::{Transport, message::MessageTransport},
 };
 use subduction_crypto::signer::memory::MemorySigner;
 use subduction_websocket::tokio::{TimeoutTokio, TokioSpawn, client::TokioWebSocketClient};
@@ -36,28 +36,28 @@ use thiserror::Error;
 
 use crate::config::{self, NoConfigDir};
 
-/// Type alias for the concrete WebSocket client connection.
-pub type WsConnection = TokioWebSocketClient<MemorySigner, TimeoutTokio>;
+/// Type alias for the concrete WebSocket client transport.
+pub type WsTransport = TokioWebSocketClient<MemorySigner>;
 
-/// Type alias for the concrete Iroh client connection.
+/// Type alias for the concrete Iroh client transport.
 #[cfg(feature = "iroh")]
-pub type IrohConnection = subduction_iroh::connection::IrohConnection<TimeoutTokio>;
+pub type IrohTransportInner = subduction_iroh::transport::IrohTransport;
 
 /// Transport-agnostic connection for darn.
 ///
-/// Wraps either a WebSocket or Iroh connection, dispatching
-/// all [`Connection`] trait methods to the inner variant.
+/// Wraps either a WebSocket or Iroh transport, dispatching
+/// all [`Transport`] trait methods to the inner variant.
 #[derive(Debug, Clone)]
-pub enum DarnConnection {
-    /// WebSocket relay connection.
-    WebSocket(Box<WsConnection>),
+pub enum DarnTransport {
+    /// WebSocket relay transport.
+    WebSocket(Box<WsTransport>),
 
-    /// Iroh direct QUIC connection.
+    /// Iroh direct QUIC transport.
     #[cfg(feature = "iroh")]
-    Iroh(IrohConnection),
+    Iroh(IrohTransportInner),
 }
 
-impl PartialEq for DarnConnection {
+impl PartialEq for DarnTransport {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::WebSocket(a), Self::WebSocket(b)) => a == b,
@@ -95,19 +95,6 @@ pub enum DarnRecvError {
     Iroh(#[from] subduction_iroh::error::RecvError),
 }
 
-/// Unified call error across transports.
-#[derive(Debug, Clone, Copy, Error)]
-pub enum DarnCallError {
-    /// WebSocket call error.
-    #[error("websocket: {0}")]
-    WebSocket(#[from] subduction_websocket::error::CallError),
-
-    /// Iroh call error.
-    #[cfg(feature = "iroh")]
-    #[error("iroh: {0}")]
-    Iroh(#[from] subduction_iroh::error::CallError),
-}
-
 /// Unified disconnection error across transports.
 #[derive(Debug, Clone, Copy, Error)]
 pub enum DarnDisconnectionError {
@@ -121,19 +108,10 @@ pub enum DarnDisconnectionError {
     Iroh(#[from] subduction_iroh::error::DisconnectionError),
 }
 
-impl Connection<Sendable> for DarnConnection {
+impl Transport<Sendable> for DarnTransport {
     type SendError = DarnSendError;
     type RecvError = DarnRecvError;
-    type CallError = DarnCallError;
     type DisconnectionError = DarnDisconnectionError;
-
-    fn next_request_id(&self) -> BoxFuture<'_, RequestId> {
-        match self {
-            Self::WebSocket(c) => c.next_request_id(),
-            #[cfg(feature = "iroh")]
-            Self::Iroh(c) => c.next_request_id(),
-        }
-    }
 
     fn disconnect(&self) -> BoxFuture<'_, Result<(), Self::DisconnectionError>> {
         match self {
@@ -147,64 +125,61 @@ impl Connection<Sendable> for DarnConnection {
         }
     }
 
-    fn send(&self, message: &Message) -> BoxFuture<'_, Result<(), Self::SendError>> {
-        // Clone to decouple the message lifetime from the returned future lifetime.
-        let message = message.clone();
+    fn send_bytes(&self, bytes: &[u8]) -> BoxFuture<'_, Result<(), Self::SendError>> {
+        let bytes = bytes.to_vec();
         match self {
             Self::WebSocket(c) => {
-                Box::pin(async move { c.send(&message).await.map_err(DarnSendError::from) })
+                Box::pin(async move { c.send_bytes(&bytes).await.map_err(DarnSendError::from) })
             }
             #[cfg(feature = "iroh")]
             Self::Iroh(c) => {
-                Box::pin(async move { c.send(&message).await.map_err(DarnSendError::from) })
+                Box::pin(async move { c.send_bytes(&bytes).await.map_err(DarnSendError::from) })
             }
         }
     }
 
-    fn recv(&self) -> BoxFuture<'_, Result<Message, Self::RecvError>> {
-        match self {
-            Self::WebSocket(c) => Box::pin(async { c.recv().await.map_err(DarnRecvError::from) }),
-            #[cfg(feature = "iroh")]
-            Self::Iroh(c) => Box::pin(async { c.recv().await.map_err(DarnRecvError::from) }),
-        }
-    }
-
-    fn call(
-        &self,
-        req: BatchSyncRequest,
-        timeout: Option<Duration>,
-    ) -> BoxFuture<'_, Result<BatchSyncResponse, Self::CallError>> {
+    fn recv_bytes(&self) -> BoxFuture<'_, Result<Vec<u8>, Self::RecvError>> {
         match self {
             Self::WebSocket(c) => {
-                Box::pin(async move { c.call(req, timeout).await.map_err(DarnCallError::from) })
+                Box::pin(async { c.recv_bytes().await.map_err(DarnRecvError::from) })
             }
             #[cfg(feature = "iroh")]
-            Self::Iroh(c) => {
-                Box::pin(async move { c.call(req, timeout).await.map_err(DarnCallError::from) })
-            }
+            Self::Iroh(c) => Box::pin(async { c.recv_bytes().await.map_err(DarnRecvError::from) }),
         }
     }
 }
 
+/// The connection type used by Subduction: a message-framed wrapper around
+/// the transport-agnostic [`DarnTransport`].
+pub type DarnConnection = MessageTransport<DarnTransport>;
+
 /// Type alias for an authenticated darn connection.
 pub type AuthenticatedDarnConnection = Authenticated<DarnConnection, Sendable>;
+
+/// The concrete `SyncHandler` type for darn.
+type DarnSyncHandler =
+    SyncHandler<Sendable, FsStorage, DarnConnection, OpenPolicy, CountLeadingZeroBytes, 256>;
 
 /// Type alias for the Subduction instance used by darn workspaces.
 ///
 /// This configures Subduction with:
 /// - `Sendable` future form (thread-safe async)
 /// - `FsStorage` for persistent storage
-/// - `DarnConnection` for transport-agnostic peer connections
+/// - `DarnConnection` (`MessageTransport<DarnTransport>`) for transport-agnostic peer connections
+/// - `SyncHandler` as the default handler
 /// - `OpenPolicy` for permissive access (can be made stricter later)
 /// - `MemorySigner` for ed25519 signing
+/// - `TimeoutTokio` for roundtrip call timeouts
 /// - `CountLeadingZeroBytes` depth metric for fragment building
 pub type DarnSubduction = Subduction<
     'static,
     Sendable,
     FsStorage,
     DarnConnection,
+    DarnSyncHandler,
     OpenPolicy,
     MemorySigner,
+    TimeoutTokio,
     CountLeadingZeroBytes,
     256,
 >;
@@ -215,7 +190,7 @@ pub type DarnSubduction = Subduction<
 pub type DarnAddConnectionError = AddConnectionError<Infallible>;
 
 /// Concrete error type for I/O operations during sync.
-pub type DarnIoError = IoError<Sendable, FsStorage, DarnConnection>;
+pub type DarnIoError = IoError<Sendable, FsStorage, DarnConnection, SyncMessage>;
 
 /// Create global storage at the standard location.
 ///
@@ -247,6 +222,7 @@ pub fn spawn(signer: MemorySigner, storage: FsStorage) -> Arc<DarnSubduction> {
         .signer(signer)
         .storage(storage, Arc::new(OpenPolicy))
         .spawner(TokioSpawn)
+        .timer(TimeoutTokio)
         .build::<Sendable, DarnConnection>();
 
     tokio::spawn(async move {
@@ -312,6 +288,7 @@ pub async fn hydrate(
         .signer(signer)
         .storage(storage, Arc::new(OpenPolicy))
         .spawner(TokioSpawn)
+        .timer(TimeoutTokio)
         .sedimentrees(sedimentrees)
         .build::<Sendable, DarnConnection>();
 

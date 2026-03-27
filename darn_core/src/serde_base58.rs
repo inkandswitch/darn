@@ -167,7 +167,7 @@ pub mod peer_id {
 /// Serde module for `DiscoveryId` (wraps 32-byte array).
 pub mod discovery_id {
     use serde::{Deserializer, Serializer};
-    use subduction_core::connection::handshake::audience::DiscoveryId;
+    use subduction_core::handshake::audience::DiscoveryId;
 
     /// Serialize `DiscoveryId` as base58.
     ///
@@ -333,7 +333,7 @@ mod tests {
 /// Serde module for `Audience` enum (Known or Discover).
 pub mod audience {
     use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
-    use subduction_core::connection::handshake::audience::{Audience, DiscoveryId};
+    use subduction_core::handshake::audience::{Audience, DiscoveryId};
     use subduction_core::peer::id::PeerId;
 
     #[derive(Serialize, Deserialize)]

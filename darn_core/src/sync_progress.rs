@@ -198,7 +198,7 @@ impl ApplyResult {
 mod tests {
     use super::*;
     use bolero::check;
-    use subduction_core::connection::stats::SyncStats;
+    use subduction_core::{connection::stats::SyncStats, remote_heads::RemoteHeads};
 
     /// `add_sync_stats` is additive: after N calls the summary fields
     /// equal the element-wise sum, and `sedimentrees_synced == N`.
@@ -221,6 +221,7 @@ mod tests {
                         fragments_received: fr,
                         commits_sent: cs,
                         fragments_sent: fs,
+                        remote_heads: RemoteHeads::default(),
                     });
                     want_commits_recv += cr;
                     want_frags_recv += fr;

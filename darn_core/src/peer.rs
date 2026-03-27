@@ -8,7 +8,7 @@ use std::{collections::BTreeMap, fmt, path::Path, str::FromStr};
 
 use sedimentree_core::{crypto::digest::Digest, id::SedimentreeId, sedimentree::Sedimentree};
 use serde::{Deserialize, Serialize};
-use subduction_core::{connection::handshake::audience::Audience, peer::id::PeerId};
+use subduction_core::{handshake::audience::Audience, peer::id::PeerId};
 use thiserror::Error;
 
 use crate::{serde_base58, unix_timestamp::UnixTimestamp};
