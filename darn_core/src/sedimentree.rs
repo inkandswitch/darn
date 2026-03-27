@@ -23,7 +23,7 @@
 //! └──────────────────────────────────────────────────────────────────────┘
 //! ```
 
-use std::{collections::BTreeSet, convert::Infallible, path::Path};
+use std::{collections::BTreeSet, path::Path};
 
 use automerge::{Automerge, Change, ChangeHash};
 use future_form::Sendable;
@@ -31,7 +31,7 @@ use sedimentree_core::{
     blob::Blob, crypto::digest::Digest, id::SedimentreeId, sedimentree::Sedimentree,
 };
 use sedimentree_fs_storage::FsStorage;
-use subduction_core::subduction::error::WriteError;
+use subduction_core::{connection::message::SyncMessage, subduction::error::WriteError};
 use thiserror::Error;
 
 use crate::{
@@ -401,7 +401,7 @@ fn generate_sedimentree_id() -> Result<SedimentreeId, SedimentreeError> {
 pub enum SedimentreeError {
     /// Subduction write error.
     #[error("subduction write error: {0}")]
-    SubductionWrite(Box<WriteError<Sendable, FsStorage, DarnConnection, Infallible>>),
+    SubductionWrite(Box<WriteError<Sendable, FsStorage, DarnConnection, SyncMessage>>),
 
     /// Storage read error.
     #[error("storage read error: {0}")]

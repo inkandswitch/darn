@@ -3938,9 +3938,9 @@ dependencies = [
 
 [[package]]
 name = "sedimentree_core"
-version = "0.6.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb33c34e7f328a4eaebd58ed977b0f02cc7d4c4e2429925353409de39d3a78e6"
+checksum = "9c281bd496d44ca905b62332b7902b2ca3624acb0182825d3fadc2c50c8597b5"
 dependencies = [
  "async-lock",
  "bijou64",
@@ -3959,9 +3959,9 @@ dependencies = [
 
 [[package]]
 name = "sedimentree_fs_storage"
-version = "0.6.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "79c9ffbbfad63b25ce3cad4eb0a08434504256982f45bac7bf982220981ce506"
+checksum = "2da78b5898b030c4f3fa6af52ebce1f1cd9eee8e3163ec7878e5b84b962b6410"
 dependencies = [
  "async-lock",
  "future_form",
@@ -4308,9 +4308,9 @@ dependencies = [
 
 [[package]]
 name = "subduction_core"
-version = "0.7.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12e459b065da685bb54076869027f375397a0d4c8d42d55017f75a7c748d6377"
+checksum = "6f0dabeb1d35b441e048f1b70ab04d6858902f5d57ff8b12650e03e590d731b6"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -4331,9 +4331,9 @@ dependencies = [
 
 [[package]]
 name = "subduction_crypto"
-version = "0.2.1"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25a43b63da02da0bace1d04d489a7b8a61a2c91141fa4b012330f003372e02f3"
+checksum = "e441e97164b1b4243452c687e7a64e92f674e2dea131e66d61185cbf13cc10a1"
 dependencies = [
  "ed25519-dalek 2.2.0",
  "future_form",
@@ -4346,9 +4346,9 @@ dependencies = [
 
 [[package]]
 name = "subduction_iroh"
-version = "0.4.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49aeab44701f5f75256d926e636192b5ff24eea0ef9d7740757ce18c6929dfc6"
+checksum = "8720eba38232f48a31243be56f365aa9d856b53bd52f0326f22883ed4a38f89a"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -4366,9 +4366,9 @@ dependencies = [
 
 [[package]]
 name = "subduction_websocket"
-version = "0.7.0"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb1a1f09a1f56ffbcf3be019618f939f786b52864b7b55d3f66469b6dffcbd42"
+checksum = "2f3a3c99c5686226d83745e513257e74415938da9090a3effde8ccc8939acfda"
 dependencies = [
  "async-channel",
  "async-lock",

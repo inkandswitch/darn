@@ -221,6 +221,7 @@ mod tests {
                         fragments_received: fr,
                         commits_sent: cs,
                         fragments_sent: fs,
+                        remote_heads: Default::default(),
                     });
                     want_commits_recv += cr;
                     want_frags_recv += fr;
