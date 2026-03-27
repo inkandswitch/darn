@@ -44,7 +44,7 @@ use crate::{
     staged_update::{StageError, StagedUpdate},
     subduction::{
         self, AuthenticatedDarnConnection, DarnAddConnectionError, DarnIoError, DarnSubduction,
-        SubductionInitError,
+        DarnTransport, SubductionInitError,
     },
     sync_progress::{ApplyResult, SyncProgressEvent, SyncSummary},
     workspace::{id::WorkspaceId, layout::WorkspaceLayout},
@@ -1161,7 +1161,7 @@ impl Darn {
 
         let actual_peer_id = authenticated.peer_id();
         let authenticated = authenticated
-            .map(|c| crate::subduction::DarnTransport::WebSocket(Box::new(c)))
+            .map(|c| DarnTransport::WebSocket(Box::new(c)))
             .map(MessageTransport::new);
 
         Ok((authenticated, actual_peer_id))
@@ -1202,7 +1202,7 @@ impl Darn {
         let actual_peer_id = result.authenticated.peer_id();
         let authenticated = result
             .authenticated
-            .map(crate::subduction::DarnTransport::Iroh)
+            .map(DarnTransport::Iroh)
             .map(MessageTransport::new);
 
         Ok((authenticated, actual_peer_id))
@@ -1272,7 +1272,7 @@ impl Darn {
 
                             let authenticated = accept_result
                                 .authenticated
-                                .map(crate::subduction::DarnTransport::Iroh)
+                                .map(DarnTransport::Iroh)
                                 .map(MessageTransport::new);
 
                             if let Err(e) = self.subduction.add_connection(authenticated).await {
