@@ -2581,7 +2581,7 @@ fn info_human_workspace(dim: &Style) -> eyre::Result<()> {
 
 /// Connect to all global peers for standalone document operations.
 ///
-/// Returns the number of successfully connected peers.
+/// Returns the peer IDs of successfully connected peers.
 ///
 /// # Errors
 ///
