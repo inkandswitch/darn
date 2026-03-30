@@ -1,7 +1,7 @@
 [package]
 name = "darn_core"
 description = "Core library for darn - CRDT-backed filesystem management"
-version = "0.6.1"
+version = "0.6.2"
 
 authors.workspace = true
 categories.workspace = true

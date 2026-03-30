@@ -98,6 +98,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
+name = "arbitrary"
+version = "1.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
+dependencies = [
+ "derive_arbitrary",
+]
+
+[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -920,7 +929,7 @@ dependencies = [
 
 [[package]]
 name = "darn_cli"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "assert_cmd",
  "bs58",
@@ -950,7 +959,7 @@ dependencies = [
 
 [[package]]
 name = "darn_core"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "automerge",
  "blake3",
@@ -1019,6 +1028,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
 dependencies = [
  "powerfmt",
+]
+
+[[package]]
+name = "derive_arbitrary"
+version = "1.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e567bd82dcff979e4b03460c307b3cdc9e96fde3d73bed1496d2bc75d9dd62a"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -3962,10 +3982,11 @@ dependencies = [
 
 [[package]]
 name = "sedimentree_core"
-version = "0.7.1"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c281bd496d44ca905b62332b7902b2ca3624acb0182825d3fadc2c50c8597b5"
+checksum = "116966a937d4c4757569c9c37f52773b12eb489d167794ce38500c034c108082"
 dependencies = [
+ "arbitrary",
  "async-lock",
  "bijou64",
  "blake3",
@@ -3975,6 +3996,7 @@ dependencies = [
  "getrandom 0.2.17",
  "nonempty",
  "num-bigint",
+ "rand 0.8.5",
  "serde",
  "siphasher",
  "thiserror 2.0.18",
@@ -3983,9 +4005,9 @@ dependencies = [
 
 [[package]]
 name = "sedimentree_fs_storage"
-version = "0.7.1"
+version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2da78b5898b030c4f3fa6af52ebce1f1cd9eee8e3163ec7878e5b84b962b6410"
+checksum = "ea1ca49c8793cd819fb96de23857ba63b3bdebf082d840f73ae53fcc5cd5e1d7"
 dependencies = [
  "async-lock",
  "future_form",
@@ -4322,9 +4344,9 @@ dependencies = [
 
 [[package]]
 name = "subduction_core"
-version = "0.9.0"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f0dabeb1d35b441e048f1b70ab04d6858902f5d57ff8b12650e03e590d731b6"
+checksum = "ffa2021e714045ce4fee5488fdab5cd0eb672b51c0fd743117824c0b02179728"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -4345,9 +4367,9 @@ dependencies = [
 
 [[package]]
 name = "subduction_crypto"
-version = "0.3.1"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e441e97164b1b4243452c687e7a64e92f674e2dea131e66d61185cbf13cc10a1"
+checksum = "59bc89887c211393047144460bd070af471b5997774e2aaa3027458d2dd5773b"
 dependencies = [
  "ed25519-dalek 2.2.0",
  "future_form",
@@ -4360,9 +4382,9 @@ dependencies = [
 
 [[package]]
 name = "subduction_iroh"
-version = "0.5.1"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8720eba38232f48a31243be56f365aa9d856b53bd52f0326f22883ed4a38f89a"
+checksum = "caba1cfac952fc42bf2fab745ff7cd0becf9e15bf064ffaf7b549439f4fc8350"
 dependencies = [
  "async-channel",
  "async-lock",
@@ -4380,9 +4402,9 @@ dependencies = [
 
 [[package]]
 name = "subduction_websocket"
-version = "0.8.1"
+version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f3a3c99c5686226d83745e513257e74415938da9090a3effde8ccc8939acfda"
+checksum = "a713692ebc9c558d8e47b7f68bc32e601293498ddf8a5165c945f07c32c115cb"
 dependencies = [
  "async-channel",
  "async-lock",
