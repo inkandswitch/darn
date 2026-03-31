@@ -9,23 +9,25 @@
 class Darn < Formula
   desc "CLI for CRDT-backed file sync with automatic conflict resolution"
   homepage "https://github.com/inkandswitch/darn"
-  version "0.6.1"
+  version "0.6.2"
   license any_of: ["Apache-2.0", "MIT"]
 
+  nightly_tag = "v#{version}-nightly.2026-03-30"
+
   on_macos do
-    url "https://github.com/inkandswitch/darn/releases/download/v#{version}/darn-macos-aarch64-#{version}"
-    sha256 "33e1c57a85f46373bae183b254c2244e7fcecfeece2688707bdaf34e839367da"
+    url "https://github.com/inkandswitch/darn/releases/download/#{nightly_tag}/darn-macos-aarch64-#{version}"
+    sha256 "b0c71d449349f3c3a4312a056aa1a69f54660a18089a2e738f8750b5d19b2d4e"
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/inkandswitch/darn/releases/download/v#{version}/darn-linux-aarch64-musl-#{version}"
-      sha256 "4e3fadfedd8d5d5ae2542d771a067fba6ea433476bfb33790952f8653e205f72"
+      url "https://github.com/inkandswitch/darn/releases/download/#{nightly_tag}/darn-linux-aarch64-musl-#{version}"
+      sha256 "9ccdf7a6bf14845327ca64b4417e05d05798c12829f3afed63c55bcf4a046ea6"
     end
 
     on_intel do
-      url "https://github.com/inkandswitch/darn/releases/download/v#{version}/darn-linux-x86_64-musl-#{version}"
-      sha256 "bc4844352044f317e5507e1f7d8752ea4b33dea92cc7534b8282910b4b3543a5"
+      url "https://github.com/inkandswitch/darn/releases/download/#{nightly_tag}/darn-linux-x86_64-musl-#{version}"
+      sha256 "87cc6ed9f1715c3a7a57b54943e5c59929e23b8c6f493909dbc80f9371bd824e"
     end
   end
 
